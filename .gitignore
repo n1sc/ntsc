@@ -34,9 +34,7 @@ benchmarks/_build/
 
 # Local working notes and scratch files, never published
 /AGENTS.md
-/TODO.md
-/pkgman.md
-/ntroutine.md
+/plans/
 
 # Agents
 .claude/
