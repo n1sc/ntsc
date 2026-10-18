@@ -145,3 +145,58 @@ fun main() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A `float` reaching an `int` slot converts (saturating) instead of being
+/// emitted as a raw double. The type checker types a stdlib call like
+/// `time.now()` loosely enough that this reaches codegen, and passing the
+/// double straight through produced a module that failed to verify.
+#[test]
+fn a_float_argument_reaching_an_int_parameter_converts() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rewrite_dir = workspace.parent().unwrap().parent().unwrap();
+    let runtime_lib = rewrite_dir.join(
+        Path::new("target")
+            .join("debug")
+            .join(ntsc_codegen::runtime_lib_name()),
+    );
+    let source = r#"use time
+use fmt
+fun takes_int(int value) -> int {
+    return value + 1
+}
+fun zero_over() -> float {
+    return 0.0 / 0.0
+}
+fun main() {
+    say("" + takes_int(time.now()))
+    say(fmt.i64_to_str(takes_int(2.9)))
+    say("nan:" + fmt.i64_to_str(takes_int(zero_over())))
+}
+"#;
+    let dir = std::env::temp_dir().join("ntsc_float_arg_int_param");
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join(format!("floatarg.{}", ntsc_codegen::object_extension()));
+    let bin_path = dir.join("floatarg_ntsc_test");
+
+    ntsc_codegen::compile_source(source, ntsc_codegen::host_triple(), "floatarg", &dir)
+        .expect("compile_source failed");
+    ntsc_codegen::link_binary(&obj_path, &runtime_lib, &bin_path).expect("link_binary failed");
+    let output = std::process::Command::new(&bin_path)
+        .output()
+        .expect("failed to run binary");
+    assert!(
+        output.status.success(),
+        "binary exited with non-zero status"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut lines = stdout.lines();
+    let first: i64 = lines.next().expect("one line").parse().expect("a number");
+    // `time.now()` is milliseconds since the epoch, so the sum is large.
+    assert!(first > 1_700_000_000_000, "unexpected value: {first}");
+    // The literal truncates 2.9 to 2 before the call.
+    assert_eq!(lines.next(), Some("3"), "unexpected output:\n{stdout}");
+    // NaN converts to 0, as the reference documents.
+    assert_eq!(lines.next(), Some("nan:1"), "unexpected output:\n{stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

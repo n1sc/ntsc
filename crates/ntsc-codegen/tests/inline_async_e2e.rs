@@ -351,3 +351,90 @@ fn timeout_catchable_error_e2e() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn await_in_control_flow_e2e() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rewrite_dir = workspace.parent().unwrap().parent().unwrap();
+    let runtime_lib = rewrite_dir.join(
+        Path::new("target")
+            .join("debug")
+            .join(ntsc_codegen::runtime_lib_name()),
+    );
+    if !runtime_lib.exists() {
+        let status = std::process::Command::new("cargo")
+            .args(["build", "-p", "ntsc-runtime"])
+            .current_dir(rewrite_dir)
+            .status()
+            .expect("failed to run cargo");
+        assert!(status.success(), "failed to build ntsc-runtime");
+    }
+
+    let source = r#"async fun value() -> int {
+    return 7
+}
+
+async fun fail() {
+    await async.sleep(1)
+    throw "boom"
+}
+
+async fun main() -> int {
+    var int x = 0
+    var int status = 0
+    if (true) {
+        x = await value()
+    }
+    if (x != 7) {
+        status = 1
+    }
+    var int i = 0
+    while (i < 2) {
+        var int local = await value()
+        i = i + 1
+    }
+    if (i != 2) {
+        status = 1
+    }
+    try {
+        await fail()
+    } catch (e) {
+        var int ignored = await value()
+        say("caught: " + e)
+    }
+    if (status == 0) {
+        return status
+    }
+    return 1
+}
+"#;
+    let dir = std::env::temp_dir().join("ntsc_await_control_flow_e2e_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join(format!(
+        "await_control_flow.{}",
+        ntsc_codegen::object_extension()
+    ));
+    let bin_path = dir.join("await_control_flow_ntsc_test");
+
+    ntsc_codegen::compile_source(
+        source,
+        ntsc_codegen::host_triple(),
+        "await_control_flow",
+        &dir,
+    )
+    .expect("compile_source failed");
+    ntsc_codegen::link_binary(&obj_path, &runtime_lib, &bin_path).expect("link_binary failed");
+
+    let output = std::process::Command::new(&bin_path)
+        .output()
+        .expect("failed to run binary");
+    assert!(
+        output.status.success(),
+        "binary exited with non-zero status: {:?}\nstderr: {:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "caught: boom\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

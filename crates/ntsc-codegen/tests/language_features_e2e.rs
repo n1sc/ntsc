@@ -326,3 +326,70 @@ fun main() {
     assert!(ok, "program failed: {stderr}");
     assert_eq!(stdout, "color=0\n");
 }
+
+/// `&&` and `||` short-circuit: the right operand is not evaluated when the
+/// left one already decides the result. An out-of-bounds read guarded by a
+/// false left operand must not trap, and a call on that side must not run.
+#[test]
+fn logical_operators_short_circuit() {
+    let source = r#"class Counter {
+    var int calls
+    fun init() {
+        this.calls = 0
+    }
+    fun bump() -> bool {
+        this.calls = this.calls + 1
+        return true
+    }
+}
+
+fun main() {
+    var xs = [10, 20]
+    if (false && xs[99] == 5) {
+        say("and-wrong")
+    } else {
+        say("and-skipped")
+    }
+    if (true || xs[99] == 5) {
+        say("or-took")
+    } else {
+        say("or-wrong")
+    }
+    if (1 < 2 && 3 < 4) {
+        say("and-true")
+    }
+    var c = Counter()
+    var i = 0
+    while (i < 5 && c.bump()) {
+        i = i + 1
+        if (i == 3) {
+            break
+        }
+    }
+    say("calls=" + c.calls)
+}
+"#;
+    let (ok, stdout, stderr) = compile_run("short_circuit", source);
+    assert!(ok, "program failed: {stderr}");
+    assert_eq!(stdout, "and-skipped\nor-took\nand-true\ncalls=3\n");
+}
+
+/// A ternary whose branches are string literals: the literal's own handle
+/// blocks must not be mistaken for the branch's predecessor, or the phi
+/// names blocks that are not its predecessors and the module fails to verify.
+#[test]
+fn ternary_with_string_literal_branches() {
+    let source = r#"fun main() {
+    var flag = true
+    say(flag ? "yes" : "no")
+    var other = false
+    say(other ? "yes" : "no")
+    var text = flag ? "a" : "b"
+    say(text)
+    say("" + (flag ? 1 : 2))
+}
+"#;
+    let (ok, stdout, stderr) = compile_run("ternary_string_literals", source);
+    assert!(ok, "program failed: {stderr}");
+    assert_eq!(stdout, "yes\nno\na\n1\n");
+}

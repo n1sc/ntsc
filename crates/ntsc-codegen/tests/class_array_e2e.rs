@@ -153,3 +153,30 @@ fun main() {
         "cdr.anna\ncdr.bob\ndone"
     );
 }
+
+#[test]
+fn fresh_pushed_class_element_keeps_owned_string_field() {
+    let source = r#"use arrays
+class Line {
+    var string text
+
+    fun init(string t) {
+        this.text = "[" + t + "]";
+    }
+}
+
+fun main() {
+    var seed = Line("seed");
+    var lines = [Line("first")];
+    arrays.push(lines, copy(seed));
+    for (var line in lines) {
+        say(line.text);
+    }
+    say("done")
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "fresh_push_string_field"),
+        "[first]\n[seed]\ndone"
+    );
+}

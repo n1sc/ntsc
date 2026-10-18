@@ -186,24 +186,45 @@ fun main() {
 }
 
 #[test]
-fn a_function_with_an_empty_body_links_and_returns_a_default() {
-    // The call site is emitted against the symbol, so an empty body still needs
-    // a definition or the program fails to link.
+fn a_void_function_with_an_empty_body_links() {
     assert_runs(
         "empty_bodies",
         r#"fun nothing() { }
 
-fun zero() -> int { }
-
-fun blank() -> string { }
-
 fun main() {
     nothing()
-    say("i " + zero())
-    say("s [" + blank() + "]")
+    say("done")
 }
 "#,
-        "i 0\ns []",
+        "done",
+    );
+}
+
+#[test]
+fn a_non_void_empty_body_is_rejected() {
+    let source = "fun zero() -> int { }";
+    let tokens = ntsc_lexer::tokenize(source);
+    let program = ntsc_parser::parse(&tokens).expect("parse failed");
+    let dir = std::env::temp_dir().join("ntsc_scoping_refs_empty_non_void");
+    std::fs::create_dir_all(&dir).unwrap();
+    let result = ntsc_codegen::compile_program(
+        &program,
+        ntsc_codegen::host_triple(),
+        inkwell::OptimizationLevel::None,
+        "empty_non_void",
+        &dir,
+        false,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let errors = match result {
+        Err(ntsc_codegen::CodegenError::TypeCheck(errors)) => errors,
+        other => panic!("expected a missing-return type error, got {other:?}"),
+    };
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("may fall through")),
+        "got: {errors:?}"
     );
 }
 

@@ -390,3 +390,90 @@ fun main() -> int {
         "error must explain the unbounded copy, got: {err}"
     );
 }
+
+/// Regression: `copy(f())` where `f` returns a fresh owned string cloned the
+/// result but never dropped the original fresh temporary, so every evaluation
+/// leaked one string. `emit_copy` now drops the fresh source after cloning it.
+#[test]
+fn copying_a_fresh_call_result_drops_the_source() {
+    let source = r#"use strings
+fun strip_v(view string version) -> string {
+    if (strings.starts_with(copy(version), "v")) {
+        return strings.substring(copy(version), 1, -1)
+    }
+    return copy(version)
+}
+
+fun main() -> int {
+    var n = 0
+    while (n < 3) {
+        var clean = copy(strip_v("v1.2.3"))
+        n = n + 1
+    }
+    say("done")
+    return 0
+}
+"#;
+    assert_clean("copy_fresh_call_result", source, "done");
+}
+
+/// Regression: reassigning a class-typed field (`outer.item = Inner()`)
+/// overwrote the field without dropping the instance it already held, leaking
+/// that instance and its owned array. `store_into_field` now reclaims a
+/// replaced class field the same way it does strings and arrays.
+#[test]
+fn reassigning_a_class_field_reclaims_the_old_instance() {
+    let source = r#"use arrays
+class Inner {
+    var array[int] data
+    fun init() {
+        this.data = [1, 2, 3]
+    }
+}
+
+class Outer {
+    var Inner item
+    fun init() {
+        this.item = Inner()
+    }
+}
+
+fun main() -> int {
+    var o = Outer()
+    o.item = Inner()
+    say("len: " + arrays.length(o.item.data))
+    return 0
+}
+"#;
+    assert_clean("reassign_class_field", source, "len: 3");
+}
+
+/// Regression: `expr_is_fresh` decided whether a call was fresh by checking
+/// whether the callee's LLVM body had been emitted yet, so a forward reference
+/// (callee defined later in the module) was treated as non-fresh and its owned
+/// return leaked. It now consults the stable user-function registry, so a fresh
+/// call consumed by string concatenation is dropped regardless of emission
+/// order.
+#[test]
+fn forward_referenced_call_result_is_dropped() {
+    let source = r#"fun caller() -> int {
+    var n = 0
+    while (n < 3) {
+        var s = "[" + make_tag() + "]"
+        n = n + 1
+    }
+    return 0
+}
+
+fun make_tag() -> string {
+    return "tag" + "!"
+}
+
+fun main() -> int {
+    var r = caller()
+    say("done")
+    return 0
+}
+"#;
+    assert_clean("forward_ref_fresh_call", source, "done");
+}

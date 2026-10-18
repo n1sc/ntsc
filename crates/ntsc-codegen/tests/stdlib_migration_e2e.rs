@@ -283,3 +283,36 @@ fun main() {
         "no leaks expected: {stderr}"
     );
 }
+
+/// A stdlib call with too few arguments must be rejected at compile time.
+/// Regression: the emitter zipped the provided values against the runtime
+/// function's fixed C signature, so the truncated call reached LLVM and
+/// failed module verification with an unfollowable error instead.
+#[test]
+fn stdlib_call_with_too_few_arguments_is_an_error() {
+    let err = compile_error(
+        &workspace_root(),
+        "err_too_few_args",
+        "use strings\nfun main() {\n    say(strings.substring(\"abc\", 1))\n}\n",
+    );
+    assert!(
+        err.contains("`strings.substring` expects 3 arguments, got 2"),
+        "expected an arity error, got: {err}"
+    );
+}
+
+/// Too many arguments must be rejected as well: they used to be silently
+/// dropped by the same zip, so the program compiled and ran with the extra
+/// values ignored.
+#[test]
+fn stdlib_call_with_too_many_arguments_is_an_error() {
+    let err = compile_error(
+        &workspace_root(),
+        "err_too_many_args",
+        "use strings\nfun main() {\n    say(strings.substring(\"abc\", 1, 2, 3))\n}\n",
+    );
+    assert!(
+        err.contains("`strings.substring` expects 3 arguments, got 4"),
+        "expected an arity error, got: {err}"
+    );
+}

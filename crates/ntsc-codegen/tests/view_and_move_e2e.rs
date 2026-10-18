@@ -303,3 +303,39 @@ fn use_after_move_is_an_error() {
         "expected a use-after-move error, got: {err}"
     );
 }
+
+/// `copy()` of a borrowed array element must materialize an independent
+/// owned copy: the callee's drop of the copy must not reclaim the array's
+/// own element (use-after-free on later reads of the same element).
+#[test]
+fn copy_of_borrowed_element_does_not_alias_it() {
+    let source = r#"use arrays
+use strings
+fun check(view string ch) -> bool {
+    var c = copy(ch)
+    return c == "hello"
+}
+fun main() {
+    var array[string] arr = arrays.fill("", 0)
+    arrays.push(arr, "hello")
+    if (check(arr[0])) {
+        say("first-ok")
+    } else {
+        say("first-bad")
+    }
+    say("len:" + strings.length(arr[0]))
+    if (arr[0] == "hello") {
+        say("second-ok")
+    } else {
+        say("second-bad")
+    }
+}
+"#;
+    let (ok, stdout, stderr) = compile_run(&workspace_root(), "copy_borrowed_elem", source);
+    assert!(ok, "binary must exit 0, stderr: {stderr}");
+    assert_eq!(stdout.trim(), "first-ok\nlen:5\nsecond-ok");
+    assert!(
+        !stderr.contains("memory leak detected"),
+        "no leaks expected: {stderr}"
+    );
+}

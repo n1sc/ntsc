@@ -176,6 +176,63 @@ async fun main() -> int {
     );
 }
 
+#[test]
+fn async_goroutine_drops_do_not_destroy_string_literals() {
+    let source = r#"
+async fun worker(string message, chan[int] done) {
+    say(message)
+    1 |> done
+}
+
+async fun main() -> int {
+    var chan[int] done = chan.new(2)
+    go worker("same literal", done)
+    x <| done
+    go worker("same literal", done)
+    y <| done
+    if (x == 1 && y == 1) {
+        say("literal survived")
+    }
+    return 0
+}
+"#;
+    let (stdout, stderr, output) = build_and_run(source, "ntroutine_literal_reuse");
+    assert_clean(
+        &stdout,
+        &stderr,
+        &output,
+        &["same literal", "literal survived"],
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| *line == "same literal")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn recursive_detached_goroutines_reclaim_completed_futures() {
+    let source = r#"
+async fun poll_loop(int remaining) {
+    await async.sleep(1)
+    if (remaining > 1) {
+        go poll_loop(remaining - 1)
+    }
+}
+
+async fun main() -> int {
+    go poll_loop(20)
+    await async.sleep(100)
+    say("recursive loop completed")
+    return 0
+}
+"#;
+    let (stdout, stderr, output) = build_and_run(source, "ntroutine_recursive_detached");
+    assert_clean(&stdout, &stderr, &output, &["recursive loop completed"]);
+}
+
 /// A server whose clients connect and stay silent for a while before sending.
 /// `recv_line_async` must let each handler park instead of pinning a worker, so
 /// 32 concurrent slow clients are all served; with a blocking read only four
@@ -191,12 +248,18 @@ fn awaitable_recv_line_serves_many_slow_clients() {
         port
     };
     let clients = std::thread::spawn(move || {
-        // The NTSC server compiles and starts while this thread waits; connect
-        // attempts before the bind would be refused.
-        std::thread::sleep(std::time::Duration::from_millis(1200));
         let mut handles = Vec::new();
         for i in 0..32 {
-            let stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            let stream = loop {
+                match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => break stream,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Err(error) => panic!("connect: {error}"),
+                }
+            };
             handles.push(std::thread::spawn(move || {
                 use std::io::{BufRead, BufReader, Write};
                 let mut stream = stream;
