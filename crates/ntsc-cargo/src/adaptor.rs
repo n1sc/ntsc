@@ -9640,7 +9640,9 @@ mod tests {
         let manifest = fs::read_to_string(dir.join("Cargo.toml")).unwrap();
         let parsed: toml::Value = manifest.parse().expect("generated manifest parses as TOML");
         assert_eq!(
-            parsed["dependencies"]["fake"]["path"].as_str().map(Path::new),
+            parsed["dependencies"]["fake"]["path"]
+                .as_str()
+                .map(Path::new),
             Some(cached_src.as_path()),
             "adaptor path-depends on the cached copy"
         );
