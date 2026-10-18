@@ -2,18 +2,16 @@ use std::env;
 use std::fs;
 use std::io::{BufRead, IsTerminal};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use inkwell::OptimizationLevel;
 use ntsc_ast::stmt::{Program, Stmt};
 use ntsc_codegen::SUMMARY_MARKER;
 use ntsc_diag::{DiagConfig, Diagnostic, SourceBuffer, SourceMap, Writer, diagnostics_to_json};
 
-// Project version in the 26.0 scheme: <year>.<release>.<patch><stage>,
-// where `a` = alpha, `b` = beta, and stable releases omit the suffix.
-// Cargo cannot represent this, so it is defined here rather than derived
-// from CARGO_PKG_VERSION (which carries the semver projection "26.0.0").
-pub const NTSC_VERSION: &str = "26.0.0b";
+// Project version follows semantic versioning. This remains 0.0.0 until
+// the first public release.
+pub const NTSC_VERSION: &str = "0.0.0";
 
 // ANSI escape codes for the CLI's own output. Follows the same colour
 // conventions as ntsc-diag: CLICOLOR_FORCE, NO_COLOR, CLICOLOR=0, TERM=dumb.
@@ -65,10 +63,14 @@ fn main() {
         Command::Build => cmd_build(opts.release, false, opts.json).map(|_| ()),
         Command::Test => cmd_test(opts.release, opts.json).map(|_| ()),
         Command::Run => cmd_run(opts.release, opts.json).map(|_| ()),
-        Command::Clean => cmd_clean(),
+        Command::Clean(args) => cmd_clean(&args),
         Command::Watch => cmd_watch(opts.release, opts.json),
         Command::Graph => cmd_graph().map(|_| ()),
         Command::Pkg(args) => cmd_pkg(&args),
+        Command::Cargo(args) => cmd_cargo(&args),
+        Command::Lsp => {
+            std::process::exit(ntsc_lsp::run_stdio());
+        }
     };
 
     if let Err(e) = result {
@@ -154,10 +156,12 @@ enum Command {
     Build,
     Test,
     Run,
-    Clean,
+    Clean(Vec<String>),
     Watch,
     Graph,
     Pkg(Vec<String>),
+    Cargo(Vec<String>),
+    Lsp,
 }
 
 /// Parse the command line, accepting flags (`--release`, `--debug`,
@@ -168,10 +172,20 @@ fn parse_args() -> Result<(Command, CliOptions), String> {
     let mut command = None;
     let mut init_name = None;
     let mut pkg_args = Vec::new();
+    let mut cargo_args = Vec::new();
+    let mut clean_args = Vec::new();
 
     for arg in args {
         if command.as_deref() == Some("pkg") {
             pkg_args.push(arg);
+            continue;
+        }
+        if command.as_deref() == Some("cargo") {
+            cargo_args.push(arg);
+            continue;
+        }
+        if command.as_deref() == Some("clean") {
+            clean_args.push(arg);
             continue;
         }
         match arg.as_str() {
@@ -181,7 +195,8 @@ fn parse_args() -> Result<(Command, CliOptions), String> {
             "--help" | "-h" => return Ok((Command::Help, opts)),
             "--version" | "-V" => return Ok((Command::Version, opts)),
             "version" => return Ok((Command::Version, opts)),
-            "init" | "build" | "test" | "run" | "clean" | "watch" | "graph" | "pkg" => {
+            "init" | "build" | "test" | "run" | "clean" | "watch" | "graph" | "pkg" | "cargo"
+            | "lsp" => {
                 if command.is_some() {
                     return Err(format!("unexpected argument `{arg}`"));
                 }
@@ -203,10 +218,12 @@ fn parse_args() -> Result<(Command, CliOptions), String> {
         "build" => Command::Build,
         "test" => Command::Test,
         "run" => Command::Run,
-        "clean" => Command::Clean,
+        "clean" => Command::Clean(clean_args),
         "watch" => Command::Watch,
         "graph" => Command::Graph,
         "pkg" => Command::Pkg(pkg_args),
+        "cargo" => Command::Cargo(cargo_args),
+        "lsp" => Command::Lsp,
         _ => unreachable!("validated above"),
     };
     Ok((command, opts))
@@ -233,12 +250,17 @@ fn print_usage() {
     );
     eprintln!("{}", row("test", "Discover and run `test` blocks"));
     eprintln!("{}", row("run", "Build and execute"));
-    eprintln!("{}", row("clean", "Remove the build/ directory"));
+    eprintln!("{}", row("clean", "Remove build/ (or caches with --cache)"));
     eprintln!("{}", row("watch", "Rebuild when sources change"));
     eprintln!("{}", row("pkg [args]", "Run the package manager"));
+    eprintln!("{}", row("cargo [args]", "Manage Rust crate dependencies"));
     eprintln!(
         "{}",
         row("graph", "Print the module dependency graph as DOT")
+    );
+    eprintln!(
+        "{}",
+        row("lsp", "Start the language server (LSP over stdio)")
     );
     eprintln!();
     eprintln!("{}", bold("Options:"));
@@ -263,6 +285,8 @@ fn print_version() {
     println!();
     println!("LLVM   {}", ntsc_codegen::llvm_version());
     println!("Host   {}", ntsc_codegen::host_triple());
+    println!("Build ID   {}", env!("NTSC_BUILD_ID"));
+    println!("Build date {}", env!("NTSC_BUILD_DATE"));
     println!(
         "Build  {}",
         if cfg!(debug_assertions) {
@@ -374,6 +398,18 @@ fn cmd_build(release: bool, test_mode: bool, json: bool) -> Result<PathBuf, CliE
     let loaded = ntsc_build::modules::load_program(&entry_path).map_err(load_error)?;
     let load_time = load_start.elapsed();
 
+    // Experimental Rust-crate imports are opt-in: without the toggle the
+    // build stops before resolution, adaptor generation, or codegen run.
+    if !config.experimental_rust_modules && ntsc_build::uses_rust_crates(&loaded.program) {
+        return Err(CliError::Plain(
+            "Rust crate imports (`use @crate`) are an experimental feature and are disabled \
+             by default. Opt in with:\n\n\
+             [experimental]\n\
+             rust_modules = true"
+                .to_string(),
+        ));
+    }
+
     // Run name resolution up front so undefined-name errors get the
     // `NTSC-E0101` code (and any "did you mean" suggestions).
     if let Err(errors) = ntsc_typeck::resolve_program(&loaded.program) {
@@ -404,8 +440,50 @@ fn cmd_build(release: bool, test_mode: bool, json: bool) -> Result<PathBuf, CliE
         }
     }
 
-    // Compile source → object file.
+    // Rust-crate dependencies: resolve, fetch, and emit every adaptor
+    // *before* codegen so the export manifests exist — codegen reads them
+    // to type Rust-call returns and enable method syntax on object
+    // handles. The archives are built after codegen (only linking needs
+    // them), through the same cached call.
+    let manifest = ntsc_cargo::manifest::Manifest::read(&cwd.join("neutron.toml"))
+        .map_err(|e| CliError::Plain(e.to_string()))?;
+    if !manifest.rust_deps.is_empty() {
+        let cache = ntsc_cargo::cache::CacheRoot::from_env();
+        let resolution = ntsc_cargo::resolve::resolve_cached(&cache, &cwd, &manifest)
+            .map_err(|e| CliError::Plain(e.to_string()))?;
+        let colour = colour_on(std::io::stdout().is_terminal());
+        let total = resolution.deps.len();
+        if !json && total > 0 {
+            let noun = if total == 1 { "adaptor" } else { "adaptors" };
+            println!("  {} {total} {noun}:", paint("Generating", CYAN, colour));
+        }
+        for (index, dep) in resolution.deps.iter().enumerate() {
+            // Announce the crate before the slow fetch + public-API scan, so
+            // a large dependency (serenity et al.) never looks like a hang.
+            if !json {
+                println!(
+                    "    [{:>width$}/{total}] {} v{}",
+                    index + 1,
+                    paint(&dep.name, CYAN, colour),
+                    dep.version,
+                    width = total.to_string().len(),
+                );
+            }
+            ntsc_cargo::resolve::materialize_dep(
+                &cache,
+                &cwd,
+                &manifest,
+                dep,
+                &resolution.registry_dir,
+            )
+            .map_err(|e| CliError::Plain(e.to_string()))?;
+        }
+    }
+
+    // Compile source → object file. Rust-call result types come from the
+    // export manifests generated by `ntsc cargo install`/`ntsc build`.
     let codegen_start = Instant::now();
+    ntsc_codegen::emit::set_rust_export_types(&cwd);
     let obj_path = ntsc_codegen::compile_program(
         &loaded.program,
         &config.target,
@@ -424,9 +502,49 @@ fn cmd_build(release: bool, test_mode: bool, json: bool) -> Result<PathBuf, CliE
     // what is used" path.
     let needed_features = detect_runtime_features(&loaded.program);
     let runtime_lib = find_runtime_lib(&cwd, &needed_features, release)?;
+
+    // Rust-crate dependencies: make sure every [rust-deps] crate is
+    // resolved, fetched, and its adaptor built, then link the compiled
+    // adaptor archives beside the runtime.
+    let adaptor_artifacts = rust_dep_archives(&cwd, release)?;
+    let mut native_link_args = adaptor_artifacts.native_link_args.clone();
+    native_link_args.extend(config.ffi_search_paths.iter().map(|search_path| {
+        let path = Path::new(search_path);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        #[cfg(target_os = "windows")]
+        {
+            format!("/LIBPATH:{}", path.display())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            format!("-L{}", path.display())
+        }
+    }));
+    native_link_args.extend(config.ffi_libraries.iter().map(|library| {
+        #[cfg(target_os = "windows")]
+        {
+            format!("/DEFAULTLIB:{library}")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            format!("-l{library}")
+        }
+    }));
+    native_link_args.sort();
+    native_link_args.dedup();
     let output_path = out_dir.join(ntsc_codegen::with_executable_extension(&config.output));
     let link_start = Instant::now();
-    ntsc_codegen::link_binary(&obj_path, &runtime_lib, &output_path)?;
+    ntsc_codegen::link_binary_with_extras(
+        &obj_path,
+        &runtime_lib,
+        &adaptor_artifacts.archives,
+        &native_link_args,
+        &output_path,
+    )?;
     let link_time = link_start.elapsed();
 
     if !json {
@@ -620,14 +738,97 @@ fn cmd_run(release: bool, json: bool) -> Result<PathBuf, CliError> {
     Ok(output_path)
 }
 
-/// Remove the `build/` directory.
-fn cmd_clean() -> Result<(), CliError> {
+/// Remove project output, global adaptor caches, or Neutron scratch trees.
+fn cmd_clean(args: &[String]) -> Result<(), CliError> {
+    let mut clean_cache = false;
+    let mut clean_tmp = false;
+    let mut dry_run = false;
+    let mut force_rebuild = false;
+    let mut max_age = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--cache" => clean_cache = true,
+            "--tmp" => clean_tmp = true,
+            "--dry-run" => dry_run = true,
+            "--force-rebuild" => force_rebuild = true,
+            "--max-age" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| CliError::Plain("--max-age requires a number of days".into()))?;
+                max_age =
+                    Some(value.parse::<u64>().map_err(|_| {
+                        CliError::Plain("--max-age requires a number of days".into())
+                    })?);
+            }
+            other => return Err(CliError::Plain(format!("unknown clean option `{other}`"))),
+        }
+        index += 1;
+    }
+
+    if clean_cache {
+        let cache = ntsc_cargo::cache::CacheRoot::from_env();
+        ntsc_cargo::cache::gc(&cache, dry_run, max_age, force_rebuild)
+            .map_err(|e| CliError::Plain(e.to_string()))?;
+        if !dry_run {
+            println!(
+                "Cleaned Neutron Rust caches under {}",
+                cache.path().display()
+            );
+        }
+    }
+    if clean_tmp {
+        clean_ntsc_tmp(dry_run)?;
+    }
+    if clean_cache || clean_tmp {
+        return Ok(());
+    }
+
     let cwd = env::current_dir()?;
     let build_dir = cwd.join("build");
     if build_dir.exists() {
         fs::remove_dir_all(&build_dir)?;
     }
     println!("Removed {}", build_dir.display());
+    Ok(())
+}
+
+fn clean_ntsc_tmp(dry_run: bool) -> Result<(), CliError> {
+    let tmp = Path::new("/tmp");
+    let entries = fs::read_dir(tmp)?;
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(24 * 60 * 60))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !name.starts_with("ntsc_") {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(SystemTime::now());
+        if modified >= cutoff {
+            continue;
+        }
+        if dry_run {
+            println!("would remove {}", path.display());
+        } else if path.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+        removed += 1;
+    }
+    if !dry_run {
+        println!("Removed {removed} stale Neutron temporary trees");
+    }
     Ok(())
 }
 
@@ -678,6 +879,39 @@ fn cmd_graph() -> Result<(), CliError> {
     }
     println!("}}");
     Ok(())
+}
+
+/// Manage Rust-crate dependencies: `ntsc cargo install <crate>` adds a
+/// crate to `[rust-deps]`, resolves it through the real cargo, and emits
+/// the adaptor that `ntsc build` links in.
+fn cmd_cargo(args: &[String]) -> Result<(), CliError> {
+    let cwd = env::current_dir()?;
+    ntsc_cargo::run(args, &cwd).map_err(|e| CliError::Plain(e.to_string()))
+}
+
+/// Resolve, fetch, and build the project's `[rust-deps]` adaptors.
+///
+/// A project with no `[rust-deps]` section (the overwhelmingly common
+/// case) skips the whole cargo dance: the manifest is read, found empty,
+/// and no archives are produced.
+fn rust_dep_archives(
+    project_dir: &Path,
+    release: bool,
+) -> Result<ntsc_cargo::build::AdaptorArtifacts, CliError> {
+    let manifest_path = project_dir.join("neutron.toml");
+    let manifest = ntsc_cargo::manifest::Manifest::read(&manifest_path)
+        .map_err(|e| CliError::Plain(e.to_string()))?;
+    if manifest.rust_deps.is_empty() {
+        return Ok(ntsc_cargo::build::AdaptorArtifacts::default());
+    }
+
+    let cache = ntsc_cargo::cache::CacheRoot::from_env();
+    // Adaptors were already resolved, fetched, and emitted earlier in
+    // `cmd_build` — before codegen, so the export manifests exist. This step
+    // only compiles those generated crates into linkable archives; the cached
+    // adaptors keep the whole build fast on rebuild.
+    ntsc_cargo::build::build_adaptors_with_native_links(&cache, project_dir, release)
+        .map_err(|e| CliError::Plain(e.to_string()))
 }
 
 /// Run the package-manager executable installed beside `ntsc`.
@@ -753,6 +987,7 @@ fn detect_runtime_features(program: &Program) -> Vec<String> {
         if let Stmt::Use {
             library,
             is_file_path: false,
+            is_rust: false,
             ..
         } = stmt
         {
@@ -805,7 +1040,13 @@ fn find_runtime_lib(
 
     let rewrite_dir = match find_rewrite_dir(project_dir)?.or_else(find_rewrite_dir_from_exe) {
         Some(dir) if dir.exists() => dir,
-        _ => return Err(runtime_not_found_error(lib_name).into()),
+        // An installed binary with a shipped runtime archive can still
+        // build projects outside the workspace: the archive carries every
+        // stdlib module, so any feature set links against it.
+        _ => {
+            return find_installed_runtime()
+                .ok_or_else(|| runtime_not_found_error(lib_name).into());
+        }
     };
 
     let profile_dir = if release { "release" } else { "debug" };

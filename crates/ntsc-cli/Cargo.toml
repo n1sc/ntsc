@@ -17,4 +17,6 @@ ntsc-build = { path = "../ntsc-build" }
 ntsc-codegen = { path = "../ntsc-codegen" }
 ntsc-typeck = { path = "../ntsc-typeck" }
 ntsc-diag = { path = "../ntsc-diag" }
+ntsc-cargo = { path = "../ntsc-cargo" }
+ntsc-lsp = { path = "../ntsc-lsp" }
 inkwell = { version = "0.9.0", default-features = false, features = ["target-x86", "target-aarch64"] }
