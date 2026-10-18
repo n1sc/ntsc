@@ -26,6 +26,8 @@ Thumbs.db
 
 # ntsc-compiled example binaries
 examples/**/build/
+examples/c_ffi/native/*.a
+examples/c_ffi/native/*.o
 benchmarks/_build/
 
 # Coverage / profiling artifacts
@@ -35,6 +37,7 @@ benchmarks/_build/
 # Local working notes and scratch files, never published
 /AGENTS.md
 /plans/
+prob/
 
 # Agents
 .claude/
@@ -43,3 +46,6 @@ benchmarks/_build/
 # Python benchmark harness
 **/__pycache__/
 *.pyc
+
+# Generated Rust-crate adaptors and export manifests
+/.ntsc
