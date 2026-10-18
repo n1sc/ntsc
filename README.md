@@ -111,11 +111,18 @@ Install a prebuilt binary from the [Releases](https://github.com/n1sc/ntsc/relea
 | --- | --- | --- |
 | Debian / Ubuntu | `.deb` | `sudo dpkg -i ntsc_<version>_amd64.deb` |
 | Fedora / RHEL | `.rpm` | `sudo dnf install ntsc-<version>-1.x86_64.rpm` |
+| Arch Linux | AUR | `yay -S ntsc-bin` (prebuilt) or `yay -S ntsc` (from source) |
 | Arch Linux | `PKGBUILD` | `makepkg -si` |
+| macOS | Homebrew | `brew install n1sc/ntsc/ntsc` |
 | macOS | `.dmg` | Drag `ntsc.app` into `/Applications` |
+| Windows | Scoop | `scoop bucket add n1sc https://github.com/n1sc/scoop-ntsc`, then `scoop install ntsc` |
 | Windows | `.msi` | Run the installer; adds `ntsc` to `PATH` |
 
-The compiler links LLVM 22 dynamically, so the Linux packages declare a dependency on the system LLVM runtime (`libLLVM-22` / `llvm-libs`), and the macOS and Windows installers bundle the LLVM libraries they need. See [`workflows/`](workflows/README.md) for the full recipe documentation.
+The Homebrew tap, the Scoop bucket and the AUR packages are updated by the
+release workflow on every tag, so `brew upgrade`, `scoop update` and
+`yay -Syu` keep `ntsc` current without reinstalling by hand.
+
+The compiler links LLVM 22 dynamically, so the Linux packages declare a dependency on the system LLVM runtime (`libLLVM-22` / `llvm-libs`), and the macOS and Windows installers bundle the LLVM libraries they need. See [`.github/packaging/`](.github/packaging/README.md) for the full recipe documentation.
 
 Or build from source:
 
@@ -180,7 +187,6 @@ ntsc/
 │   ├── ntsc-cli            The `ntsc` binary
 │   └── ntsc-diag           Diagnostic rendering
 ├── benchmarks/             NTSC vs Rust benchmark suite
-├── workflows/              Local installer recipes (.deb, .rpm, PKGBUILD, .dmg, .msi)
 └── docs/                   User guide and reference
 ```
 

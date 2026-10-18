@@ -5,18 +5,17 @@ the `ntsc` compiler. CI (`.github/workflows/release.yml`) builds the release
 binary on each platform and invokes these scripts whenever a `v*` tag is
 pushed, then attaches the artifacts to the GitHub Release.
 
-These recipes are **not versioned** (see `/workflows` in `.gitignore`): like
-the root-level CI workflow, they live only on this machine and are kept out of
-the repository. Commit them if you want the release job to work from a fresh
-checkout.
+These recipes are versioned with the rest of the repository. The release job
+checks out the tree on a fresh runner and runs them from there, so a change
+here only takes effect once it is merged.
 
 The compiler links LLVM 22 **dynamically**. The native Linux packages built
 from source (`.deb`, `.rpm`, and the AUR `PKGBUILD`) declare a runtime
 dependency on the system LLVM; the macOS `.dmg` and the Windows `.msi` ship the
 LLVM libraries alongside the binary. The portable `.tar.gz` archives (one per
-platform) and the prebuilt Arch package (`.pkg.tar.zst`) go further and bundle
-the LLVM libraries **and** the ntsc runtime, so they run with no LLVM install
-and no toolchain.
+platform and CPU arch) and the prebuilt Arch package (`.pkg.tar.zst`) go further
+and bundle the LLVM libraries **and** the ntsc runtime, so they run with no LLVM
+install and no toolchain.
 
 Every package — native or tarball — ships `libntsc_runtime.a`, the static
 archive `ntsc build` links each NTSC program against. Beside `ntsc` itself,
@@ -40,7 +39,12 @@ packaging/
 │   ├── make-arch-pkg.sh     prebuilt .pkg.tar.zst (wraps the tarball; makepkg)
 │   ├── debian/control       Debian/Ubuntu package metadata (@VERSION@)
 │   ├── fedora/ntsc.spec     Fedora/RHEL spec file (@VERSION@)
-│   └── arch/PKGBUILD        Arch/AUR source recipe (builds from source)
+│   ├── arch/PKGBUILD        Arch/AUR source recipe (builds from source)
+│   └── arch/PKGBUILD-bin    Arch/AUR prebuilt recipe (installs the tarball)
+├── homebrew/
+│   └── ntsc.rb              Homebrew formula template (tap: n1sc/homebrew-ntsc)
+├── scoop/
+│   └── ntsc.json            Scoop manifest template (bucket: n1sc/scoop-ntsc)
 ├── macos/
 │   ├── make-dmg.sh          .app bundle + dylib closure + .dmg
 │   └── make-tarball.sh      self-contained .tar.gz (dylib closure + rpath)
@@ -75,33 +79,37 @@ Artifact: `ntsc-<version>-1.x86_64.rpm`
 
 Install with: `sudo dnf install ntsc-<version>-1.x86_64.rpm`
 
-### Arch Linux (PKGBUILD + prebuilt .pkg.tar.zst)
+### Arch Linux (AUR `ntsc` / `ntsc-bin` + prebuilt .pkg.tar.zst)
 
-Arch gets two independent artifacts:
+Arch gets three routes to the same compiler:
 
-**Source recipe (`arch/PKGBUILD`)** — for the AUR. It downloads the `v<version>`
+**Source recipe (`arch/PKGBUILD`, AUR `ntsc`)** — downloads the `v<version>`
 tarball and builds with the system toolchain, so `makedepends` lists `cargo`,
 `rust`, and `llvm`, and the runtime dependency is `llvm-libs`. `build()`
 compiles both `ntsc-cli` and `ntsc-runtime`, and `package()` installs the
 runtime archive to `/usr/lib/ntsc/libntsc_runtime.a`.
 
-Install with: `makepkg -si`
+Install with: `yay -S ntsc`
 
-**Prebuilt package (`make-arch-pkg.sh` → `.pkg.tar.zst`)** — for direct
-installation with no compiling. It wraps the self-contained tarball (which
-already bundles the full LLVM closure and the runtime) into a binary package
-that installs `/usr/bin/ntsc` and `/usr/lib/ntsc/`. Because LLVM is bundled it
-depends only on `glibc` and `gcc-libs`, so it keeps working when rolling Arch
-bumps LLVM to a new soname — unlike a package linked against the system
-`llvm-libs`. `makepkg` only runs on Arch and refuses to run as root, so CI
+**Prebuilt recipe (`arch/PKGBUILD-bin`, AUR `ntsc-bin`)** — installs the
+self-contained release tarball, which already bundles the full LLVM closure and
+the runtime. Because LLVM is bundled it depends only on `glibc` and `gcc-libs`,
+so it keeps working when rolling Arch bumps LLVM to a new soname — unlike a
+package linked against the system `llvm-libs`.
+
+Install with: `yay -S ntsc-bin`
+
+**Release artifact (`make-arch-pkg.sh` → `.pkg.tar.zst`)** — the same package
+built from the tarball this run produced, attached to the GitHub Release for
+offline installs. `makepkg` only runs on Arch and refuses to run as root, so CI
 builds it inside an `archlinux` container as an unprivileged user; it must run
 after `make-tarball.sh`, whose output tree it repackages. `options=('!strip')`
 keeps `makepkg` from stripping `libntsc_runtime.a` (which would gut its symbol
 table and break linking).
 
-Install with: `sudo pacman -U ntsc-<version>-1-x86_64.pkg.tar.zst`
+Install with: `sudo pacman -U ntsc-bin-<version>-1-x86_64.pkg.tar.zst`
 
-Artifact: `ntsc-<version>-1-x86_64.pkg.tar.zst`
+Artifact: `ntsc-bin-<version>-1-x86_64.pkg.tar.zst`
 
 ### macOS (.dmg)
 
@@ -113,7 +121,7 @@ and packs everything into a `UDZO` .dmg with an Applications symlink.
 The bundle is a CLI tool, not a GUI app; dragging it into `/Applications` and
 running `./ntsc.app/Contents/MacOS/ntsc` works, or symlink it onto your PATH.
 
-Artifact: `ntsc-<version>.dmg`
+Artifact: `ntsc-<version>-macos-<arch>.dmg` (`arm64` or `x86_64`)
 
 ### Windows (.msi)
 
@@ -163,7 +171,8 @@ runs with no LLVM install and no `cargo` toolchain. Extract it anywhere and run
 Artifacts:
 
 - `ntsc-<version>-linux-x86_64.tar.gz`
-- `ntsc-<version>-macos-aarch64.tar.gz`
+- `ntsc-<version>-macos-arm64.tar.gz`
+- `ntsc-<version>-macos-x86_64.tar.gz`
 - `ntsc-<version>-windows-x86_64.tar.gz`
 
 The Unix archives use a `bin/` + `lib/ntsc/` prefix layout and are made
@@ -189,6 +198,34 @@ relocatable so the bundled libraries resolve wherever the tree is extracted:
   its bundled linker and the runtime from its own directory — so it is not
   reshaped into `bin/` + `lib/`.
 
+## Distribution channels
+
+After the GitHub Release is created, three jobs in `release.yml` push the
+manifests below so an installed copy upgrades through its package manager. They
+run only for a `v*` tag push (never for a branch `workflow_dispatch`) and only
+while `PUBLISH` is `"true"`:
+
+| Channel | Template | Rendered into | Secret |
+| --- | --- | --- | --- |
+| Homebrew | `homebrew/ntsc.rb` | `Formula/ntsc.rb` in `n1sc/homebrew-ntsc` | `HOMEBREW_TAP_TOKEN` |
+| Scoop | `scoop/ntsc.json` | `bucket/ntsc.json` in `n1sc/scoop-ntsc` | `SCOOP_BUCKET_TOKEN` |
+| AUR | `linux/arch/PKGBUILD`, `linux/arch/PKGBUILD-bin` | `ntsc.git`, `ntsc-bin.git` | `AUR_SSH_KEY` |
+
+`@VERSION@`, `@SHA256@`, `@SHA256_MACOS_ARM@` and `@SHA256_MACOS_INTEL@` are
+substituted from the tag and the checksums of the artifacts this run built, so
+the templates in this directory are never installable as-is. Each job refuses
+to publish if a placeholder is left over, if the expected artifact is missing,
+or if the release asset is not yet downloadable.
+
+The Homebrew formula installs the macOS tarball's tree under `libexec` and
+writes `bin` shims that exec the real binaries — the compiler resolves its
+runtime and bundled LLVM through `@executable_path/../lib/ntsc`, so it must run
+from a complete tree. The Scoop manifest extracts the Windows tarball flat and
+exposes `ntsc`, `ntsc-pkg` and `ntsc-lsp`; its `checkver` block tracks new tags.
+The AUR push needs a `.SRCINFO` generated by `makepkg`, so CI runs that inside
+an `archlinux` container as an unprivileged user, and commits as the
+`AUR_MAINTAINER` identity (the AUR rejects unregistered email addresses).
+
 ## Building locally
 
 Each recipe takes the version as its first argument. The native packages and
@@ -202,19 +239,19 @@ cargo build --release -p ntsc-cli -p ntsc-lsp -p ntsc-runtime
 
 # Linux (.deb/.rpm require dpkg-deb/rpmbuild; the tarball requires patchelf;
 # the .pkg.tar.zst requires makepkg and so only builds on Arch):
-bash .github/packaging/linux/build-deb-rpm.sh 26.0.0b
-bash .github/packaging/linux/make-tarball.sh 26.0.0b
-bash .github/packaging/linux/make-arch-pkg.sh 26.0.0b   # Arch only; after make-tarball.sh
+bash .github/packaging/linux/build-deb-rpm.sh 0.1.0
+bash .github/packaging/linux/make-tarball.sh 0.1.0
+bash .github/packaging/linux/make-arch-pkg.sh 0.1.0   # Arch only; after make-tarball.sh
 
 # macOS (requires hdiutil, otool, install_name_tool, codesign):
-bash .github/packaging/macos/make-dmg.sh 26.0.0b
-bash .github/packaging/macos/make-tarball.sh 26.0.0b
+bash .github/packaging/macos/make-dmg.sh 0.1.0
+bash .github/packaging/macos/make-tarball.sh 0.1.0
 
 # Windows (requires the wix CLI and the MSVC developer environment; the
 # bundled linker additionally needs the GNU runtime and MinGW import libs).
 # make-tarball.ps1 reuses build-msi.ps1's staging, so run it afterwards:
 rustup target add x86_64-pc-windows-gnu
 cargo build -p ntsc-runtime --target x86_64-pc-windows-gnu --release
-pwsh .github/packaging/windows/build-msi.ps1 -Version 26.0.0b -MsiVersion 26.0.0
-pwsh .github/packaging/windows/make-tarball.ps1 -Version 26.0.0b
+pwsh .github/packaging/windows/build-msi.ps1 -Version 0.1.0 -MsiVersion 0.1.0
+pwsh .github/packaging/windows/make-tarball.ps1 -Version 0.1.0
 ```

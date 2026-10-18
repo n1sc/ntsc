@@ -1,0 +1,46 @@
+# Maintainer: yasakei <yasakei@proton.me>
+# Prebuilt package for Arch Linux / the AUR. Installs the self-contained
+# release tarball, which bundles the LLVM shared-library closure and the ntsc
+# runtime under /usr/lib/ntsc — no system LLVM dependency, no compile step.
+#
+# The version and checksum placeholders are substituted by the release
+# workflow when this recipe is published to the AUR; the copy in this
+# repository is a template. See PKGBUILD for the source-based package.
+
+pkgname=ntsc-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="Neutron Type-Safe Compiler: a statically typed, memory-safe systems language compiled through LLVM (prebuilt; bundles LLVM)"
+arch=('x86_64')
+url="https://github.com/n1sc/ntsc"
+license=('custom:NPL-1.1')
+provides=('ntsc')
+# Mutually exclusive with the source package: both own /usr/bin/ntsc.
+conflicts=('ntsc')
+# libc and libgcc_s are deliberately not bundled (a foreign libc breaks the
+# binary); they come from these always-present base packages. LLVM, libstdc++
+# and the rest of the closure ship inside /usr/lib/ntsc.
+depends=('glibc' 'gcc-libs')
+# Keep the prebuilt payload byte-for-byte: !strip protects
+# libntsc_runtime.a's symbol table (stripping it breaks linking) and the
+# bundled .so RUNPATHs; staticlibs keeps the .a; !debug skips debug-symbol
+# extraction (there are no build sources); !zipman leaves the already-gzipped
+# man page alone.
+options=('!strip' '!debug' '!zipman' 'staticlibs')
+source=("ntsc-$pkgver-linux-x86_64.tar.gz::https://github.com/n1sc/ntsc/releases/download/v$pkgver/ntsc-$pkgver-linux-x86_64.tar.gz")
+sha256sums=('@SHA256@')
+
+package() {
+  cd "$srcdir/ntsc-$pkgver-linux-x86_64"
+  # bin/ntsc -> /usr/bin/ntsc, lib/ntsc/* -> /usr/lib/ntsc/*. The binary's
+  # RUNPATH ($ORIGIN/../lib/ntsc) and ntsc's own runtime lookup (../lib/ntsc)
+  # both resolve to /usr/lib/ntsc from /usr/bin, so LLVM and the runtime
+  # archive are found with no further configuration.
+  install -Dm755 bin/ntsc "$pkgdir/usr/bin/ntsc"
+  install -Dm755 bin/ntsc-pkg "$pkgdir/usr/bin/ntsc-pkg"
+  install -Dm755 bin/ntsc-lsp "$pkgdir/usr/bin/ntsc-lsp"
+  install -d "$pkgdir/usr/lib/ntsc"
+  cp -a lib/ntsc/. "$pkgdir/usr/lib/ntsc/"
+  install -Dm644 share/man/man1/ntsc.1.gz "$pkgdir/usr/share/man/man1/ntsc.1.gz"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

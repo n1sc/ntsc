@@ -19,6 +19,17 @@ name: release
 # instead bundle the LLVM libraries and the ntsc runtime, so they run with no
 # LLVM install and no toolchain. Every package ships libntsc_runtime.a, the
 # static archive `ntsc build` links NTSC programs against.
+#
+# Once the GitHub Release exists, the `publish-*` jobs update the distribution
+# channels, so an installed copy upgrades through its normal package manager:
+#
+#   Homebrew -> Formula/ntsc.rb in n1sc/homebrew-ntsc
+#   Scoop    -> bucket/ntsc.json in n1sc/scoop-ntsc
+#   AUR      -> ntsc (source recipe) and ntsc-bin (prebuilt tarball) over SSH
+#
+# They run only for tag pushes (never for a branch `workflow_dispatch`) and
+# only when PUBLISH is "true". Each needs one repository secret:
+# HOMEBREW_TAP_TOKEN, SCOOP_BUCKET_TOKEN, AUR_SSH_KEY.
 
 on:
   push:
@@ -43,9 +54,23 @@ env:
   #                 "false" -> skip it (fast iteration on the installer)
   #   WINDOWS_ONLY  "true"  -> package only the Windows .msi + .tar.gz
   #                 "false" -> also package Linux (.deb/.rpm/PKGBUILD/.tar.gz)
-  #                            + macOS (.dmg/.tar.gz)
+  #                            + macOS (.dmg/.tar.gz, both arches)
+  #   PUBLISH       "true"  -> after the release, push the Homebrew formula, the
+  #                            Scoop manifest and both AUR recipes
+  #                 "false" -> build and attach the release assets only
   RUN_TESTS: "true"
   WINDOWS_ONLY: "false"
+  PUBLISH: "true"
+
+  # Where the `publish-*` jobs push. Override these if the tap/bucket live
+  # somewhere else; the AUR names are what `pacman`/`yay` look up.
+  TAP_REPO: "n1sc/homebrew-ntsc"
+  BUCKET_REPO: "n1sc/scoop-ntsc"
+  AUR_SOURCE_PACKAGE: "ntsc"
+  AUR_BIN_PACKAGE: "ntsc-bin"
+  # AUR rejects commits whose user.email is not registered with the account
+  # that owns AUR_SSH_KEY, so this must be that account's Name <email>.
+  AUR_MAINTAINER: "yasakei <yasakei@proton.me>"
 
   LLVM_VERSION: 22.1.6
   # Pinned so release builds are reproducible; the UI extension registered
@@ -59,33 +84,62 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
-  # Resolve the RUN_TESTS / WINDOWS_ONLY switches into values that a job `if:`
-  # and a build matrix can actually read. Workflow `env` is visible to step
-  # shells but NOT to job conditions or `strategy.matrix`, so this job reads
-  # them in a step and republishes them as job outputs (which `needs.*` exposes
-  # to both). The matrix is emitted as a JSON string for `fromJSON` below.
+  # Resolve the RUN_TESTS / WINDOWS_ONLY / PUBLISH switches and the release
+  # version into values that a job `if:`, a build matrix, or another job can
+  # actually read. Workflow `env` is visible to step shells but NOT to job
+  # conditions or `strategy.matrix`, and `steps.*` of a job is not visible to
+  # its siblings, so this job reads them in a step and republishes them as job
+  # outputs (which `needs.*` exposes everywhere). The matrix is emitted as a
+  # JSON string for `fromJSON` below.
   config:
     name: config
     runs-on: ubuntu-latest
     outputs:
       run_tests: ${{ steps.flags.outputs.run_tests }}
+      windows_only: ${{ steps.flags.outputs.windows_only }}
+      publish: ${{ steps.flags.outputs.publish }}
+      version: ${{ steps.flags.outputs.version }}
+      msiversion: ${{ steps.flags.outputs.msiversion }}
       matrix: ${{ steps.flags.outputs.matrix }}
     steps:
       - id: flags
         shell: bash
+        env:
+          # Read the dispatch input through the environment instead of
+          # interpolating it into the script, so its value cannot inject shell.
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
+          printf 'run_tests=%s\n' "${RUN_TESTS}" >> "$GITHUB_OUTPUT"
+          printf 'windows_only=%s\n' "${WINDOWS_ONLY}" >> "$GITHUB_OUTPUT"
+          printf 'publish=%s\n' "${PUBLISH}" >> "$GITHUB_OUTPUT"
+
+          # A `v*` tag is the normal path (`v0.1.0` -> `0.1.0`). A dispatch can
+          # override the version; without one it falls back to the ref name.
+          version="${INPUT_VERSION:-${GITHUB_REF_NAME#v}}"
+          if [ -z "$version" ]; then
+            echo "::error::no version: push a v* tag or set the version input"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" != "tag" ] && [ -z "${INPUT_VERSION}" ]; then
+            echo "::warning::no version input on a branch dispatch; using '${version}'"
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          # The MSI ProductVersion is numeric only (`0.1.0`, not `0.1.0b`).
+          printf 'msiversion=%s\n' "$(printf '%s' "$version" | tr -cd '[:digit:].')" >> "$GITHUB_OUTPUT"
+
           # printf '%s' never interprets backslashes; jq guarantees valid JSON
           # escaping (the Linux artifacts glob is newline-separated -> "\n").
-          printf 'run_tests=%s\n' "${RUN_TESTS}" >> "$GITHUB_OUTPUT"
-
           win='{"name":"windows-x86_64","os":"windows-latest","artifacts":"dist/*.msi\ndist/*.tar.gz"}'
-          lin='{"name":"linux-x86_64","os":"ubuntu-latest","artifacts":"*.deb\n*.rpm\nPKGBUILD\ndist/*.tar.gz\ndist/*.pkg.tar.zst"}'
-          mac='{"name":"macos-aarch64","os":"macos-latest","artifacts":"dist/*.dmg\ndist/*.tar.gz"}'
+          lin='{"name":"linux-x86_64","os":"ubuntu-latest","artifacts":"*.deb\n*.rpm\nPKGBUILD\nPKGBUILD-bin\ndist/*.tar.gz\ndist/*.pkg.tar.zst"}'
+          # The tarball names come from `uname -m`, so the runner arch decides
+          # the artifact name: macos-latest is arm64, macos-15-intel is x86_64.
+          mac_arm='{"name":"macos-arm64","os":"macos-latest","artifacts":"dist/*.dmg\ndist/*.tar.gz"}'
+          mac_intel='{"name":"macos-x86_64","os":"macos-15-intel","artifacts":"dist/*.dmg\ndist/*.tar.gz"}'
           if [ "${WINDOWS_ONLY}" = "true" ]; then
             matrix=$(jq -cn --argjson w "$win" '{include:[$w]}')
           else
-            matrix=$(jq -cn --argjson l "$lin" --argjson m "$mac" --argjson w "$win" \
-              '{include:[$l,$m,$w]}')
+            matrix=$(jq -cn --argjson l "$lin" --argjson a "$mac_arm" --argjson i "$mac_intel" \
+              --argjson w "$win" '{include:[$l,$a,$i,$w]}')
           fi
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
@@ -295,34 +349,43 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally { Pop-Location }
 
-      # ── Version ──────────────────────────────────────────────────────────
-      # The tag is `v26.0.0b`; the MSI additionally needs a numeric
-      # ProductVersion (26.0.0).
-      - name: Resolve version
-        id: version
-        shell: bash
-        run: |
-          VERSION="${{ github.event.inputs.version }}"
-          if [ -z "$VERSION" ]; then VERSION="${GITHUB_REF_NAME#v}"; fi
-          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "MSIVERSION=$(echo "$VERSION" | tr -cd '[:digit:].')" >> "$GITHUB_OUTPUT"
-
-      # ── Linux: .deb, .rpm, PKGBUILD, portable .tar.gz ───────────────────
+      # ── Linux: .deb, .rpm, PKGBUILDs, portable .tar.gz ──────────────────
       - name: Package Linux installers
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq rpm patchelf
-          bash .github/packaging/linux/build-deb-rpm.sh "${{ steps.version.outputs.VERSION }}"
-
-      - name: Collect Arch PKGBUILD
-        if: runner.os == 'Linux'
-        run: |
-          cp .github/packaging/linux/arch/PKGBUILD "PKGBUILD"
+          bash .github/packaging/linux/build-deb-rpm.sh "${{ needs.config.outputs.version }}"
 
       - name: Build Linux tarball
         if: runner.os == 'Linux'
-        run: bash .github/packaging/linux/make-tarball.sh "${{ steps.version.outputs.VERSION }}"
+        run: bash .github/packaging/linux/make-tarball.sh "${{ needs.config.outputs.version }}"
+
+      # The two Arch recipes are templates: the AUR needs the exact version and
+      # a real checksum, which only exist at release time. `ntsc` builds from
+      # the GitHub source archive; `ntsc-bin` installs the tarball built above,
+      # so this must run after it.
+      - name: Render Arch PKGBUILDs
+        if: runner.os == 'Linux'
+        env:
+          VERSION: ${{ needs.config.outputs.version }}
+        run: |
+          src_url="https://github.com/${GITHUB_REPOSITORY}/archive/v${VERSION}.tar.gz"
+          src_sha="SKIP"
+          if curl -fsSL --retry 3 --retry-delay 2 "$src_url" -o src.tar.gz; then
+            src_sha="$(sha256sum src.tar.gz | cut -d' ' -f1)"
+            rm -f src.tar.gz
+          else
+            # A branch dispatch has no tag to archive. The recipe still works,
+            # it just cannot verify the download.
+            echo "::warning::could not fetch ${src_url}; PKGBUILD will use sha256sums=('SKIP')"
+          fi
+          bin_sha="$(sha256sum "dist/ntsc-${VERSION}-linux-x86_64.tar.gz" | cut -d' ' -f1)"
+
+          sed -e "s|@VERSION@|${VERSION}|g" -e "s|@SHA256@|${src_sha}|g" \
+            .github/packaging/linux/arch/PKGBUILD > PKGBUILD
+          sed -e "s|@VERSION@|${VERSION}|g" -e "s|@SHA256@|${bin_sha}|g" \
+            .github/packaging/linux/arch/PKGBUILD-bin > PKGBUILD-bin
 
       # A .pkg.tar.zst that `sudo pacman -U` installs, produced by wrapping the
       # self-contained tarball (LLVM closure + runtime bundled) into a prebuilt
@@ -333,7 +396,7 @@ jobs:
       - name: Build Arch package
         if: runner.os == 'Linux'
         env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
+          VERSION: ${{ needs.config.outputs.version }}
         run: |
           docker run --rm -e VERSION -v "$PWD:/w" -w /w archlinux:latest bash -euo pipefail -c '
             pacman -Syu --noconfirm --needed base-devel
@@ -346,11 +409,11 @@ jobs:
       # ── macOS: .dmg, portable .tar.gz ────────────────────────────────────
       - name: Package macOS installer
         if: runner.os == 'macOS'
-        run: bash .github/packaging/macos/make-dmg.sh "${{ steps.version.outputs.VERSION }}"
+        run: bash .github/packaging/macos/make-dmg.sh "${{ needs.config.outputs.version }}"
 
       - name: Build macOS tarball
         if: runner.os == 'macOS'
-        run: bash .github/packaging/macos/make-tarball.sh "${{ steps.version.outputs.VERSION }}"
+        run: bash .github/packaging/macos/make-tarball.sh "${{ needs.config.outputs.version }}"
 
       # ── Windows: .msi ────────────────────────────────────────────────────
       # The MSI bundles ld.lld + the GNU-flavoured runtime so `ntsc build`
@@ -388,14 +451,14 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
-          pwsh .github/packaging/windows/build-msi.ps1 -Version "${{ steps.version.outputs.VERSION }}" -MsiVersion "${{ steps.version.outputs.MSIVERSION }}" -GnuRuntimeLib "target\x86_64-pc-windows-gnu\release\libntsc_runtime.a" -LlvmBin "$env:LLVM_BIN"
+          pwsh .github/packaging/windows/build-msi.ps1 -Version "${{ needs.config.outputs.version }}" -MsiVersion "${{ needs.config.outputs.msiversion }}" -GnuRuntimeLib "target\x86_64-pc-windows-gnu\release\libntsc_runtime.a" -LlvmBin "$env:LLVM_BIN"
 
       # Reuses the self-contained tree build-msi.ps1 staged at dist\win, so it
       # must run after the MSI step.
       - name: Build Windows tarball
         if: runner.os == 'Windows'
         shell: pwsh
-        run: pwsh .github/packaging/windows/make-tarball.ps1 -Version "${{ steps.version.outputs.VERSION }}"
+        run: pwsh .github/packaging/windows/make-tarball.ps1 -Version "${{ needs.config.outputs.version }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -415,3 +478,259 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
+
+  # ── Distribution channels ────────────────────────────────────────────────
+  # These checksum the assets `release` just uploaded, so they run after it.
+  # `github.ref_type == 'tag'` keeps a branch dispatch from publishing a
+  # version that only exists in a working tree.
+
+  publish-homebrew:
+    name: publish-homebrew
+    needs: [config, release]
+    if: >-
+      needs.config.outputs.publish == 'true' &&
+      needs.config.outputs.windows_only != 'true' &&
+      github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: macos-*-installers
+          path: artifacts
+
+      - name: Push the formula to the tap
+        env:
+          VERSION: ${{ needs.config.outputs.version }}
+          TAP_REPO: ${{ env.TAP_REPO }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is not set; cannot publish to the tap"
+            exit 1
+          fi
+
+          # Exactly one match: `find -print -quit` alone would silently
+          # checksum the wrong tarball if the matrix ever produced two.
+          resolve() {
+            local pattern="$1" matches count
+            matches="$(find artifacts -type f -name "$pattern" -print)"
+            count="$(printf '%s' "$matches" | grep -c . || true)"
+            if [ "$count" -ne 1 ]; then
+              echo "::error::expected exactly one $pattern, found $count"
+              exit 1
+            fi
+            printf '%s' "$matches"
+          }
+          arm="$(resolve "ntsc-${VERSION}-macos-arm64.tar.gz")"
+          intel="$(resolve "ntsc-${VERSION}-macos-x86_64.tar.gz")"
+
+          # The release exists, but asset URLs can lag; never publish a
+          # formula that 404s.
+          for asset in "$arm" "$intel"; do
+            url="https://github.com/n1sc/ntsc/releases/download/v${VERSION}/$(basename "$asset")"
+            for attempt in 1 2 3 4 5; do
+              if curl -fsIL -o /dev/null "$url"; then break; fi
+              if [ "$attempt" -eq 5 ]; then
+                echo "::error::$url is not downloadable"
+                exit 1
+              fi
+              sleep 10
+            done
+          done
+
+          sed -e "s|@VERSION@|${VERSION}|g" \
+              -e "s|@SHA256_MACOS_ARM@|$(sha256sum "$arm" | cut -d' ' -f1)|g" \
+              -e "s|@SHA256_MACOS_INTEL@|$(sha256sum "$intel" | cut -d' ' -f1)|g" \
+              .github/packaging/homebrew/ntsc.rb > formula.rb
+          if grep -n '@[A-Z0-9_]*@' formula.rb; then
+            echo "::error::unrendered placeholder in the formula"
+            exit 1
+          fi
+
+          git clone -q "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+          branch="$(git -C tap symbolic-ref --short HEAD)"
+          if [ -f tap/Formula/ntsc.rb ] && grep -qxF "  version \"${VERSION}\"" tap/Formula/ntsc.rb; then
+            echo "tap already publishes ${VERSION}"
+            exit 0
+          fi
+          mkdir -p tap/Formula
+          cp formula.rb tap/Formula/ntsc.rb
+          git -C tap config user.name "github-actions[bot]"
+          git -C tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C tap add Formula/ntsc.rb
+          git -C tap commit -q -m "ntsc ${VERSION}"
+          git -C tap push -q origin "HEAD:${branch}"
+
+  publish-scoop:
+    name: publish-scoop
+    needs: [config, release]
+    if: >-
+      needs.config.outputs.publish == 'true' &&
+      github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64-installers
+          path: artifacts
+
+      - name: Push the manifest to the bucket
+        env:
+          VERSION: ${{ needs.config.outputs.version }}
+          BUCKET_REPO: ${{ env.BUCKET_REPO }}
+          BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUCKET_TOKEN}" ]; then
+            echo "::error::SCOOP_BUCKET_TOKEN is not set; cannot publish to the bucket"
+            exit 1
+          fi
+          tarball="$(find artifacts -type f -name "ntsc-${VERSION}-windows-x86_64.tar.gz" -print -quit)"
+          if [ -z "$tarball" ]; then
+            echo "::error::the Windows tarball is missing from the artifact"
+            exit 1
+          fi
+
+          url="https://github.com/n1sc/ntsc/releases/download/v${VERSION}/ntsc-${VERSION}-windows-x86_64.tar.gz"
+          for attempt in 1 2 3 4 5; do
+            if curl -fsIL -o /dev/null "$url"; then break; fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "::error::$url is not downloadable"
+              exit 1
+            fi
+            sleep 10
+          done
+
+          sed -e "s|@VERSION@|${VERSION}|g" \
+              -e "s|@SHA256@|$(sha256sum "$tarball" | cut -d' ' -f1)|g" \
+              .github/packaging/scoop/ntsc.json > manifest.json
+          if grep -n '@[A-Z0-9_]*@' manifest.json; then
+            echo "::error::unrendered placeholder in the manifest"
+            exit 1
+          fi
+          python3 -m json.tool manifest.json > /dev/null
+
+          git clone -q "https://x-access-token:${BUCKET_TOKEN}@github.com/${BUCKET_REPO}.git" bucket
+          branch="$(git -C bucket symbolic-ref --short HEAD)"
+          if [ -f bucket/bucket/ntsc.json ] && grep -qF "\"version\": \"${VERSION}\"" bucket/bucket/ntsc.json; then
+            echo "bucket already publishes ${VERSION}"
+            exit 0
+          fi
+          mkdir -p bucket/bucket
+          cp manifest.json bucket/bucket/ntsc.json
+          git -C bucket config user.name "github-actions[bot]"
+          git -C bucket config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C bucket add bucket/ntsc.json
+          git -C bucket commit -q -m "ntsc ${VERSION}"
+          git -C bucket push -q origin "HEAD:${branch}"
+
+  publish-aur:
+    name: publish-aur
+    needs: [config, release]
+    if: >-
+      needs.config.outputs.publish == 'true' &&
+      needs.config.outputs.windows_only != 'true' &&
+      github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64-installers
+          path: artifacts
+
+      - name: Generate .SRCINFO
+        run: |
+          set -euo pipefail
+          for recipe in PKGBUILD PKGBUILD-bin; do
+            if [ ! -f "artifacts/$recipe" ]; then
+              echo "::error::$recipe missing from the Linux artifact"
+              exit 1
+            fi
+          done
+          # A leftover placeholder means the render step failed; publishing it
+          # would produce an unusable package.
+          if grep -n '@[A-Z0-9_]*@' artifacts/PKGBUILD artifacts/PKGBUILD-bin; then
+            echo "::error::unrendered placeholder in a PKGBUILD"
+            exit 1
+          fi
+
+          # makepkg generates .SRCINFO, but it only runs on Arch and refuses
+          # to run as root, so use a container as an unprivileged user (same
+          # pattern as the `Build Arch package` step).
+          mkdir -p staging/ntsc staging/ntsc-bin
+          cp artifacts/PKGBUILD staging/ntsc/PKGBUILD
+          cp artifacts/PKGBUILD-bin staging/ntsc-bin/PKGBUILD
+          docker run --rm -v "$PWD/staging:/staging" -w /staging archlinux:latest bash -euo pipefail -c '
+            pacman -Syu --noconfirm --needed base-devel >/dev/null
+            useradd -m builder
+            chown -R builder:builder /staging
+            for dir in /staging/*/; do
+              ( cd "$dir" && su builder -c "makepkg --printsrcinfo > .SRCINFO" )
+            done
+          '
+          for recipe in ntsc ntsc-bin; do
+            if [ ! -s "staging/$recipe/.SRCINFO" ]; then
+              echo "::error::no .SRCINFO generated for $recipe"
+              exit 1
+            fi
+          done
+
+      - name: Push to the AUR
+        env:
+          VERSION: ${{ needs.config.outputs.version }}
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+          AUR_MAINTAINER: ${{ env.AUR_MAINTAINER }}
+          SOURCE_PACKAGE: ${{ env.AUR_SOURCE_PACKAGE }}
+          BIN_PACKAGE: ${{ env.AUR_BIN_PACKAGE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUR_SSH_KEY}" ]; then
+            echo "::error::AUR_SSH_KEY is not set; cannot push to the AUR"
+            exit 1
+          fi
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes"
+
+          # AUR rejects commits whose user.email is not registered with the
+          # account that owns the key.
+          name="${AUR_MAINTAINER%% <*}"
+          email="${AUR_MAINTAINER##*<}"
+          email="${email%>}"
+
+          publish() {
+            local package="$1" stage="$2" work="clone-$1" branch
+            if git clone -q "ssh://aur@aur.archlinux.org/${package}.git" "$work" 2>/dev/null; then
+              branch="$(git -C "$work" symbolic-ref --short HEAD)"
+            else
+              # The AUR creates a package on its first push, but cloning a
+              # repository that does not exist yet fails, so start empty.
+              rm -rf "$work"
+              git init -q -b master "$work"
+              git -C "$work" remote add origin "ssh://aur@aur.archlinux.org/${package}.git"
+              branch=master
+            fi
+            if [ -f "$work/PKGBUILD" ] && grep -qxF "pkgver=${VERSION}" "$work/PKGBUILD"; then
+              echo "${package} already publishes ${VERSION}"
+              return 0
+            fi
+            cp "$stage/PKGBUILD" "$stage/.SRCINFO" "$work/"
+            git -C "$work" config user.name "$name"
+            git -C "$work" config user.email "$email"
+            git -C "$work" add PKGBUILD .SRCINFO
+            git -C "$work" commit -q -m "Update to ${VERSION}"
+            git -C "$work" push -q origin "HEAD:${branch}"
+            echo "pushed ${package} ${VERSION}"
+          }
+
+          publish "$SOURCE_PACKAGE" staging/ntsc
+          publish "$BIN_PACKAGE" staging/ntsc-bin

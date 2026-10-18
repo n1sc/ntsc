@@ -14,6 +14,10 @@ BIN="${2:-target/release/ntsc}"
 PKG="crates/ntsc-pkg/build/release/ntsc-pkg"
 LSP="target/release/ntsc-lsp"
 RUNTIME="target/release/libntsc_runtime.a"
+# Both macOS arches are built, and a release cannot hold two assets with the
+# same name, so the disk image carries its arch the way the tarball does.
+ARCH="$(uname -m)"
+DMG="dist/ntsc-$VERSION-macos-$ARCH.dmg"
 
 APP="dist/ntsc.app"
 FRAMEWORKS="$APP/Contents/Frameworks"
@@ -29,7 +33,7 @@ done
 
 # Clean only this script's own outputs, not the whole dist/ directory, so a
 # tarball or other artifact already written to dist/ is not clobbered.
-rm -rf "$APP" "$DMGDIR" "dist/ntsc-$VERSION.dmg"
+rm -rf "$APP" "$DMGDIR" "$DMG"
 mkdir -p "$FRAMEWORKS" "$MACOS" "$DMGDIR"
 
 install -m 755 "$BIN" "$MACOS/ntsc"
@@ -107,6 +111,6 @@ codesign --force --sign - "$APP"
 cp -R "$APP" "$DMGDIR/"
 ln -s /Applications "$DMGDIR/Applications"
 hdiutil create -volname "ntsc $VERSION" -srcfolder "$DMGDIR" -ov \
-  -format UDZO "dist/ntsc-$VERSION.dmg"
+  -format UDZO "$DMG"
 
-echo "Built dist/ntsc-$VERSION.dmg"
+echo "Built $DMG"

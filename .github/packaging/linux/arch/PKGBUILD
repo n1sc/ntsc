@@ -1,21 +1,27 @@
-# Maintainer: yasakei
+# Maintainer: yasakei <yasakei@proton.me>
 # Source-based package for Arch Linux / the AUR. Builds the compiler with
 # cargo against the system LLVM and installs the binary plus a man page.
+#
+# The version and checksum placeholders are substituted by the release
+# workflow when this recipe is published to the AUR; the copy in this
+# repository is a template. See PKGBUILD-bin for the prebuilt package.
 
 pkgname=ntsc
-pkgver=26.0.0b
+pkgver=@VERSION@
 pkgrel=1
 pkgdesc="Neutron Type-Safe Compiler: a statically typed, memory-safe systems language compiled through LLVM"
 arch=('x86_64' 'aarch64')
-url="https://github.com/yasakei/neutron-rs"
+url="https://github.com/n1sc/ntsc"
 license=('custom:NPL-1.1')
 depends=('llvm-libs')
 makedepends=('cargo' 'rust' 'llvm')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/yasakei/neutron-rs/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+# `ntsc` compiles from source; `ntsc-bin` installs the prebuilt tarball.
+conflicts=('ntsc-bin')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/n1sc/ntsc/archive/v$pkgver.tar.gz")
+sha256sums=('@SHA256@')
 
 build() {
-  cd "$srcdir/neutron-rs-$pkgver"
+  cd "$srcdir/ntsc-$pkgver"
   # ntsc-cli does not depend on ntsc-runtime, so the static archive `ntsc
   # build` links against is not produced as a side effect — build it too.
   cargo build --release -p ntsc-cli -p ntsc-lsp -p ntsc-runtime
@@ -23,7 +29,7 @@ build() {
 }
 
 package() {
-  cd "$srcdir/neutron-rs-$pkgver"
+  cd "$srcdir/ntsc-$pkgver"
   install -Dm755 target/release/ntsc "$pkgdir/usr/bin/ntsc"
   install -Dm755 crates/ntsc-pkg/build/release/ntsc-pkg "$pkgdir/usr/bin/ntsc-pkg"
   install -Dm755 target/release/ntsc-lsp "$pkgdir/usr/bin/ntsc-lsp"

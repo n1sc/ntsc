@@ -1,0 +1,17 @@
+{
+  "version": "@VERSION@",
+  "description": "Neutron Type-Safe Compiler: a statically typed, memory-safe systems language compiled through LLVM",
+  "homepage": "https://github.com/n1sc/ntsc",
+  "license": "NPL-1.1",
+  "url": "https://github.com/n1sc/ntsc/releases/download/v@VERSION@/ntsc-@VERSION@-windows-x86_64.tar.gz",
+  "hash": "@SHA256@",
+  "extract_dir": "ntsc-@VERSION@-windows-x86_64",
+  "bin": [
+    ["ntsc.exe", "ntsc"],
+    ["ntsc-pkg.exe", "ntsc-pkg"],
+    ["ntsc-lsp.exe", "ntsc-lsp"]
+  ],
+  "checkver": {
+    "github": "https://github.com/n1sc/ntsc"
+  }
+}

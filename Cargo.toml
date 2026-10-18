@@ -15,8 +15,7 @@ members = [
 ]
 
 [workspace.package]
-# Pre-release development version; use semantic versioning for releases.
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 license = "NPL-1.1"
 

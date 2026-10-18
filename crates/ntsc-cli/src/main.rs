@@ -9,9 +9,9 @@ use ntsc_ast::stmt::{Program, Stmt};
 use ntsc_codegen::SUMMARY_MARKER;
 use ntsc_diag::{DiagConfig, Diagnostic, SourceBuffer, SourceMap, Writer, diagnostics_to_json};
 
-// Project version follows semantic versioning. This remains 0.0.0 until
-// the first public release.
-pub const NTSC_VERSION: &str = "0.0.0";
+// The compiler's version is the crate version, so `ntsc --version` can never
+// drift from Cargo.toml.
+pub const NTSC_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ANSI escape codes for the CLI's own output. Follows the same colour
 // conventions as ntsc-diag: CLICOLOR_FORCE, NO_COLOR, CLICOLOR=0, TERM=dumb.

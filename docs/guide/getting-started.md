@@ -39,8 +39,8 @@ Windows, either set `LLVM_SYS_221_PREFIX` to the LLVM install directory or add
 Clone the repository, enter its directory, and build the compiler:
 
 ```sh
-git clone https://github.com/yasakei/neutron-rs.git
-cd neutron-rs
+git clone https://github.com/n1sc/ntsc.git
+cd ntsc
 cargo build --release
 ```
 
@@ -74,7 +74,7 @@ ntsc --version
 It prints a version banner similar to this (the build details may differ):
 
 ```
-ntsc 0.0.0 — Neutron Type-Safe Compiler
+ntsc 0.1.0 — Neutron Type-Safe Compiler
 
 LLVM   22.1.8
 Host   x86_64-unknown-linux-gnu
@@ -86,8 +86,9 @@ The `LLVM` line reports the linked LLVM revision, `Host` the target triple,
 `Build` the profile of the `ntsc` binary itself, and `Commit` the git commit
 it was built from (omitted for released binaries).
 
-NTSC versions follow Semantic Versioning (`MAJOR.MINOR.PATCH`). The project
-remains at `0.0.0` until its first public release.
+NTSC versions follow Semantic Versioning (`MAJOR.MINOR.PATCH`). The current
+release line is `0.1.x`; breaking changes to the language bump the minor
+version while the project is pre-1.0.
 
 ## Your first project
 

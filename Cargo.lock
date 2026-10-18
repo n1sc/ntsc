@@ -650,11 +650,11 @@ dependencies = [
 
 [[package]]
 name = "ntsc-ast"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "ntsc-build"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "ntsc-ast",
  "ntsc-diag",
@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "ntsc-cargo"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "ntsc-build",
  "pulldown-cmark",
@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "ntsc-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "inkwell",
  "ntsc-ast",
@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "ntsc-codegen"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "inkwell",
  "llvm-sys",
@@ -708,14 +708,14 @@ dependencies = [
 
 [[package]]
 name = "ntsc-diag"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "ntsc-ast",
 ]
 
 [[package]]
 name = "ntsc-lexer"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "logos",
  "ntsc-ast",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "ntsc-lsp"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "lsp-server",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "ntsc-parser"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "ntsc-ast",
  "ntsc-diag",
@@ -748,7 +748,7 @@ dependencies = [
 
 [[package]]
 name = "ntsc-runtime"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "base64",
  "crc32fast",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "ntsc-typeck"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "ntsc-ast",
  "ntsc-diag",
