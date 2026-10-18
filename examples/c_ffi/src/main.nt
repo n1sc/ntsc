@@ -1,0 +1,58 @@
+// c_ffi — calling a project-owned C static library from Neutron.
+//
+// `native/libgeometry.a` is built from native/geometry.c. The library itself
+// uses libm, while Neutron links both libraries through neutron.toml.
+
+extern "C" {
+    double geometry_distance(double x, double y)
+    double geometry_signal(double phase)
+}
+
+class Vector {
+    var float x
+    var float y
+
+    fun init(float x, float y) {
+        this.x = x
+        this.y = y
+    }
+
+    fun length() -> float {
+        unsafe {
+            return geometry_distance(this.x, this.y)
+        }
+    }
+
+    fun dot(float x, float y) -> float {
+        return this.x * x + this.y * y
+    }
+}
+
+fun main() {
+    var vectors = [Vector(3.0, 4.0), Vector(-5.0, 12.0), Vector(8.0, -6.0)]
+    var total_length = 0.0
+    for (var vector in vectors) {
+        var length = vector.length()
+        total_length = total_length + length
+        say("vector (${vector.x}, ${vector.y}) length=${length}")
+    }
+
+    var diagonal = vectors[0].dot(1.0, 1.0)
+    say("first vector dot (1, 1): ${diagonal}")
+    say("total vector length: ${total_length}")
+
+    var phases = [0.0, 1.5707963267948966, 3.141592653589793, 4.71238898038469]
+    var signal_total = 0.0
+    for (var phase in phases) {
+        var value = unsafe_signal(phase)
+        signal_total = signal_total + value
+        say("signal(${phase}) = ${value}")
+    }
+    say("signal total: ${signal_total}")
+}
+
+fun unsafe_signal(float phase) -> float {
+    unsafe {
+        return geometry_signal(phase)
+    }
+}

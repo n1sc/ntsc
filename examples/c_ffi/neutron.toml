@@ -1,0 +1,8 @@
+[package]
+target = "x86_64-unknown-linux-gnu"
+entry = "src/main.nt"
+output = "c_ffi"
+
+[ffi]
+search_paths = ["native"]
+libraries = ["geometry", "m"]
