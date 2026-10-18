@@ -10,6 +10,7 @@ use ntsc_ast::types::TypeAnnotation;
 
 use crate::const_eval::{ConstEvaluator, ConstValue};
 use crate::names::resolve_program;
+use crate::returns::can_fall_through;
 use crate::scope::SymbolTable;
 use crate::ty::Ty;
 
@@ -269,6 +270,7 @@ struct TypeChecker {
     /// Names of top-level async functions. Calling one without `await` is
     /// an error, and `await` is only valid inside an async function.
     async_fns: HashSet<String>,
+    ffi_functions: HashSet<String>,
 
     /// Nesting depth of async function bodies currently being checked.
     async_depth: usize,
@@ -346,6 +348,7 @@ impl TypeChecker {
             current_return_type: None,
             in_class_body: false,
             async_fns: HashSet::new(),
+            ffi_functions: HashSet::new(),
             async_depth: 0,
             current_fn_name: None,
             unsafe_depth: 0,
@@ -477,6 +480,12 @@ impl TypeChecker {
                     return_type,
                     ..
                 } => (name, params, return_type),
+                Stmt::ExternFunction {
+                    name,
+                    params,
+                    return_type,
+                    ..
+                } => (name, params, return_type),
                 _ => continue,
             };
             self.require_function_signature(name, params, return_type);
@@ -502,6 +511,47 @@ impl TypeChecker {
             }
             if matches!(stmt, Stmt::AsyncFunction { .. }) {
                 self.async_fns.insert(name.lexeme().to_string());
+            }
+            if matches!(stmt, Stmt::ExternFunction { .. }) {
+                self.ffi_functions.insert(name.lexeme().to_string());
+            }
+        }
+        for stmt in &program.statements {
+            let Stmt::ExternBlock { functions, .. } = stmt else {
+                continue;
+            };
+            for function in functions {
+                let Stmt::ExternFunction {
+                    name,
+                    params,
+                    return_type,
+                    ..
+                } = function
+                else {
+                    continue;
+                };
+                self.require_function_signature(name, params, return_type);
+                let param_tys: Vec<Ty> = params
+                    .iter()
+                    .map(|p| self.resolve_annotation(p.type_annotation.as_ref()))
+                    .collect();
+                let ret_ty = return_type
+                    .as_ref()
+                    .map(|r| self.resolve_annotation(Some(&r.ty)))
+                    .unwrap_or(Ty::Void);
+                let fn_ty = Ty::Function {
+                    params: param_tys,
+                    return_type: Box::new(ret_ty),
+                };
+                if let Err(message) = self.symbols.define(name.lexeme(), fn_ty) {
+                    self.errors.push(TypeError {
+                        code: None,
+                        help: None,
+                        message,
+                        span: name.span,
+                    });
+                }
+                self.ffi_functions.insert(name.lexeme().to_string());
             }
         }
 
@@ -683,79 +733,6 @@ impl TypeChecker {
         None
     }
 
-    /// Best-effort source span for a statement, used for diagnostics.
-    fn stmt_span(&self, stmt: &Stmt) -> Span {
-        match stmt {
-            Stmt::Expression { expression }
-            | Stmt::Say { expression, .. }
-            | Stmt::Destructure {
-                initializer: expression,
-                ..
-            }
-            | Stmt::Return {
-                value: Some(expression),
-                ..
-            }
-            | Stmt::Throw { value: expression }
-            | Stmt::Var {
-                initializer: Some(expression),
-                ..
-            } => expression.span(),
-            Stmt::If { condition, .. }
-            | Stmt::While { condition, .. }
-            | Stmt::DoWhile { condition, .. }
-            | Stmt::ForIn {
-                iterable: condition,
-                ..
-            }
-            | Stmt::ForAwait {
-                producer: condition,
-                ..
-            }
-            | Stmt::ChanRecvFor {
-                channel: condition, ..
-            }
-            | Stmt::Match {
-                expression: condition,
-                ..
-            }
-            | Stmt::For {
-                condition: Some(condition),
-                ..
-            } => condition.span(),
-            Stmt::Break { span }
-            | Stmt::Continue { span }
-            | Stmt::Go {
-                keyword_span: span, ..
-            }
-            | Stmt::Block {
-                open_span: span, ..
-            } => *span,
-            Stmt::Retry { count, .. } => count.span(),
-            Stmt::Function { name, .. }
-            | Stmt::AsyncFunction { name, .. }
-            | Stmt::Class { name, .. }
-            | Stmt::Enum { name, .. }
-            | Stmt::TypeAlias { name, .. }
-            | Stmt::Trait { name, .. }
-            | Stmt::Impl {
-                trait_name: name, ..
-            }
-            | Stmt::Test { name, .. }
-            | Stmt::Use { library: name, .. }
-            | Stmt::Var { name, .. } => name.span,
-            Stmt::Return { value: None } => Span::dummy(),
-            Stmt::Try { try_block, .. } | Stmt::Unsafe { body: try_block } => {
-                self.stmt_span(try_block)
-            }
-            Stmt::Quiet { body, .. } => self.stmt_span(body),
-            Stmt::For {
-                init: Some(init), ..
-            } => self.stmt_span(init),
-            Stmt::For { init: None, .. } => Span::dummy(),
-        }
-    }
-
     /// Check a destructuring match arm: the variant must exist on the
     /// scrutinee's type (result cells expose `Ok` / `Err`), and the binder
     /// is scoped to the arm body with the payload's type.
@@ -823,6 +800,7 @@ impl TypeChecker {
             } => {
                 self.check_function(name.lexeme(), params, return_type, body, name.span, true);
             }
+            Stmt::ExternFunction { .. } | Stmt::ExternBlock { .. } => {}
             Stmt::Test { body, .. } => {
                 // A test block is a no-argument, void function.
                 self.check_function("", &[], &None, body, Span::dummy(), false);
@@ -1313,10 +1291,12 @@ impl TypeChecker {
                 library,
                 is_file_path: false,
                 alias,
+                imported_symbols,
                 ..
-            } => {
+            } if imported_symbols.is_empty() => {
                 // `use strings as s` binds the alias `s`; bare imports bind the
                 // module name itself. Either way it is an object namespace.
+                // Rust crates (`use @serde_json`) behave identically.
                 let name = alias
                     .as_ref()
                     .map_or_else(|| library.lexeme(), |a| a.lexeme());
@@ -1329,11 +1309,22 @@ impl TypeChecker {
             Stmt::Use {
                 is_file_path: true,
                 alias: Some(alias),
+                imported_symbols,
                 ..
-            } => {
+            } if imported_symbols.is_empty() => {
                 let name = alias.lexeme();
                 if self.symbols.lookup(name).is_none() {
                     self.symbols.define(name, Ty::Object).ok();
+                }
+            }
+            Stmt::Use {
+                imported_symbols, ..
+            } if !imported_symbols.is_empty() => {
+                for symbol in imported_symbols {
+                    let name = symbol.lexeme();
+                    if self.symbols.lookup(name).is_none() {
+                        self.symbols.define(name, Ty::Any).ok();
+                    }
                 }
             }
             Stmt::Use { .. } => {}
@@ -1346,7 +1337,7 @@ impl TypeChecker {
         params: &[ntsc_ast::expr::FunctionParam],
         return_type: &Option<ntsc_ast::types::ReturnType>,
         body: &[Stmt],
-        _span: Span,
+        span: Span,
         is_async: bool,
     ) {
         let expected_return = match return_type {
@@ -1369,7 +1360,7 @@ impl TypeChecker {
 
         self.symbols.push_scope();
         self.capture_bases.push(self.symbols.depth());
-        let prev_return_type = self.current_return_type.replace(expected_return);
+        let prev_return_type = self.current_return_type.replace(expected_return.clone());
         let prev_async_depth = self.async_depth;
         if is_async {
             self.async_depth += 1;
@@ -1381,7 +1372,6 @@ impl TypeChecker {
             for stmt in body {
                 self.validate_await_placement(stmt, true);
                 self.validate_chan_placement(stmt, true);
-                self.validate_async_return_placement(stmt, true);
             }
         }
 
@@ -1402,12 +1392,22 @@ impl TypeChecker {
             for stmt in body {
                 self.validate_await_placement(stmt, true);
                 self.validate_chan_placement(stmt, true);
-                self.validate_async_return_placement(stmt, true);
             }
         }
 
         for stmt in body {
             self.check_statement(stmt);
+        }
+
+        if expected_return != Ty::Void && can_fall_through(body) {
+            self.errors.push(TypeError {
+                code: None,
+                help: Some(format!("add a `return` on every path of function `{name}`")),
+                message: format!(
+                    "function `{name}` may fall through without returning `{expected_return}`"
+                ),
+                span,
+            });
         }
 
         // Store function body for const evaluation.
@@ -1431,148 +1431,259 @@ impl TypeChecker {
         self.symbols.pop_scope();
     }
 
-    /// Enforce that `await` only appears at statement boundaries of an async
-    /// body: as a statement-level call, a variable initializer, or a return
-    /// value. Blocks at the top level are transparent; `await` anywhere
-    /// inside control flow is rejected.
-    fn validate_await_placement(&mut self, stmt: &Stmt, at_top_level: bool) {
+    fn validate_await_placement(&mut self, stmt: &Stmt, _at_top_level: bool) {
         match stmt {
-            Stmt::Block { statements, .. } if at_top_level => {
-                for inner in statements {
-                    self.validate_await_placement(inner, true);
-                }
-            }
-            Stmt::Expression { expression } if at_top_level => {
-                if let Some(span) = find_await(expression)
-                    && !matches!(expression, Expr::Await { .. })
-                {
-                    self.errors.push(TypeError {
-                        code: None,
-                        help: None,
-                        message: "await must be a statement-level call".into(),
-                        span,
-                    });
-                }
-            }
-            Stmt::Var {
-                initializer: Some(initializer),
+            Stmt::Expression { expression }
+            | Stmt::Var {
+                initializer: Some(expression),
                 ..
-            } if at_top_level => {
-                if let Some(span) = find_await(initializer)
-                    && !matches!(initializer, Expr::Await { .. })
-                {
-                    self.errors.push(TypeError {
-                        code: None,
-                        help: None,
-                        message: "await must be a statement-level call".into(),
-                        span,
-                    });
+            }
+            | Stmt::Return {
+                value: Some(expression),
+                ..
+            } => self.validate_await_expression(expression),
+            Stmt::Say { expression, .. } | Stmt::Throw { value: expression } => {
+                self.validate_await_expression(expression)
+            }
+            Stmt::Block { statements, .. } => {
+                for inner in statements {
+                    self.validate_await_placement(inner, false);
                 }
             }
-            Stmt::Return {
-                value: Some(value), ..
-            } if at_top_level => {
-                if let Some(span) = find_await(value)
-                    && !matches!(value, Expr::Await { .. })
-                {
-                    self.errors.push(TypeError {
-                        code: None,
-                        help: None,
-                        message: "await must be a statement-level call".into(),
-                        span,
-                    });
+            Stmt::If {
+                condition,
+                then_branch,
+                elif_branches,
+                else_branch,
+            } => {
+                self.validate_await_expression(condition);
+                self.validate_await_placement(then_branch, false);
+                for branch in elif_branches {
+                    self.validate_await_expression(&branch.condition);
+                    self.validate_await_placement(&branch.body, false);
+                }
+                if let Some(else_branch) = else_branch {
+                    self.validate_await_placement(else_branch, false);
                 }
             }
-            other => {
-                if let Some(span) = find_await_in_stmt(other) {
-                    self.errors.push(TypeError {
-                        code: None,
-                        help: None,
-                        message: "await is not allowed inside control flow in async functions"
-                            .into(),
-                        span,
-                    });
+            Stmt::While { condition, body } => {
+                self.validate_await_expression(condition);
+                self.validate_await_placement(body, false);
+            }
+            Stmt::DoWhile { body, condition } => {
+                self.validate_await_placement(body, false);
+                self.validate_await_expression(condition);
+            }
+            Stmt::For {
+                init,
+                condition,
+                update,
+                body,
+            } => {
+                if let Some(init) = init {
+                    self.validate_await_placement(init, false);
+                }
+                if let Some(condition) = condition {
+                    self.validate_await_expression(condition);
+                }
+                if let Some(update) = update {
+                    self.validate_await_expression(update);
+                }
+                self.validate_await_placement(body, false);
+            }
+            Stmt::ForIn { iterable, body, .. } => {
+                self.validate_await_expression(iterable);
+                self.validate_await_placement(body, false);
+            }
+            Stmt::ForAwait { producer, body, .. } => {
+                self.validate_await_expression(producer);
+                self.validate_await_placement(body, false);
+            }
+            Stmt::Match {
+                expression,
+                cases,
+                default_case,
+            } => {
+                self.validate_await_expression(expression);
+                for case in cases {
+                    self.validate_await_expression(&case.value);
+                    if let Some(guard) = &case.guard {
+                        self.validate_await_expression(guard);
+                    }
+                    self.validate_await_placement(&case.body, false);
+                }
+                if let Some(default_case) = default_case {
+                    self.validate_await_placement(default_case, false);
                 }
             }
+            Stmt::Try {
+                try_block,
+                catch_block,
+                finally_block,
+                ..
+            } => {
+                self.validate_await_placement(try_block, false);
+                if let Some(catch_block) = catch_block {
+                    self.validate_await_placement(catch_block, false);
+                }
+                if let Some(finally_block) = finally_block {
+                    self.validate_await_placement(finally_block, false);
+                }
+            }
+            Stmt::Retry {
+                count,
+                body,
+                catch_block,
+                ..
+            } => {
+                self.validate_await_expression(count);
+                self.validate_await_placement(body, false);
+                if let Some(catch_block) = catch_block {
+                    self.validate_await_placement(catch_block, false);
+                }
+            }
+            Stmt::ChanRecvFor { channel, body, .. } => {
+                self.validate_await_expression(channel);
+                self.validate_await_placement(body, false);
+            }
+            _ => {}
         }
     }
 
-    /// Enforce that channel send/receive suspension points only appear at the
-    /// top level of an async body (as a statement-level expression, a
-    /// variable initializer, or a return value), mirroring `await`. A channel
-    /// op nested in control flow would need a suspension point the codegen
-    /// does not yet lower.
-    fn validate_chan_placement(&mut self, stmt: &Stmt, at_top_level: bool) {
-        match stmt {
-            Stmt::Block { statements, .. } if at_top_level => {
-                for inner in statements {
-                    self.validate_chan_placement(inner, true);
-                }
-            }
-            Stmt::Expression { expression } if at_top_level => {
-                if !matches!(expression, Expr::ChanSend { .. } | Expr::ChanRecv { .. })
-                    && let Some(span) = chan_op_span(expression)
-                {
-                    self.errors.push(TypeError {
-                        code: None,
-                        help: None,
-                        message: "channel send/receive must be a top-level statement of an async function".into(),
-                        span,
-                    });
-                }
-            }
-            other => {
-                if let Some(span) = chan_in_stmt(other) {
-                    self.errors.push(TypeError {
-                        code: None,
-                        help: None,
-                        message: "channel operations are not yet allowed inside control flow of async functions".into(),
-                        span,
-                    });
-                }
-            }
+    fn validate_await_expression(&mut self, expression: &Expr) {
+        if let Expr::Await { .. } = expression {
+            return;
+        }
+        if let Expr::Assign { value, .. } = expression
+            && matches!(value.as_ref(), Expr::Await { .. })
+        {
+            return;
+        }
+        if let Some(span) = find_await(expression) {
+            self.errors.push(TypeError {
+                code: None,
+                help: None,
+                message: "await must be a statement-level call".into(),
+                span,
+            });
         }
     }
 
-    /// Enforce that `return` only appears at statement level inside an async
-    /// body. A nested return would terminate the poll function without
-    /// storing the result and marking the future done, so the caller would
-    /// read garbage. Lambdas and nested functions are independent
-    /// synchronous functions and are exempt.
-    fn validate_async_return_placement(&mut self, stmt: &Stmt, at_top_level: bool) {
+    fn validate_chan_placement(&mut self, stmt: &Stmt, _at_top_level: bool) {
         match stmt {
-            Stmt::Block { statements, .. } if at_top_level => {
+            Stmt::Expression { expression } => self.validate_chan_expression(expression),
+            Stmt::Block { statements, .. } => {
                 for inner in statements {
-                    self.validate_async_return_placement(inner, true);
+                    self.validate_chan_placement(inner, false);
                 }
             }
-            Stmt::Return {
-                value: Some(value), ..
-            } if !at_top_level => {
-                self.errors.push(TypeError {
-                    code: None,
-                    help: None,
-                    message: "return must be at statement level in async functions".into(),
-                    span: value.span(),
-                });
-            }
-            Stmt::Return { .. } if !at_top_level => {
-                self.errors.push(TypeError {
-                    code: None,
-                    help: None,
-                    message: "return must be at statement level in async functions".into(),
-                    span: self.stmt_span(stmt),
-                });
-            }
-            Stmt::Function { .. } | Stmt::AsyncFunction { .. } => {}
-            other => {
-                let children = async_stmt_children(other);
-                for child in children {
-                    // A top-level return, and returns in plain
-                    // (synchronous) functions, are fine.
-                    self.validate_async_return_placement(child, false);
+            Stmt::If {
+                condition,
+                then_branch,
+                elif_branches,
+                else_branch,
+            } => {
+                self.validate_chan_expression(condition);
+                self.validate_chan_placement(then_branch, false);
+                for branch in elif_branches {
+                    self.validate_chan_expression(&branch.condition);
+                    self.validate_chan_placement(&branch.body, false);
+                }
+                if let Some(else_branch) = else_branch {
+                    self.validate_chan_placement(else_branch, false);
                 }
             }
+            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+                self.validate_chan_expression(condition);
+                self.validate_chan_placement(body, false);
+            }
+            Stmt::For {
+                init,
+                condition,
+                update,
+                body,
+            } => {
+                if let Some(init) = init {
+                    self.validate_chan_placement(init, false);
+                }
+                if let Some(condition) = condition {
+                    self.validate_chan_expression(condition);
+                }
+                if let Some(update) = update {
+                    self.validate_chan_expression(update);
+                }
+                self.validate_chan_placement(body, false);
+            }
+            Stmt::ForIn { iterable, body, .. }
+            | Stmt::ForAwait {
+                producer: iterable,
+                body,
+                ..
+            } => {
+                self.validate_chan_expression(iterable);
+                self.validate_chan_placement(body, false);
+            }
+            Stmt::Match {
+                expression,
+                cases,
+                default_case,
+            } => {
+                self.validate_chan_expression(expression);
+                for case in cases {
+                    self.validate_chan_expression(&case.value);
+                    if let Some(guard) = &case.guard {
+                        self.validate_chan_expression(guard);
+                    }
+                    self.validate_chan_placement(&case.body, false);
+                }
+                if let Some(default_case) = default_case {
+                    self.validate_chan_placement(default_case, false);
+                }
+            }
+            Stmt::Try {
+                try_block,
+                catch_block,
+                finally_block,
+                ..
+            } => {
+                self.validate_chan_placement(try_block, false);
+                if let Some(catch_block) = catch_block {
+                    self.validate_chan_placement(catch_block, false);
+                }
+                if let Some(finally_block) = finally_block {
+                    self.validate_chan_placement(finally_block, false);
+                }
+            }
+            Stmt::Retry {
+                count,
+                body,
+                catch_block,
+                ..
+            } => {
+                self.validate_chan_expression(count);
+                self.validate_chan_placement(body, false);
+                if let Some(catch_block) = catch_block {
+                    self.validate_chan_placement(catch_block, false);
+                }
+            }
+            Stmt::ChanRecvFor { channel, body, .. } => {
+                self.validate_chan_expression(channel);
+                self.validate_chan_placement(body, false);
+            }
+            _ => {}
+        }
+    }
+
+    fn validate_chan_expression(&mut self, expression: &Expr) {
+        if find_chan_in_expr(expression)
+            && !matches!(expression, Expr::ChanSend { .. } | Expr::ChanRecv { .. })
+        {
+            self.errors.push(TypeError {
+                code: None,
+                help: None,
+                message: "channel send/receive must be a statement-level expression".into(),
+                span: expression.span(),
+            });
         }
     }
 
@@ -1737,6 +1848,25 @@ impl TypeChecker {
 
     fn require_known_annotation(&mut self, annotation: Option<&TypeAnnotation>, span: Span) {
         match annotation {
+            Some(TypeAnnotation::Named(name)) if name.lexeme() == "void" => {}
+            Some(TypeAnnotation::Named(name))
+                if matches!(
+                    name.lexeme(),
+                    "byte"
+                        | "c_char"
+                        | "c_uchar"
+                        | "c_short"
+                        | "c_ushort"
+                        | "c_int"
+                        | "c_uint"
+                        | "c_long"
+                        | "c_ulong"
+                        | "c_longlong"
+                        | "c_ulonglong"
+                        | "c_size_t"
+                        | "c_float"
+                        | "c_double"
+                ) => {}
             Some(TypeAnnotation::Named(name))
                 if !matches!(self.symbols.lookup(name.lexeme()), Some(Ty::Class(_))) =>
             {
@@ -2008,37 +2138,40 @@ impl TypeChecker {
     fn check_expression(&mut self, expr: &Expr) -> Option<Ty> {
         match expr {
             Expr::Literal { value, .. } => Some(self.literal_type(value)),
-            Expr::Variable { name } => match self.symbols.lookup_depth(name.lexeme()) {
-                Some((depth, ty)) => {
-                    if self.is_captured(name.lexeme(), depth) {
+            Expr::Variable { name } => {
+                let lex = name.lexeme().trim_start_matches('@');
+                match self.symbols.lookup_depth(lex) {
+                    Some((depth, ty)) => {
+                        if self.is_captured(lex, depth) {
+                            self.errors.push(TypeError {
+                                code: None,
+                                help: None,
+                                message: format!(
+                                    "lambda cannot capture outer variable `{}`; pass it as a parameter or use a global value",
+                                    lex
+                                ),
+                                span: name.span,
+                            });
+                        }
+                        Some(ty.clone())
+                    }
+                    None => {
+                        if lex == "_" {
+                            return Some(Ty::Any);
+                        }
+                        if self.enum_members.contains(lex) {
+                            return Some(Ty::Int);
+                        }
                         self.errors.push(TypeError {
                             code: None,
                             help: None,
-                            message: format!(
-                                "lambda cannot capture outer variable `{}`; pass it as a parameter or use a global value",
-                                name.lexeme()
-                            ),
+                            message: format!("undefined variable `{}`", lex),
                             span: name.span,
                         });
+                        Some(Ty::Any)
                     }
-                    Some(ty.clone())
                 }
-                None => {
-                    if name.lexeme() == "_" {
-                        return Some(Ty::Any);
-                    }
-                    if self.enum_members.contains(name.lexeme()) {
-                        return Some(Ty::Int);
-                    }
-                    self.errors.push(TypeError {
-                        code: None,
-                        help: None,
-                        message: format!("undefined variable `{}`", name.lexeme()),
-                        span: name.span,
-                    });
-                    Some(Ty::Any)
-                }
-            },
+            }
             Expr::Binary { left, op, right } => self.check_binary(left, op, right),
             Expr::Unary { op, right } => self.check_unary(op, right),
             Expr::PostfixUnary { op, left } => self.check_postfix_unary(op, left),
@@ -2209,7 +2342,7 @@ impl TypeChecker {
                 params,
                 return_type,
                 body,
-                ..
+                span,
             } => {
                 self.symbols.push_scope();
                 self.capture_bases.push(self.symbols.depth());
@@ -2239,6 +2372,14 @@ impl TypeChecker {
                 self.async_depth = 0;
                 for stmt in body {
                     self.check_statement(stmt);
+                }
+                if ret != Ty::Void && can_fall_through(body) {
+                    self.errors.push(TypeError {
+                        code: None,
+                        help: Some("add a `return` on every path of the lambda".into()),
+                        message: format!("lambda may fall through without returning `{ret}`"),
+                        span: *span,
+                    });
                 }
                 self.async_depth = saved_async_depth;
                 self.current_return_type = saved_return;
@@ -2906,6 +3047,15 @@ impl TypeChecker {
                 }
                 Some(Ty::String)
             }
+            Expr::Member { object, property } if matches!(object.as_ref(), Expr::Variable { name } if name.lexeme().starts_with('@')) =>
+            {
+                // Awaiting a Rust-crate bridge call (`@serenity.Client_start(client)`):
+                // the adaptor runs the future on a real runtime and the
+                // goroutine parks on its async-op poll, so any `@crate.fn`
+                // call is awaitable. The result type is resolved during
+                // codegen from the bridge's return label.
+                Some(Ty::Any)
+            }
             Expr::Variable { name } => {
                 let callee_name = name.lexeme();
                 if !self.async_fns.contains(callee_name) {
@@ -3383,6 +3533,22 @@ impl TypeChecker {
     }
 
     fn check_call(&mut self, callee: &Expr, arguments: &[Expr]) -> Option<Ty> {
+        let is_ffi_call =
+            matches!(callee, Expr::Variable { name } if self.ffi_functions.contains(name.lexeme()));
+        if let Expr::Variable { name } = callee
+            && self.ffi_functions.contains(name.lexeme())
+            && self.unsafe_depth == 0
+        {
+            self.errors.push(TypeError {
+                code: None,
+                help: Some(
+                    "wrap the call in `unsafe { ... }` after checking its C preconditions".into(),
+                ),
+                message: format!("FFI call `{}` requires an `unsafe` block", name.lexeme()),
+                span: callee.span(),
+            });
+        }
+
         // An async function call without `await` would start the future
         // but never poll it to completion, so it is rejected here.
         if let Expr::Variable { name } = callee
@@ -3636,7 +3802,9 @@ impl TypeChecker {
                                 ),
                                 span: argument.span(),
                             });
-                        } else if !self.assignable(parameter, &argument_ty) {
+                        } else if !(is_ffi_call && ffi_pointer_compatible(parameter, &argument_ty))
+                            && !self.assignable(parameter, &argument_ty)
+                        {
                             self.errors.push(TypeError {
                                 code: None,
                                 help: None,
@@ -3744,6 +3912,31 @@ impl TypeChecker {
             Some(TypeAnnotation::RawPointer(inner, mutable)) => {
                 Ty::RawPointer(Box::new(self.resolve_annotation(Some(inner))), *mutable)
             }
+            Some(TypeAnnotation::Named(token)) if token.lexeme() == "void" => Ty::Void,
+            Some(TypeAnnotation::Named(token))
+                if matches!(
+                    token.lexeme(),
+                    "byte"
+                        | "c_char"
+                        | "c_uchar"
+                        | "c_short"
+                        | "c_ushort"
+                        | "c_int"
+                        | "c_uint"
+                        | "c_long"
+                        | "c_ulong"
+                        | "c_longlong"
+                        | "c_ulonglong"
+                        | "c_size_t"
+                ) =>
+            {
+                Ty::Int
+            }
+            Some(TypeAnnotation::Named(token))
+                if matches!(token.lexeme(), "c_float" | "c_double") =>
+            {
+                Ty::Float
+            }
             Some(TypeAnnotation::Named(token)) => Ty::Class(token.lexeme().to_string()),
             // Rewritten to the concrete class before checking runs.
             Some(TypeAnnotation::ImplTrait(_)) => Ty::Any,
@@ -3770,6 +3963,14 @@ impl TypeChecker {
 /// the value it points at.
 fn is_borrow_ty(ty: &Ty) -> bool {
     matches!(ty, Ty::View(..) | Ty::Ref(..))
+}
+
+fn ffi_pointer_compatible(parameter: &Ty, argument: &Ty) -> bool {
+    matches!(
+        (parameter, argument),
+        (Ty::RawPointer(_, parameter_mut), Ty::RawPointer(_, argument_mut))
+            if !*parameter_mut || *argument_mut
+    )
 }
 
 fn base_class_name(ty: &Ty) -> Option<&str> {
@@ -3912,116 +4113,6 @@ fn find_await(expr: &Expr) -> Option<Span> {
     }
 }
 
-/// Returns the span of the first `await` expression reachable inside
-/// `stmt`.
-fn find_await_in_stmt(stmt: &Stmt) -> Option<Span> {
-    match stmt {
-        Stmt::Expression { expression }
-        | Stmt::Var {
-            initializer: Some(expression),
-            ..
-        }
-        | Stmt::Return {
-            value: Some(expression),
-            ..
-        }
-        | Stmt::Destructure {
-            initializer: expression,
-            ..
-        } => find_await(expression),
-        Stmt::Say { expression, .. } => find_await(expression),
-        Stmt::Block { statements, .. } => statements.iter().find_map(find_await_in_stmt),
-        Stmt::If {
-            condition,
-            then_branch,
-            elif_branches,
-            else_branch,
-        } => find_await(condition)
-            .or_else(|| find_await_in_stmt(then_branch))
-            .or_else(|| {
-                elif_branches.iter().find_map(|branch| {
-                    find_await(&branch.condition).or_else(|| find_await_in_stmt(&branch.body))
-                })
-            })
-            .or_else(|| else_branch.as_ref().and_then(|b| find_await_in_stmt(b))),
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-            find_await(condition).or_else(|| find_await_in_stmt(body))
-        }
-        Stmt::For {
-            init,
-            condition,
-            update,
-            body,
-        } => init
-            .as_ref()
-            .and_then(|init| find_await_in_stmt(init))
-            .or_else(|| condition.as_ref().and_then(find_await))
-            .or_else(|| update.as_ref().and_then(find_await))
-            .or_else(|| find_await_in_stmt(body)),
-        Stmt::ForIn { iterable, body, .. } => {
-            find_await(iterable).or_else(|| find_await_in_stmt(body))
-        }
-        Stmt::ForAwait { producer, body, .. } => {
-            find_await(producer).or_else(|| find_await_in_stmt(body))
-        }
-        Stmt::Match {
-            expression,
-            cases,
-            default_case,
-        } => find_await(expression)
-            .or_else(|| {
-                cases
-                    .iter()
-                    .flat_map(|case| [&case.value])
-                    .find_map(find_await)
-            })
-            .or_else(|| {
-                cases.iter().find_map(|case| {
-                    case.guard
-                        .as_ref()
-                        .and_then(find_await)
-                        .or_else(|| find_await_in_stmt(&case.body))
-                })
-            })
-            .or_else(|| default_case.as_ref().and_then(|b| find_await_in_stmt(b))),
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Return { .. } | Stmt::Var { .. } => None,
-        Stmt::Try {
-            try_block,
-            catch_block,
-            finally_block,
-            ..
-        } => find_await_in_stmt(try_block)
-            .or_else(|| catch_block.as_ref().and_then(|b| find_await_in_stmt(b)))
-            .or_else(|| finally_block.as_ref().and_then(|b| find_await_in_stmt(b))),
-        Stmt::Throw { value } => find_await(value),
-        Stmt::Retry {
-            count,
-            body,
-            catch_block,
-            ..
-        } => find_await(count)
-            .or_else(|| find_await_in_stmt(body))
-            .or_else(|| catch_block.as_ref().and_then(|b| find_await_in_stmt(b))),
-        Stmt::Unsafe { body } => find_await_in_stmt(body),
-        Stmt::Quiet { body, .. } => find_await_in_stmt(body),
-        Stmt::Function { .. } | Stmt::AsyncFunction { .. } | Stmt::Test { .. } => None,
-        Stmt::Class { .. }
-        | Stmt::Enum { .. }
-        | Stmt::TypeAlias { .. }
-        | Stmt::Trait { .. }
-        | Stmt::Impl { .. }
-        | Stmt::Use { .. } => None,
-        Stmt::ChanRecvFor { channel, body, .. } => {
-            find_await(channel).or_else(|| find_await_in_stmt(body))
-        }
-        Stmt::Go { call, block, .. } => find_await(call).or_else(|| {
-            block
-                .as_ref()
-                .and_then(|statements| statements.iter().find_map(find_await_in_stmt))
-        }),
-    }
-}
-
 /// Returns `true` if a channel send/receive suspension point is reachable
 /// inside `expr`.
 fn find_chan_in_expr(expr: &Expr) -> bool {
@@ -4082,204 +4173,6 @@ fn find_chan_in_expr(expr: &Expr) -> bool {
         }
         Expr::TupleLiteral { elements, .. } => elements.iter().any(find_chan_in_expr),
         _ => false,
-    }
-}
-
-/// Returns the `op_span` of a direct channel send/receive, else the span of
-/// the outermost expression if a nested channel op is reachable.
-fn chan_op_span(expr: &Expr) -> Option<Span> {
-    match expr {
-        Expr::ChanSend { op_span, .. } | Expr::ChanRecv { op_span, .. } => Some(*op_span),
-        _ if find_chan_in_expr(expr) => Some(expr.span()),
-        _ => None,
-    }
-}
-
-/// Returns the span of the first channel op reachable inside `stmt`.
-fn chan_in_stmt(stmt: &Stmt) -> Option<Span> {
-    match stmt {
-        Stmt::Expression { expression }
-        | Stmt::Var {
-            initializer: Some(expression),
-            ..
-        }
-        | Stmt::Return {
-            value: Some(expression),
-            ..
-        }
-        | Stmt::Destructure {
-            initializer: expression,
-            ..
-        } => (find_chan_in_expr(expression)).then(|| expression.span()),
-        Stmt::Say { expression, .. } => find_chan_in_expr(expression).then(|| expression.span()),
-        Stmt::Block { statements, .. } => statements.iter().find_map(chan_in_stmt),
-        Stmt::If {
-            condition,
-            then_branch,
-            elif_branches,
-            else_branch,
-        } => (find_chan_in_expr(condition))
-            .then(|| condition.span())
-            .or_else(|| {
-                chan_in_stmt(then_branch).or_else(|| {
-                    elif_branches
-                        .iter()
-                        .find_map(|b| {
-                            (find_chan_in_expr(&b.condition))
-                                .then(|| b.condition.span())
-                                .or_else(|| chan_in_stmt(&b.body))
-                        })
-                        .or_else(|| else_branch.as_ref().and_then(|b| chan_in_stmt(b)))
-                })
-            }),
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-            (find_chan_in_expr(condition))
-                .then(|| condition.span())
-                .or_else(|| chan_in_stmt(body))
-        }
-        Stmt::For {
-            init,
-            condition,
-            update,
-            body,
-        } => init
-            .as_ref()
-            .and_then(|i| chan_in_stmt(i))
-            .or_else(|| condition.as_ref().and_then(chan_in_expr_stmt))
-            .or_else(|| update.as_ref().and_then(chan_in_expr_stmt))
-            .or_else(|| chan_in_stmt(body)),
-        Stmt::ForIn { iterable, body, .. } => (find_chan_in_expr(iterable))
-            .then(|| iterable.span())
-            .or_else(|| chan_in_stmt(body)),
-        Stmt::ForAwait { producer, body, .. } => (find_chan_in_expr(producer))
-            .then(|| producer.span())
-            .or_else(|| chan_in_stmt(body)),
-        Stmt::Match {
-            expression,
-            cases,
-            default_case,
-        } => (find_chan_in_expr(expression))
-            .then(|| expression.span())
-            .or_else(|| {
-                cases
-                    .iter()
-                    .flat_map(|case| [&case.value])
-                    .find_map(|v| find_chan_in_expr(v).then(|| v.span()))
-                    .or_else(|| {
-                        cases.iter().find_map(|case| {
-                            case.guard
-                                .as_ref()
-                                .and_then(|g| find_chan_in_expr(g).then(|| g.span()))
-                                .or_else(|| chan_in_stmt(&case.body))
-                        })
-                    })
-                    .or_else(|| default_case.as_ref().and_then(|b| chan_in_stmt(b)))
-            }),
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Return { .. } | Stmt::Var { .. } => None,
-        Stmt::Try {
-            try_block,
-            catch_block,
-            finally_block,
-            ..
-        } => chan_in_stmt(try_block)
-            .or_else(|| catch_block.as_ref().and_then(|b| chan_in_stmt(b)))
-            .or_else(|| finally_block.as_ref().and_then(|b| chan_in_stmt(b))),
-        Stmt::Throw { value } => find_chan_in_expr(value).then(|| value.span()),
-        Stmt::Retry {
-            count,
-            body,
-            catch_block,
-            ..
-        } => (find_chan_in_expr(count))
-            .then(|| count.span())
-            .or_else(|| chan_in_stmt(body))
-            .or_else(|| catch_block.as_ref().and_then(|b| chan_in_stmt(b))),
-        Stmt::Unsafe { body } => chan_in_stmt(body),
-        Stmt::Quiet { body, .. } => chan_in_stmt(body),
-        Stmt::Function { .. }
-        | Stmt::AsyncFunction { .. }
-        | Stmt::Test { .. }
-        | Stmt::Class { .. }
-        | Stmt::Enum { .. }
-        | Stmt::TypeAlias { .. }
-        | Stmt::Trait { .. }
-        | Stmt::Impl { .. }
-        | Stmt::Use { .. } => None,
-        Stmt::ChanRecvFor { channel, body, .. } => (find_chan_in_expr(channel))
-            .then(|| channel.span())
-            .or_else(|| chan_in_stmt(body)),
-        Stmt::Go { call, block, .. } => {
-            (find_chan_in_expr(call)).then(|| call.span()).or_else(|| {
-                block
-                    .as_ref()
-                    .and_then(|statements| statements.iter().find_map(chan_in_stmt))
-            })
-        }
-    }
-}
-
-/// Helper for `chan_in_stmt` on a condition expression.
-fn chan_in_expr_stmt(expr: &Expr) -> Option<Span> {
-    find_chan_in_expr(expr).then(|| expr.span())
-}
-
-/// Child statements of a statement, for validating async return
-/// placement. Nested function/lambda bodies are excluded: they are
-/// independent synchronous functions with their own returns.
-fn async_stmt_children(stmt: &Stmt) -> Vec<&Stmt> {
-    match stmt {
-        Stmt::Block { statements, .. } => statements.iter().collect(),
-        Stmt::If {
-            then_branch,
-            elif_branches,
-            else_branch,
-            ..
-        } => {
-            let mut children = vec![then_branch.as_ref()];
-            children.extend(elif_branches.iter().map(|b| b.body.as_ref()));
-            if let Some(else_branch) = else_branch {
-                children.push(else_branch.as_ref());
-            }
-            children
-        }
-        Stmt::While { body, .. }
-        | Stmt::DoWhile { body, .. }
-        | Stmt::Retry { body, .. }
-        | Stmt::Unsafe { body, .. }
-        | Stmt::Quiet { body, .. } => vec![body.as_ref()],
-        Stmt::For { init, body, .. } => {
-            let mut children: Vec<&Stmt> = init.as_ref().map(|i| i.as_ref()).into_iter().collect();
-            children.push(body.as_ref());
-            children
-        }
-        Stmt::ForIn { body, .. } | Stmt::ForAwait { body, .. } => vec![body.as_ref()],
-        Stmt::Match {
-            cases,
-            default_case,
-            ..
-        } => {
-            let mut children: Vec<&Stmt> = cases.iter().map(|case| &case.body).collect();
-            if let Some(default_case) = default_case {
-                children.push(default_case.as_ref());
-            }
-            children
-        }
-        Stmt::Try {
-            try_block,
-            catch_block,
-            finally_block,
-            ..
-        } => {
-            let mut children = vec![try_block.as_ref()];
-            if let Some(catch_block) = catch_block {
-                children.push(catch_block.as_ref());
-            }
-            if let Some(finally_block) = finally_block {
-                children.push(finally_block.as_ref());
-            }
-            children
-        }
-        _ => Vec::new(),
     }
 }
 
@@ -4445,6 +4338,27 @@ mod tests {
     }
 
     #[test]
+    fn ffi_calls_require_unsafe() {
+        let errors = check_source(
+            r#"extern "C" fun abs(int value) -> int
+fun main() -> int { return abs(-1) }"#,
+        )
+        .expect_err("FFI calls outside unsafe must be rejected");
+        assert!(errors.iter().any(|error| {
+            error.message.contains("FFI call `abs`") && error.message.contains("unsafe")
+        }));
+    }
+
+    #[test]
+    fn ffi_calls_are_allowed_inside_unsafe() {
+        check_source(
+            r#"extern "C" { int abs(int value); }
+fun main() -> int { unsafe { return abs(-1) } }"#,
+        )
+        .expect("FFI calls inside unsafe should type-check");
+    }
+
+    #[test]
     fn raw_address_preserves_pointee_type() {
         let errs = check_source(
             "use memory\nclass Packet { var int id }\nfun f() { var own Packet packet = alloc(Packet())\n var &mut Packet write = &mut packet\n unsafe { var *mut int raw = memory.raw_address(write) } }",
@@ -4507,6 +4421,70 @@ mod tests {
         let errs = check_source("fun bad(int a) -> int { return \"hello\" }").unwrap_err();
 
         assert!(!errs.is_empty());
+    }
+
+    #[test]
+    fn non_void_function_must_return_on_every_path() {
+        let errors = check_source(
+            "use sys\nuse arrays\nfun main() -> int {\n    var args = sys.args()\n    if (arrays.length(args) < 2) { return 1 }\n    if (arrays.get(args, 1) == \"init\") { say(\"testing...\") }\n}",
+        )
+        .unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("may fall through")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn non_void_function_accepts_exhaustive_if_returns() {
+        check_source(
+            "fun classify(bool ready) -> int { if (ready) { return 1 } else { return 0 } }",
+        )
+        .expect("every branch returns");
+    }
+
+    #[test]
+    fn non_void_function_rejects_return_only_inside_a_loop() {
+        let errors = check_source("fun first(bool ready) -> int { while (ready) { return 1 } }")
+            .unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("may fall through")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn non_void_function_accepts_an_unconditional_returning_loop() {
+        check_source("fun forever() -> int { while (true) { return 1 } }")
+            .expect("the loop always enters and returns");
+    }
+
+    #[test]
+    fn non_void_function_accepts_return_through_finally() {
+        check_source("fun guarded() -> int { try { return 1 } finally { say(\"done\") } }")
+            .expect("finally runs before the return completes");
+    }
+
+    #[test]
+    fn unreachable_fallback_returns_remain_accepted() {
+        check_source("fun f() -> int { return 1\n return 0 }")
+            .expect("unreachable fallbacks do not change return coverage");
+    }
+
+    #[test]
+    fn non_void_lambda_must_return_on_every_path() {
+        let errors =
+            check_source("var f = fun(bool ready) -> int { if (ready) { return 1 } }").unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("lambda may fall through")),
+            "got: {errors:?}"
+        );
     }
 
     #[test]
@@ -4778,15 +4756,8 @@ mod tests {
 
     #[test]
     fn await_outside_statement_boundaries_is_rejected() {
-        let errors = check_source(
-            "async fun work() { }\nasync fun main() {\n    if (true) { await work() }\n}",
-        )
-        .unwrap_err();
-        assert!(errors.iter().any(|error| {
-            error
-                .message
-                .contains("await is not allowed inside control flow")
-        }));
+        check_source("async fun work() { }\nasync fun main() {\n    if (true) { await work() }\n}")
+            .expect("await in a control-flow statement is valid");
 
         let errors = check_source("async fun work() { }\nasync fun main() { await work() + 1 }")
             .unwrap_err();
@@ -4823,15 +4794,9 @@ mod tests {
     }
 
     #[test]
-    fn return_inside_control_flow_is_rejected_in_async_bodies() {
-        let errors =
-            check_source("async fun main() {\n    if (true) { return 1 }\n    return 1\n}")
-                .unwrap_err();
-        assert!(errors.iter().any(|error| {
-            error
-                .message
-                .contains("return must be at statement level in async")
-        }));
+    fn return_inside_control_flow_is_allowed_in_async_bodies() {
+        check_source("async fun main() -> int {\n    if (true) { return 1 }\n    return 1\n}")
+            .expect("nested returns are lowered through the async future result");
 
         assert!(
             check_source(
@@ -5204,17 +5169,9 @@ mod tests {
     }
 
     #[test]
-    fn channel_send_inside_control_flow_is_rejected() {
-        let errors = check_source(
-            "async fun f(chan[int] c) {\n    while (true) {\n        5 |> c\n    }\n}",
-        )
-        .unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.message.contains("inside control flow")),
-            "{errors:?}"
-        );
+    fn channel_send_inside_control_flow_is_allowed() {
+        check_source("async fun f(chan[int] c) {\n    while (true) {\n        5 |> c\n    }\n}")
+            .expect("channel send in an async control-flow statement is valid");
     }
 
     #[test]

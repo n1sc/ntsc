@@ -94,6 +94,24 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
 
+    /// `extern "C" fun name(params) [-> Type]` or a C-style declaration
+    /// inside `extern "C" { ... }`.
+    ExternFunction {
+        abi: Token,
+        name: Token,
+        params: Vec<FunctionParam>,
+        return_type: Option<ReturnTypeAnnotation>,
+        /// C-style declarations use ABI-width primitive aliases such as
+        /// `c_int` and `c_char`; the Neutron spelling uses ordinary types.
+        c_style: bool,
+    },
+
+    /// `extern "C" { ... }` containing C-style declarations.
+    ExternBlock {
+        abi: Token,
+        functions: Vec<Stmt>,
+    },
+
     /// `async fun name(params) [-> Type] { body }` — lowered to a poll-based
     /// state machine (see docs/async-rfc.md).
     AsyncFunction {
@@ -173,7 +191,11 @@ pub enum Stmt {
     Use {
         library: Token,
         is_file_path: bool,
+        /// Whether `library` was prefixed with `@` (a Rust crate from `[rust-deps]`).
+        is_rust: bool,
         imported_symbols: Vec<Token>,
+        /// Parallel to `imported_symbols`: whether each imported name had `@`.
+        imported_is_rust: Vec<bool>,
         alias: Option<Token>,
     },
 

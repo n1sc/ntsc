@@ -635,6 +635,7 @@ fn annotation_to_ty(annotation: &TypeAnnotation) -> crate::Ty {
         TypeAnnotation::RawPointer(inner, mutable) => {
             Ty::RawPointer(Box::new(annotation_to_ty(inner)), *mutable)
         }
+        TypeAnnotation::Named(token) if token.lexeme() == "void" => Ty::Void,
         TypeAnnotation::Named(token) => Ty::Class(token.lexeme().to_string()),
         TypeAnnotation::Shared(inner) => Ty::Shared(Box::new(annotation_to_ty(inner))),
         TypeAnnotation::ImplTrait(_) => Ty::Any,

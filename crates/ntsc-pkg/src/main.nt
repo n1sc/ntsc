@@ -12,15 +12,14 @@ use paths
 
 fun main() -> int {
     var args = sys.args()
-    var parts = strings.split(args, " ")
     var command = ""
     var extra = ""
 
-    if (arrays.length(parts) >= 2) {
-        command = arrays.get(parts, 1)
+    if (arrays.length(args) >= 2) {
+        command = arrays.get(args, 1)
     }
-    if (arrays.length(parts) >= 3) {
-        extra = arrays.get(parts, 2)
+    if (arrays.length(args) >= 3) {
+        extra = arrays.get(args, 2)
     }
 
     match (command) {

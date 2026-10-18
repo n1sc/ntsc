@@ -44,6 +44,7 @@ pub const BUILTIN_MODULES: &[&str] = &[
     "sort",
     "strings",
     "sys",
+    "term",
     "testing",
     "time",
     "toml",
@@ -99,9 +100,18 @@ impl Resolver {
             match statement {
                 Stmt::Function { name, .. }
                 | Stmt::AsyncFunction { name, .. }
+                | Stmt::ExternFunction { name, .. }
                 | Stmt::Class { name, .. }
                 | Stmt::Test { name, .. } => {
                     self.define(name.lexeme(), name.span);
+                }
+
+                Stmt::ExternBlock { functions, .. } => {
+                    for function in functions {
+                        if let Stmt::ExternFunction { name, .. } = function {
+                            self.define(name.lexeme(), name.span);
+                        }
+                    }
                 }
 
                 Stmt::Enum { name, members, .. } => {
@@ -229,6 +239,7 @@ impl Resolver {
             }
             Stmt::Function { params, body, .. } => self.resolve_function(params, body),
             Stmt::AsyncFunction { params, body, .. } => self.resolve_function(params, body),
+            Stmt::ExternFunction { .. } | Stmt::ExternBlock { .. } => {}
             Stmt::Test { body, .. } => self.resolve_function(&[], body),
             Stmt::Return { value } => {
                 if let Some(value) = value {
@@ -347,11 +358,14 @@ impl Resolver {
                 library,
                 is_file_path: false,
                 alias,
+                imported_symbols,
                 ..
-            } => {
+            } if imported_symbols.is_empty() => {
                 // Stdlib imports are idempotent: crossing file boundaries, the
                 // same module may be re-imported without conflicting. `use
                 // strings as s` binds the alias `s` instead of the module name.
+                // Rust crate imports (`use @serde_json`) behave identically for
+                // name resolution – they bind the crate name or its alias.
                 let name = alias
                     .as_ref()
                     .map_or_else(|| library.lexeme(), |a| a.lexeme());
@@ -364,11 +378,22 @@ impl Resolver {
             Stmt::Use {
                 is_file_path: true,
                 alias: Some(alias),
+                imported_symbols,
                 ..
-            } => {
+            } if imported_symbols.is_empty() => {
                 let name = alias.lexeme();
                 if !self.scopes.iter().any(|scope| scope.contains(name)) {
                     self.define(name, alias.span);
+                }
+            }
+            Stmt::Use {
+                imported_symbols, ..
+            } if !imported_symbols.is_empty() => {
+                for symbol in imported_symbols {
+                    let name = symbol.lexeme();
+                    if !self.scopes.iter().any(|scope| scope.contains(name)) {
+                        self.define(name, symbol.span);
+                    }
                 }
             }
             Stmt::Use { .. } => {}
@@ -390,7 +415,10 @@ impl Resolver {
         match expression {
             Expr::Literal { .. } => {}
             Expr::This { keyword } => self.require("this", keyword.span),
-            Expr::Variable { name } => self.require(name.lexeme(), name.span),
+            Expr::Variable { name } => {
+                let lex = name.lexeme().trim_start_matches('@');
+                self.require(lex, name.span)
+            }
             Expr::Assign { name, value } => {
                 self.require(name.lexeme(), name.span);
                 self.resolve_expression(value);

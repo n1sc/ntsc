@@ -1081,7 +1081,9 @@ impl OwnershipChecker {
             | Stmt::Impl { .. }
             | Stmt::Break { .. }
             | Stmt::Continue { .. }
-            | Stmt::Use { .. } => {}
+            | Stmt::Use { .. }
+            | Stmt::ExternFunction { .. }
+            | Stmt::ExternBlock { .. } => {}
             Stmt::Unsafe { body } => self.check_stmt(body),
             Stmt::Quiet { body, .. } => self.check_stmt(body),
             Stmt::Destructure {
@@ -2179,15 +2181,20 @@ fn thread_boundary(module: &str, prop: &str) -> Option<ThreadBoundary> {
     }
 }
 
-/// How an `arrays` module call treats its array argument: `push` and
-/// `pop` mutate the array in place (exclusive borrow), the constructors
-/// take no array, and every other call only reads it.
+/// How an `arrays` module call treats its array argument: the in-place
+/// mutators take it as an exclusive borrow, the constructors take no
+/// array, and every other call only reads it.
+///
+/// `clear` belongs with the mutators: it empties the array in place.
+/// Classifying it as a shared (read-only) borrow left the slot borrowed,
+/// so a later mutation through the same variable silently operated on a
+/// copy and the caller's array never changed.
 fn module_array_arg_view_kind(module: &str, prop: &str) -> Option<ViewKind> {
     if module != "arrays" {
         return None;
     }
     match prop {
-        "push" | "pop" => Some(ViewKind::Mut),
+        "push" | "pop" | "clear" => Some(ViewKind::Mut),
         "new" | "range" | "fill" => None,
         _ => Some(ViewKind::Shared),
     }
@@ -2327,6 +2334,8 @@ pub(crate) fn collect_stmt_uses(stmt: &Stmt, uses: &mut HashSet<String>) {
         Stmt::Unsafe { body } | Stmt::Quiet { body, .. } => collect_stmt_uses(body, uses),
         Stmt::Function { .. }
         | Stmt::AsyncFunction { .. }
+        | Stmt::ExternFunction { .. }
+        | Stmt::ExternBlock { .. }
         | Stmt::Test { .. }
         | Stmt::Class { .. }
         | Stmt::Enum { .. }

@@ -453,6 +453,28 @@ fn shift_stmt(stmt: &mut Stmt, base: usize) {
                 shift_stmt(stmt, base);
             }
         }
+        Stmt::ExternFunction {
+            abi,
+            name,
+            params,
+            return_type,
+            ..
+        } => {
+            shift_token(abi, base);
+            shift_token(name, base);
+            for param in params {
+                shift_param(param, base);
+            }
+            if let Some(return_type) = return_type {
+                shift_return(return_type, base);
+            }
+        }
+        Stmt::ExternBlock { abi, functions } => {
+            shift_token(abi, base);
+            for function in functions {
+                shift_stmt(function, base);
+            }
+        }
         Stmt::Return { value } => {
             if let Some(value) = value {
                 shift_expr(value, base);

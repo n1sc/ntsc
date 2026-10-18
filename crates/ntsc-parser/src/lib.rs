@@ -154,6 +154,7 @@ fn token_debug_name(kind: &TokenKind) -> &'static str {
         TokenKind::Test => "test",
         TokenKind::Async => "async",
         TokenKind::Await => "await",
+        TokenKind::Extern => "extern",
         TokenKind::TypeInt => "int",
         TokenKind::TypeFloat => "float",
         TokenKind::TypeString => "string",
@@ -173,6 +174,7 @@ fn token_debug_name(kind: &TokenKind) -> &'static str {
         TokenKind::Go => "go",
         TokenKind::Chan => "chan",
         TokenKind::Close => "close",
+        TokenKind::At => "@",
         TokenKind::Eof => "end of file",
     }
 }
@@ -207,6 +209,20 @@ impl<'src> Parser<'src> {
     }
 
     pub fn parse(tokens: &'src [Token]) -> Result<ntsc_ast::stmt::Program, Vec<ParseError>> {
+        let (program, errors) = Self::parse_recovering(tokens);
+        if errors.is_empty() {
+            Ok(program)
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Parse `tokens`, returning the successfully parsed statements together
+    /// with every error encountered. Error recovery skips to the next
+    /// statement boundary, so the returned program is a usable prefix of the
+    /// file. Used by the language server, which needs symbols and scopes
+    /// even while the buffer contains errors.
+    pub fn parse_recovering(tokens: &'src [Token]) -> (ntsc_ast::stmt::Program, Vec<ParseError>) {
         let mut parser = Self::new(tokens);
         let mut statements = Vec::new();
 
@@ -224,11 +240,7 @@ impl<'src> Parser<'src> {
             }
         }
 
-        if parser.errors.is_empty() {
-            Ok(ntsc_ast::stmt::Program { statements })
-        } else {
-            Err(parser.errors)
-        }
+        (ntsc_ast::stmt::Program { statements }, parser.errors)
     }
 
     // ── Token navigation ────────────────────────────────────────────
@@ -394,6 +406,7 @@ impl<'src> Parser<'src> {
                     | TokenKind::Enum
                     | TokenKind::Type
                     | TokenKind::Use
+                    | TokenKind::Extern
                     | TokenKind::Test
             ) {
                 return;
@@ -470,6 +483,7 @@ impl<'src> Parser<'src> {
             TokenKind::Break => self.parse_break_statement(),
             TokenKind::Continue => self.parse_continue_statement(),
             TokenKind::Use => self.parse_use_statement(),
+            TokenKind::Extern => self.parse_extern_declaration(),
             TokenKind::Test => self.parse_test_block(),
             TokenKind::LeftBrace => self.parse_block(),
             TokenKind::Say => self.parse_say_statement(),
@@ -770,6 +784,238 @@ impl<'src> Parser<'src> {
             return_type,
             body,
         })
+    }
+
+    /// Parse either the Neutron spelling
+    /// `extern "C" fun strlen(*const byte) -> int` or a C-style block such as
+    /// `extern "C" { size_t strlen(const char *); }`.
+    fn parse_extern_declaration(&mut self) -> Result<Stmt, ParseError> {
+        let _extern_token = self.advance();
+        let abi = self.expect(
+            TokenKind::StringLiteral(String::new()),
+            "expected ABI string after `extern`",
+        )?;
+        if abi.lexeme() != "C" {
+            return Err(ParseError {
+                message: format!(
+                    "unsupported extern ABI `{}`; only `C` is supported",
+                    abi.lexeme()
+                ),
+                span: abi.span,
+            });
+        }
+
+        if self.consume(&TokenKind::Fun).is_some() {
+            return self.parse_extern_function(abi, false);
+        }
+
+        self.skip_newlines();
+        self.expect(
+            TokenKind::LeftBrace,
+            "expected `fun` or `{` after extern ABI",
+        )?;
+        let mut declarations = Vec::new();
+        self.skip_newlines();
+        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+            let return_type = self.parse_c_type_annotation()?;
+            let name = self.expect_ident("expected C function name")?;
+            self.expect(TokenKind::LeftParen, "expected `(` after C function name")?;
+            let params = self.parse_c_parameters()?;
+            self.expect(TokenKind::RightParen, "expected `)` after C parameters")?;
+            self.consume_terminator();
+            declarations.push(Stmt::ExternFunction {
+                abi: abi.clone(),
+                name,
+                params,
+                return_type: Some(ReturnType {
+                    ty: return_type,
+                    arrow_span: abi.span,
+                }),
+                c_style: true,
+            });
+            self.skip_newlines();
+        }
+        self.expect(
+            TokenKind::RightBrace,
+            "expected `}` after extern declarations",
+        )?;
+        Ok(Stmt::ExternBlock {
+            abi,
+            functions: declarations,
+        })
+    }
+
+    fn parse_extern_function(&mut self, abi: Token, c_style: bool) -> Result<Stmt, ParseError> {
+        let name = self.expect_ident("expected extern function name")?;
+        self.expect(
+            TokenKind::LeftParen,
+            "expected `(` after extern function name",
+        )?;
+        let mut params = Vec::new();
+        if !self.check(&TokenKind::RightParen) {
+            loop {
+                let type_annotation =
+                    self.parse_declaration_type_annotation()
+                        .ok_or_else(|| ParseError {
+                            message: "expected extern parameter type".into(),
+                            span: self.peek().span,
+                        })?;
+                let param_name = if self.peek_at_ident(0)
+                    && matches!(self.peek_at(1), TokenKind::Comma | TokenKind::RightParen)
+                {
+                    self.advance()
+                } else {
+                    Token::new(
+                        TokenKind::Identifier(format!("__ffi_arg{}", params.len())),
+                        self.peek().span,
+                    )
+                };
+                params.push(FunctionParam {
+                    name: param_name,
+                    type_annotation: Some(type_annotation),
+                });
+                if self.consume(&TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+        }
+        self.expect(
+            TokenKind::RightParen,
+            "expected `)` after extern parameters",
+        )?;
+        let return_type = if self.consume(&TokenKind::ReturnArrow).is_some() {
+            let arrow_span = self.peek().span;
+            let ty = self.parse_type_annotation(true).ok_or_else(|| ParseError {
+                message: "expected extern return type".into(),
+                span: self.peek().span,
+            })?;
+            Some(ReturnType { ty, arrow_span })
+        } else {
+            None
+        };
+        self.consume_terminator();
+        Ok(Stmt::ExternFunction {
+            abi,
+            name,
+            params,
+            return_type,
+            c_style,
+        })
+    }
+
+    fn parse_c_parameters(&mut self) -> Result<Vec<FunctionParam>, ParseError> {
+        if self.check(&TokenKind::RightParen) {
+            return Ok(Vec::new());
+        }
+        if self.check_ident("void") && *self.peek_at(1) == TokenKind::RightParen {
+            self.advance();
+            return Ok(Vec::new());
+        }
+
+        let mut params = Vec::new();
+        loop {
+            let type_annotation = self.parse_c_type_annotation()?;
+            let name = if self.peek_at_ident(0)
+                && matches!(self.peek_at(1), TokenKind::Comma | TokenKind::RightParen)
+            {
+                self.advance()
+            } else {
+                Token::new(
+                    TokenKind::Identifier(format!("__ffi_arg{}", params.len())),
+                    self.peek().span,
+                )
+            };
+            params.push(FunctionParam {
+                name,
+                type_annotation: Some(type_annotation),
+            });
+            if self.consume(&TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        Ok(params)
+    }
+
+    fn parse_c_type_annotation(&mut self) -> Result<TypeAnnotation, ParseError> {
+        let _const_pointee = self.consume_keyword("const");
+        let base = self.advance();
+        let base_name = match &base.kind {
+            TokenKind::Identifier(name) => name.clone(),
+            TokenKind::TypeInt => "int".into(),
+            TokenKind::TypeFloat => "float".into(),
+            TokenKind::TypeBool => "bool".into(),
+            _ => String::new(),
+        };
+        let annotation_name = match base_name.as_str() {
+            "void" => "void".to_string(),
+            "char" => "c_char".to_string(),
+            "unsigned" => {
+                let next = self.expect_c_word("expected C type after `unsigned`")?;
+                let next_name = match &next.kind {
+                    TokenKind::Identifier(name) => name.as_str(),
+                    TokenKind::TypeInt => "int",
+                    _ => "",
+                };
+                match next_name {
+                    "char" => "c_uchar",
+                    "short" => "c_ushort",
+                    "int" => "c_uint",
+                    "long" => "c_ulong",
+                    other => {
+                        return Err(ParseError {
+                            message: format!("unsupported C type `unsigned {other}`"),
+                            span: next.span,
+                        });
+                    }
+                }
+                .to_string()
+            }
+            "short" => "c_short".to_string(),
+            "int" => "c_int".to_string(),
+            "long" => {
+                if self.check_ident("long") {
+                    self.advance();
+                    "c_longlong".to_string()
+                } else {
+                    "c_long".to_string()
+                }
+            }
+            "size_t" => "c_size_t".to_string(),
+            "float" => "c_float".to_string(),
+            "double" => "c_double".to_string(),
+            other => {
+                return Err(ParseError {
+                    message: format!("unsupported C type `{other}`"),
+                    span: base.span,
+                });
+            }
+        };
+        let base_annotation = TypeAnnotation::Named(Token::new(
+            TokenKind::Identifier(annotation_name.clone()),
+            base.span,
+        ));
+        if self.consume(&TokenKind::Star).is_some() {
+            let mutable = !self.consume_keyword("const");
+            let pointee = if annotation_name == "c_char" || annotation_name == "void" {
+                TypeAnnotation::Named(Token::new(TokenKind::Identifier("byte".into()), base.span))
+            } else {
+                base_annotation
+            };
+            Ok(TypeAnnotation::RawPointer(Box::new(pointee), mutable))
+        } else {
+            Ok(base_annotation)
+        }
+    }
+
+    fn expect_c_word(&mut self, message: &str) -> Result<Token, ParseError> {
+        if self.peek_at_ident(0) || self.peek().kind.is_type_keyword() {
+            Ok(self.advance())
+        } else {
+            Err(ParseError {
+                message: message.into(),
+                span: self.peek().span,
+            })
+        }
     }
 
     /// Parse a method name: either a regular identifier or an operator
@@ -1857,19 +2103,30 @@ impl<'src> Parser<'src> {
         }
 
         // A quoted string after `use` is a file import (`use "lib.nt"`);
-        // an identifier names a stdlib module (`use strings`).
-        let (library, is_file_path) = if let TokenKind::StringLiteral(_) = &self.peek().kind {
-            let tok = self.advance();
-            (
-                Token::new(TokenKind::Identifier(tok.lexeme().to_string()), tok.span),
-                true,
-            )
-        } else {
-            (
-                self.expect_ident("expected module name or file path")?,
-                false,
-            )
-        };
+        // an `@` prefix marks a Rust crate (`use @serde_json`);
+        // otherwise an identifier names a stdlib module (`use strings`).
+        let (library, is_file_path, is_rust) =
+            if let TokenKind::StringLiteral(_) = &self.peek().kind {
+                let tok = self.advance();
+                (
+                    Token::new(TokenKind::Identifier(tok.lexeme().to_string()), tok.span),
+                    true,
+                    false,
+                )
+            } else if self.check(&TokenKind::At) {
+                let _at = self.advance();
+                (
+                    self.expect_ident("expected crate name after `@`")?,
+                    false,
+                    true,
+                )
+            } else {
+                (
+                    self.expect_ident("expected module name or file path")?,
+                    false,
+                    false,
+                )
+            };
         let alias = if self.check(&TokenKind::As) {
             self.advance();
             Some(self.expect_ident("expected alias name")?)
@@ -1881,7 +2138,9 @@ impl<'src> Parser<'src> {
         Ok(Stmt::Use {
             library,
             is_file_path,
+            is_rust,
             imported_symbols: Vec::new(),
+            imported_is_rust: Vec::new(),
             alias,
         })
     }
@@ -1889,10 +2148,13 @@ impl<'src> Parser<'src> {
     fn parse_selective_use(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
         let mut imported_symbols = Vec::new();
+        let mut imported_is_rust = Vec::new();
 
         if !self.check(&TokenKind::RightParen) {
             loop {
+                let is_rust = self.consume(&TokenKind::At).is_some();
                 imported_symbols.push(self.expect_ident("expected imported symbol name")?);
+                imported_is_rust.push(is_rust);
                 if self.consume(&TokenKind::Comma).is_none() {
                     break;
                 }
@@ -1903,22 +2165,33 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::Equal, "expected '='")?;
         self.expect(TokenKind::From, "expected 'from'")?;
 
-        let (library, is_file_path) = if let TokenKind::StringLiteral(_) = &self.peek().kind {
-            let tok = self.advance();
-            (
-                Token::new(TokenKind::Identifier(tok.lexeme().to_string()), tok.span),
-                true,
-            )
-        } else {
-            (self.expect_ident("expected module name")?, false)
-        };
+        let (library, is_file_path, is_rust) =
+            if let TokenKind::StringLiteral(_) = &self.peek().kind {
+                let tok = self.advance();
+                (
+                    Token::new(TokenKind::Identifier(tok.lexeme().to_string()), tok.span),
+                    true,
+                    false,
+                )
+            } else if self.check(&TokenKind::At) {
+                let _at = self.advance();
+                (
+                    self.expect_ident("expected module name after `@`")?,
+                    false,
+                    true,
+                )
+            } else {
+                (self.expect_ident("expected module name")?, false, false)
+            };
 
         self.consume_terminator();
 
         Ok(Stmt::Use {
             library,
             is_file_path,
+            is_rust,
             imported_symbols,
+            imported_is_rust,
             alias: None,
         })
     }
@@ -2160,6 +2433,15 @@ impl<'src> Parser<'src> {
                 })
             }
 
+            TokenKind::At => {
+                let at_span = self.advance().span;
+                let name = self.expect_ident("expected crate name after `@`")?;
+                let span = at_span.to(name.span);
+                let lex = format!("@{}", name.lexeme());
+                Ok(Expr::Variable {
+                    name: Token::new(TokenKind::Identifier(lex), span),
+                })
+            }
             TokenKind::LeftBracket => self.parse_array_literal(),
             TokenKind::LeftBrace => self.parse_object_literal(),
             TokenKind::Fun => self.parse_lambda(),
@@ -2650,6 +2932,12 @@ pub fn parse(tokens: &[Token]) -> Result<ntsc_ast::stmt::Program, Vec<ParseError
     Parser::parse(tokens)
 }
 
+/// Parse `tokens`, returning the successfully parsed statements together
+/// with every error encountered. See [`Parser::parse_recovering`].
+pub fn parse_recovering(tokens: &[Token]) -> (ntsc_ast::stmt::Program, Vec<ParseError>) {
+    Parser::parse_recovering(tokens)
+}
+
 /// Recognize a match arm head of the shape `Ok(binder)` or `Err(binder)` as
 /// a variant pattern. The binder may be `_` to ignore the payload. Bare
 /// `Ok` / `Err` without arguments stays a plain value case, matching the
@@ -2899,6 +3187,24 @@ mod tests {
                 type_annotation: Some(TypeAnnotation::RawPointer(_, false)),
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn parse_both_extern_declaration_forms() {
+        let program = parse_source(
+            r#"extern "C" fun abs(int value) -> int
+extern "C" { int labs(int value); }"#,
+        )
+        .expect("extern declarations should parse");
+        assert!(matches!(
+            &program.statements[0],
+            Stmt::ExternFunction { c_style: false, .. }
+        ));
+        assert!(matches!(
+            &program.statements[1],
+            Stmt::ExternBlock { functions, .. }
+                if matches!(&functions[0], Stmt::ExternFunction { c_style: true, .. })
         ));
     }
 

@@ -333,7 +333,9 @@ impl Linter {
             | Stmt::Enum { .. }
             | Stmt::TypeAlias { .. }
             | Stmt::Trait { .. }
-            | Stmt::Impl { .. } => {}
+            | Stmt::Impl { .. }
+            | Stmt::ExternFunction { .. }
+            | Stmt::ExternBlock { .. } => {}
             Stmt::ChanRecvFor {
                 variable,
                 channel,

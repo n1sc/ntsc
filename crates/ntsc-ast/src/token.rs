@@ -111,6 +111,7 @@ pub enum TokenKind {
     Test,
     Async,
     Await,
+    Extern,
 
     View,
 
@@ -139,6 +140,8 @@ pub enum TokenKind {
     TypePointer,
 
     TypeSlice,
+
+    At,
 
     Eof,
 }
@@ -208,6 +211,7 @@ impl TokenKind {
             TokenKind::Test => Some("test"),
             TokenKind::Async => Some("async"),
             TokenKind::Await => Some("await"),
+            TokenKind::Extern => Some("extern"),
             TokenKind::View => Some("view"),
             TokenKind::Mut => Some("mut"),
             TokenKind::Shared => Some("shared"),

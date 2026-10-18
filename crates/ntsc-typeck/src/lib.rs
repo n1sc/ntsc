@@ -8,6 +8,7 @@ mod generics;
 mod names;
 mod ownership;
 mod resolve;
+mod returns;
 mod scope;
 mod ty;
 mod warnings;
