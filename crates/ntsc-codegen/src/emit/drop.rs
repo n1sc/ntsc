@@ -422,6 +422,7 @@ pub(crate) fn emit_drop_replaced_value<'ctx>(
             | Ty::Slice(_)
             | Ty::Own(_)
             | Ty::Dyn(_)
+            | Ty::Class(_)
     ) {
         return Ok(());
     }
@@ -540,11 +541,55 @@ pub(crate) fn emit_drop_all_owned<'ctx>(
     for (ptr, ty) in shadowed {
         emit_drop_slot_value(fn_ctx, ptr, &ty)?;
     }
+    // Tracked Rust object handles are owned by their slots exactly like
+    // the values above (each share retains, so the last release frees).
+    // Async poll functions skip everything here: their locals live in the
+    // future struct, whose drop path consults the same table.
+    let mut tracked: Vec<String> = fn_ctx
+        .variables
+        .keys()
+        .filter(|name| super::rust_object_var(name).is_some())
+        .cloned()
+        .collect();
+    tracked.sort();
+    for name in tracked {
+        super::release_tracked_object(fn_ctx, &name)?;
+    }
     Ok(())
 }
 
-/// Whether `expr` produced a freshly allocated, caller-owned value that has
-/// no owning slot and must be dropped (or transferred) once consumed:
+/// Drop the return-escape class locals this return does not hand to the caller.
+///
+/// These instances (see [`super::analyze_return_escape_class_drops`]) are kept
+/// out of `owned_slots`/`class_drops` because they escape through `return` on
+/// some path, so [`emit_drop_all_owned`] never touches them. On a return that
+/// yields a *different* value they do not escape, so their owned fields would
+/// leak. `returned` names the instance(s) this return moves out — already
+/// handled by the caller's move logic — so they are never dropped here and
+/// cannot be freed twice. Each slot is null-initialized and the drop thunk is
+/// null-safe, so a candidate not yet constructed is a no-op.
+pub(crate) fn drop_unreturned_escape_class_locals<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    returned: &[String],
+) -> Result<(), crate::CodegenError> {
+    if fn_ctx.future_base.is_some() {
+        return Ok(());
+    }
+    let mut names: Vec<String> = fn_ctx
+        .exception_class_drops
+        .iter()
+        .filter(|name| !returned.iter().any(|r| r == *name))
+        .cloned()
+        .collect();
+    names.sort();
+    for name in names {
+        if let Some((ptr, ty)) = fn_ctx.variables.get(&name).map(|(p, t)| (*p, t.clone())) {
+            emit_drop_slot_value(fn_ctx, ptr, &ty)?;
+        }
+    }
+    Ok(())
+}
+
 /// array literals and `copy(...)` (which deep-clones), string concatenation,
 /// `arrays.*`/`sort.*`/`random.shuffle` construction ops, calls to
 /// user-defined functions (their return convention hands an owned reference
@@ -552,6 +597,43 @@ pub(crate) fn emit_drop_all_owned<'ctx>(
 /// element read out of a fresh container (copied before the container is
 /// dropped). Bare variables are *not* fresh: they are slots whose drop
 /// happens at their own exit; member loads and element reads are borrowed.
+/// The local variables whose owned value `expr` moves out of this scope.
+///
+/// A returned value is handed to the caller, so every local it moves must
+/// stop being dropped here or the caller receives an already-released
+/// handle. Only a local in a *value* position moves: a tuple or array
+/// element that is the variable itself. Everything else either borrows
+/// (an element or field read leaves its container owned here), duplicates
+/// (`copy(...)`), or produces a fresh value (a concatenation, a call), and
+/// nulling those slots would leak the original.
+pub(crate) fn moved_locals_in(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::Copy { .. } => {}
+        Expr::Variable { name } => {
+            if !out.iter().any(|existing| existing == name.lexeme()) {
+                out.push(name.lexeme().to_string());
+            }
+        }
+        Expr::Grouping { expression, .. } => moved_locals_in(expression, out),
+        Expr::TupleLiteral { elements, .. } | Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                moved_locals_in(element, out);
+            }
+        }
+        // Either branch may be the one that runs, so both are treated as
+        // moved: leaking the untaken local beats releasing the taken one.
+        Expr::Ternary {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            moved_locals_in(then_branch, out);
+            moved_locals_in(else_branch, out);
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn expr_is_fresh<'ctx>(
     fn_ctx: &FunctionContext<'ctx, '_>,
     expr: &Expr,
@@ -573,9 +655,26 @@ pub(crate) fn expr_is_fresh<'ctx>(
         Expr::Copy { .. } => true,
         Expr::Grouping { expression, .. } => expr_is_fresh(fn_ctx, expression, tv),
 
+        // Owned fields of fresh class receivers are preserved before the
+        // receiver is dropped, so their consumers adopt the resulting value.
+        // A field read through a live slot or a returned view stays borrowed.
+        Expr::Member { object, .. } => {
+            let Some(receiver_ty) = member_receiver_type(fn_ctx, object) else {
+                return false;
+            };
+            matches!(receiver_ty, Ty::Class(_) | Ty::Own(_))
+                && expr_is_fresh(fn_ctx, object, &TypedValue::new(tv.value, receiver_ty))
+        }
+
         // String concatenation allocates a fresh string.
         Expr::Binary { op, .. } if matches!(op.kind, ntsc_ast::token::TokenKind::Plus) => {
             matches!(tv.ntsc_type, Ty::String)
+        }
+
+        // String array stores copy the assigned value; the assignment
+        // expression still owns a fresh right-hand side until consumed.
+        Expr::IndexSet { value, .. } if matches!(tv.ntsc_type, Ty::String) => {
+            expr_is_fresh(fn_ctx, value, tv)
         }
 
         // An owned element read out of a fresh container (`[1,2][0]`,
@@ -604,27 +703,32 @@ pub(crate) fn expr_is_fresh<'ctx>(
             Expr::Variable { name } if matches!(name.lexeme(), "Ok" | "Err") => {
                 matches!(tv.ntsc_type, Ty::Result { .. })
             }
-            Expr::Variable { name } => fn_ctx
-                .module
-                .get_function(name.lexeme())
-                .map(|f| f.get_first_basic_block().is_some())
-                .unwrap_or(false),
+            // A call to a user-defined function that yields an owned handle
+            // (gated above) transfers ownership to the caller, so the result
+            // is fresh and must be dropped. This must not depend on whether
+            // the callee's body has been emitted yet: a forward reference
+            // (callee defined later in the module) is still a fresh call.
+            Expr::Variable { name } => {
+                is_user_function(name.lexeme()) || is_class_type(name.lexeme())
+            }
             Expr::Member { object, property } => {
                 let prop = property.lexeme();
                 match object.as_ref() {
                     Expr::Variable { name } if name.lexeme() == "arrays" => {
-                        // Every `arrays.*` op returns a new array; `pop`
+                        // Most `arrays.*` ops return a new array; `pop`
                         // additionally transfers ownership of the removed
                         // element to the caller (the container no longer
                         // reclaims it). This covers option cells and shared
                         // boxes as well: the popped cell/box reference is
                         // the array's own copy, and the caller takes it
-                        // over.
+                        // over. `join` materializes a fresh joined string.
                         if prop == "pop" {
                             matches!(
                                 tv.ntsc_type,
                                 Ty::Array(_) | Ty::String | Ty::Option(_) | Ty::Shared(_)
                             )
+                        } else if prop == "join" {
+                            matches!(tv.ntsc_type, Ty::String)
                         } else {
                             matches!(tv.ntsc_type, Ty::Array(_))
                         }
@@ -651,6 +755,12 @@ pub(crate) fn expr_is_fresh<'ctx>(
                             || (name.lexeme() == "slices"
                                 && matches!(tv.ntsc_type, Ty::Slice(_) | Ty::Array(_)))
 
+                            // `sys.args()` materializes a fresh string
+                            // array from the process argument vector.
+                            || (name.lexeme() == "sys"
+                                && prop == "args"
+                                && matches!(tv.ntsc_type, Ty::Array(_)))
+
                             // `chan.new(cap)` hands over the channel's first
                             // reference, so its destination adopts it.
                             || (name.lexeme() == "chan"
@@ -668,6 +778,60 @@ pub(crate) fn expr_is_fresh<'ctx>(
             }
             _ => false,
         },
+        _ => false,
+    }
+}
+
+/// Class elements whose ownership is transferred by a tuple expression.
+/// Tuples are LLVM aggregates, so the ordinary whole-value freshness check
+/// cannot identify ownership of an individual class field.
+pub(crate) fn owned_class_elements_in_tuple(expr: &Expr, tuple_ty: &Ty) -> HashSet<usize> {
+    let Ty::Tuple(element_tys) = tuple_ty else {
+        return HashSet::new();
+    };
+    match expr {
+        Expr::Grouping { expression, .. } => owned_class_elements_in_tuple(expression, tuple_ty),
+        Expr::TupleLiteral { elements, .. } => elements
+            .iter()
+            .enumerate()
+            .filter_map(|(index, element)| {
+                let class_ty = element_tys.get(index)?;
+                if matches!(class_ty, Ty::Class(_)) && tuple_class_expr_is_owned(element, class_ty)
+                {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Expr::Call { callee, .. } => {
+            let Expr::Variable { name } = callee.as_ref() else {
+                return HashSet::new();
+            };
+            let Some(Ty::Tuple(elements)) = function_declared_ret_ty(name.lexeme()) else {
+                return HashSet::new();
+            };
+            elements
+                .iter()
+                .enumerate()
+                .filter_map(|(index, element)| matches!(element, Ty::Class(_)).then_some(index))
+                .collect()
+        }
+        _ => HashSet::new(),
+    }
+}
+
+fn tuple_class_expr_is_owned(expr: &Expr, expected: &Ty) -> bool {
+    match expr {
+        Expr::Grouping { expression, .. } => tuple_class_expr_is_owned(expression, expected),
+        Expr::Variable { .. } => true,
+        Expr::Call { callee, .. } => {
+            let Expr::Variable { name } = callee.as_ref() else {
+                return false;
+            };
+            is_class_type(name.lexeme())
+                || matches!(function_declared_ret_ty(name.lexeme()), Some(ret) if &ret == expected)
+        }
         _ => false,
     }
 }
@@ -864,6 +1028,13 @@ pub(crate) fn copy_owned_value<'ctx>(
             clone_string_value(fn_ctx, val)?,
             val.ntsc_type.clone(),
         )),
+        // A view borrows its value: materialize an independent owned copy
+        // from the inner type. Aliasing the borrowed handle would let the
+        // copy's drop reclaim the original out from under its owner.
+        Ty::View(inner, _) => {
+            let inner = (**inner).clone();
+            copy_owned_value(fn_ctx, &TypedValue::new(value, inner))
+        }
         _ => Ok(val.clone()),
     }
 }
@@ -1046,6 +1217,33 @@ pub(crate) fn emit_drop_option_value<'ctx>(
 /// Store a value into an owned slot, boxing (shared), celling (option), or
 /// cloning as needed, and returning whether the slot now owns a value that
 /// must be dropped later.
+/// The i64 value a leak mark should attribute, when one exists.
+///
+/// Registry-backed values arrive as raw `i64` handles. `memory.alloc`
+/// regions are registered as `Handle::Memory` ids, so they are marked too;
+/// anything that is not an i64 (a raw malloc'd cell) has no registry entry
+/// and therefore nothing for the leak report to resolve.
+pub(crate) fn int_like_leak_value<'ctx>(
+    fn_ctx: &FunctionContext<'ctx, '_>,
+    val: &TypedValue<'ctx>,
+) -> Option<inkwell::values::IntValue<'ctx>> {
+    if val.value.is_int_value() {
+        return Some(val.value.into_int_value());
+    }
+    if val.value.is_pointer_value() {
+        let id = fn_ctx
+            .builder
+            .build_ptr_to_int(
+                val.value.into_pointer_value(),
+                fn_ctx.context.i64_type(),
+                "leak_id",
+            )
+            .ok()?;
+        return Some(id);
+    }
+    None
+}
+
 pub(crate) fn store_into_owned_slot<'ctx>(
     fn_ctx: &mut FunctionContext<'ctx, '_>,
     ptr: PointerValue<'ctx>,

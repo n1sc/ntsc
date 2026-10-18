@@ -23,32 +23,32 @@ pub(crate) fn emit_ternary<'ctx>(
     let then_val = emit_expression(fn_ctx, then_branch)?;
     let then_ty = then_val.ntsc_type.clone();
 
-    if fn_ctx
+    // Emitting a branch can itself open new blocks (a string literal builds
+    // its handle in one), so the edge into the merge leaves from wherever the
+    // branch actually ended — naming `then_bb` would produce a phi whose
+    // predecessors do not match.
+    let then_end = fn_ctx
         .builder
         .get_insert_block()
-        .unwrap()
-        .get_terminator()
-        .is_none()
-    {
+        .ok_or_else(|| crate::CodegenError::LLVMError("empty block in ternary branch".into()))?;
+    if then_end.get_terminator().is_none() {
         fn_ctx.builder.build_unconditional_branch(merge_bb)?;
     }
 
     fn_ctx.builder.position_at_end(else_bb);
     let else_val = emit_expression(fn_ctx, else_branch)?;
-    if fn_ctx
+    let else_end = fn_ctx
         .builder
         .get_insert_block()
-        .unwrap()
-        .get_terminator()
-        .is_none()
-    {
+        .ok_or_else(|| crate::CodegenError::LLVMError("empty block in ternary branch".into()))?;
+    if else_end.get_terminator().is_none() {
         fn_ctx.builder.build_unconditional_branch(merge_bb)?;
     }
 
     fn_ctx.builder.position_at_end(merge_bb);
     let llvm_ty = ty_to_llvm(&then_ty, fn_ctx.context);
     let phi = fn_ctx.builder.build_phi(llvm_ty, "ternary")?;
-    phi.add_incoming(&[(&then_val.value, then_bb), (&else_val.value, else_bb)]);
+    phi.add_incoming(&[(&then_val.value, then_end), (&else_val.value, else_end)]);
 
     Ok(TypedValue::new(phi.as_basic_value(), then_ty))
 }
@@ -207,6 +207,9 @@ pub(crate) fn emit_while<'ctx>(
         .get_terminator()
         .is_none()
     {
+        // Release values bound by the loop itself (never names from
+        // outside it) before the next iteration overwrites their slots.
+        fn_ctx.drop_loop_locals()?;
         fn_ctx.builder.build_unconditional_branch(cond_bb)?;
     }
 
@@ -246,6 +249,9 @@ pub(crate) fn emit_do_while<'ctx>(
         .get_terminator()
         .is_none()
     {
+        // Release values bound by the loop itself (never names from
+        // outside it) before the next iteration overwrites their slots.
+        fn_ctx.drop_loop_locals()?;
         fn_ctx.builder.build_unconditional_branch(cond_bb)?;
     }
 
@@ -306,6 +312,7 @@ pub(crate) fn emit_for<'ctx>(
         .get_terminator()
         .is_none()
     {
+        fn_ctx.drop_loop_locals()?;
         fn_ctx.builder.build_unconditional_branch(update_bb)?;
     }
 
@@ -331,6 +338,20 @@ pub(crate) fn emit_for_in<'ctx>(
     let current_fn = fn_ctx.function;
 
     let iter_val = emit_expression(fn_ctx, iterable)?;
+    let iter_slot = if expr_is_fresh(fn_ctx, iterable, &iter_val) {
+        // Register before the loop snapshot: iteration cleanup must preserve
+        // the iterable, while returns and exception exits still own its drop.
+        let name = format!("forin.iterable.{}", current_fn.count_basic_blocks());
+        let ptr = fn_ctx.alloca(&name, &iter_val.ntsc_type)?;
+        // A caught throw can skip the merge and re-enter this same loop.
+        emit_drop_slot_value(fn_ctx, ptr, &iter_val.ntsc_type)?;
+        fn_ctx.builder.build_store(ptr, iter_val.value)?;
+        fn_ctx.define_var(&name, ptr, iter_val.ntsc_type.clone());
+        fn_ctx.owned_slots.insert(name);
+        Some(ptr)
+    } else {
+        None
+    };
 
     // A view iterable borrows the underlying heap value: the view value is
     // that value's handle, so for-in iterates it directly.
@@ -340,8 +361,11 @@ pub(crate) fn emit_for_in<'ctx>(
     };
 
     // Class iterables implement the index protocol: `length()` returns the
-    // element count and `get(i)` the i-th element. Anything else (array,
-    // string) uses the runtime's array accessors.
+    // element count and `get(i)` the i-th element. Arrays iterate through
+    // the runtime's array accessors. Everything else was previously emitted
+    // against the array accessors regardless, which either panicked in
+    // codegen (tuples) or silently ran zero iterations on a non-array
+    // handle (strings, slices), so non-iterable values are rejected here.
     let class_iter = match iter_ty {
         Ty::Class(name) => {
             let length_fn = fn_ctx.module.get_function(&format!("{name}.length"));
@@ -355,7 +379,12 @@ pub(crate) fn emit_for_in<'ctx>(
                 }
             }
         }
-        _ => None,
+        Ty::Array(_) => None,
+        _ => {
+            return Err(crate::CodegenError::LLVMError(format!(
+                "for-in is not supported on `{iter_ty}`; only arrays and classes with `length()`/`get(i)` iterator methods can be iterated"
+            )));
+        }
     };
 
     let elem_ty = if let Some((class_name, _, _)) = &class_iter {
@@ -473,6 +502,7 @@ pub(crate) fn emit_for_in<'ctx>(
         .get_terminator()
         .is_none()
     {
+        fn_ctx.drop_loop_locals()?;
         fn_ctx.builder.build_unconditional_branch(incr_bb)?;
     }
 
@@ -492,10 +522,11 @@ pub(crate) fn emit_for_in<'ctx>(
     fn_ctx.builder.position_at_end(merge_bb);
     fn_ctx.pop_loop_targets();
 
-    // A fresh array used directly as the iterable (`for (var x in [1,2,3])`)
-    // has no owner once the loop completes.
-    if expr_is_fresh(fn_ctx, iterable, &iter_val) {
-        emit_drop_value(fn_ctx, &iter_val)?;
+    if let Some(ptr) = iter_slot {
+        emit_drop_slot_value(fn_ctx, ptr, &iter_val.ntsc_type)?;
+        fn_ctx
+            .builder
+            .build_store(ptr, default_llvm_value(&iter_val.ntsc_type, fn_ctx.context))?;
     }
     Ok(())
 }

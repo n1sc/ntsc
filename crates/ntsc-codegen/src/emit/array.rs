@@ -300,13 +300,25 @@ pub(crate) fn emit_rc_array_op<'ctx>(
             array_result_ty,
             &elem_ty,
         ),
-        "clear" => emit_unary_array_op_with_fixup(
-            fn_ctx,
-            "ntsc_array_clear",
-            handle,
-            array_result_ty,
-            &elem_ty,
-        ),
+        // `clear` empties the array in place and returns its handle;
+        // typing the result as a fresh array (like the functional ops
+        // below) would make statement-level cleanup free the caller's own
+        // array out from under it. Like `push`, this is `Void`.
+        "clear" => {
+            let clear_fn = fn_ctx
+                .module
+                .get_function("ntsc_array_clear")
+                .ok_or_else(|| {
+                    crate::CodegenError::LLVMError("ntsc_array_clear not declared".into())
+                })?;
+            fn_ctx
+                .builder
+                .build_call(clear_fn, &[array_arg.value.into()], "arr_clear")?;
+            Ok(TypedValue::new(
+                fn_ctx.context.i64_type().const_zero().into(),
+                Ty::Void,
+            ))
+        }
         "shuffle" => emit_unary_array_op_with_fixup(
             fn_ctx,
             "ntsc_array_shuffle",
@@ -405,6 +417,10 @@ pub(crate) fn emit_rc_array_op<'ctx>(
             fn_ctx.builder.position_at_end(body_bb);
             let elem = emit_array_element(fn_ctx, handle, idx, &elem_ty)?;
             let elem_str = convert_to_string(fn_ctx, &elem)?;
+            // A scalar element renders into a fresh handle this loop owns
+            // and must drop once consumed; string elements borrow the
+            // container's handle and are never dropped here.
+            let elem_str_scratch = !matches!(elem.ntsc_type, Ty::String);
             let cur = fn_ctx
                 .builder
                 .build_load(i64_ty, result_ptr, "join_cur")?
@@ -420,15 +436,33 @@ pub(crate) fn emit_rc_array_op<'ctx>(
                 .build_conditional_branch(is_first, first_bb, later_bb)?;
 
             fn_ctx.builder.position_at_end(first_bb);
+            // Concatenate even the first element in, so the slot never
+            // aliases a container element: every handle reachable from
+            // this slot is owned by it.
+            let first = emit_concat(fn_ctx, empty_str, elem_str.value)?;
             fn_ctx
                 .builder
-                .build_store(result_ptr, elem_str.value.into_int_value())?;
+                .build_store(result_ptr, first.into_int_value())?;
+            if elem_str_scratch {
+                emit_drop_value(fn_ctx, &TypedValue::new(elem_str.value, Ty::String))?;
+            }
             fn_ctx.builder.build_unconditional_branch(incr_bb)?;
 
             fn_ctx.builder.position_at_end(later_bb);
             let with_delim = emit_concat(fn_ctx, cur.into(), delim_val.into())?;
             let joined = emit_concat(fn_ctx, with_delim, elem_str.value)?;
             fn_ctx.builder.build_store(result_ptr, joined)?;
+            // The overwritten slot content (`cur`) and the delimiter-
+            // prefixed scratch are both owned here; leaving either live
+            // leaked one handle per iteration.
+            emit_drop_value(
+                fn_ctx,
+                &TypedValue::new(BasicValueEnum::IntValue(cur), Ty::String),
+            )?;
+            emit_drop_value(fn_ctx, &TypedValue::new(with_delim, Ty::String))?;
+            if elem_str_scratch {
+                emit_drop_value(fn_ctx, &TypedValue::new(elem_str.value, Ty::String))?;
+            }
             fn_ctx.builder.build_unconditional_branch(incr_bb)?;
 
             fn_ctx.builder.position_at_end(incr_bb);
