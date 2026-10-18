@@ -138,6 +138,7 @@ impl<'src> Lexer<'src> {
             RawToken::DotDotDot => Token::new(TokenKind::DotDotDot, span),
             RawToken::DotDot => Token::new(TokenKind::DotDot, span),
             RawToken::QuestionDot => Token::new(TokenKind::QuestionDot, span),
+            RawToken::At => Token::new(TokenKind::At, span),
             RawToken::Slash => Token::new(TokenKind::Slash, span),
 
             // ── Number literals ───────────────────────────────────
@@ -208,6 +209,7 @@ impl<'src> Lexer<'src> {
             RawToken::Test => Token::new(TokenKind::Test, span),
             RawToken::Async => Token::new(TokenKind::Async, span),
             RawToken::Await => Token::new(TokenKind::Await, span),
+            RawToken::Extern => Token::new(TokenKind::Extern, span),
             RawToken::View => Token::new(TokenKind::View, span),
             RawToken::Mut => Token::new(TokenKind::Mut, span),
             RawToken::Shared => Token::new(TokenKind::Shared, span),
@@ -231,11 +233,15 @@ impl<'src> Lexer<'src> {
     }
 
     fn emit_string_tokens(&mut self, content: &str, span: Span) -> Token {
-        if !content.contains("${") {
-            return Token::new(TokenKind::StringLiteral(content.to_string()), span);
+        let parts = split_string_body(content);
+
+        if parts.is_empty() {
+            return Token::new(TokenKind::StringLiteral(String::new()), span);
         }
 
-        let parts = split_interpolated_string(content);
+        if let [InterpPart::Text(only)] = &parts[..] {
+            return Token::new(TokenKind::StringLiteral(only.clone()), span);
+        }
 
         let mut result_tokens: Vec<Token> = Vec::new();
         for part in &parts {
@@ -314,48 +320,80 @@ enum InterpPart {
     Expression(String),
 }
 
-fn split_interpolated_string(content: &str) -> Vec<InterpPart> {
+/// Split a string-literal body into literal text and interpolation parts,
+/// processing escape sequences in the literal parts. `${...}` boundaries are
+/// only honored when the `$` was not escaped, so `\${` yields a literal
+/// `${` instead of starting an interpolation. Recognized escapes are
+/// `\n`, `\t`, `\r`, `\0`, `\\`, `\"`, `\'`, and `\$`; any other `\x` stays
+/// as the two characters it is written as.
+fn split_string_body(content: &str) -> Vec<InterpPart> {
     let mut parts = Vec::new();
-    let mut rest = content;
+    let mut text = String::new();
+    let mut chars = content.char_indices().peekable();
 
-    while let Some(interp_start) = rest.find("${") {
-        let text_before = &rest[..interp_start];
-        if !text_before.is_empty() {
-            parts.push(InterpPart::Text(text_before.to_string()));
-        }
-
-        let after_open = interp_start + 2;
-        let mut depth = 1u32;
-        let mut close_pos = None;
-        for (i, ch) in rest[after_open..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        close_pos = Some(after_open + i);
-                        break;
+    while let Some((i, ch)) = chars.next() {
+        match ch {
+            '\\' => match chars.peek().copied() {
+                Some((_, escape)) => {
+                    chars.next();
+                    match escape {
+                        'n' => text.push('\n'),
+                        't' => text.push('\t'),
+                        'r' => text.push('\r'),
+                        '0' => text.push('\0'),
+                        '\\' => text.push('\\'),
+                        '"' => text.push('"'),
+                        '\'' => text.push('\''),
+                        '$' => text.push('$'),
+                        other => {
+                            text.push('\\');
+                            text.push(other);
+                        }
                     }
                 }
-                _ => {}
+                None => text.push('\\'),
+            },
+            '$' if matches!(chars.peek(), Some((_, '{'))) => {
+                if !text.is_empty() {
+                    parts.push(InterpPart::Text(std::mem::take(&mut text)));
+                }
+                let after_open = i + 2;
+                let mut depth = 1u32;
+                let mut close_pos = None;
+                for (j, c) in content[after_open..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                close_pos = Some(after_open + j);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                match close_pos {
+                    Some(pos) => {
+                        parts.push(InterpPart::Expression(content[after_open..pos].to_string()));
+                        for (j, _) in chars.by_ref() {
+                            if j >= pos {
+                                break;
+                            }
+                        }
+                    }
+                    None => {
+                        parts.push(InterpPart::Expression(content[after_open..].to_string()));
+                        chars.by_ref().for_each(|_| {});
+                    }
+                }
             }
-        }
-
-        match close_pos {
-            Some(pos) => {
-                let expr = &rest[after_open..pos];
-                parts.push(InterpPart::Expression(expr.to_string()));
-                rest = &rest[pos + 1..];
-            }
-            None => {
-                parts.push(InterpPart::Expression(rest[after_open..].to_string()));
-                rest = "";
-            }
+            other => text.push(other),
         }
     }
 
-    if !rest.is_empty() {
-        parts.push(InterpPart::Text(rest.to_string()));
+    if !text.is_empty() {
+        parts.push(InterpPart::Text(text));
     }
 
     parts
@@ -558,10 +596,52 @@ mod tests {
 
     #[test]
     fn escape_sequences() {
+        // `\n` becomes a real newline in the produced token.
         let kinds = strip_newlines(token_kinds(r#""line1\nline2""#));
         assert_eq!(
             kinds,
-            vec![TokenKind::StringLiteral("line1\\nline2".to_string())]
+            vec![TokenKind::StringLiteral("line1\nline2".to_string())]
         );
+    }
+
+    #[test]
+    fn escape_sequences_converted() {
+        assert_eq!(
+            token_kinds(r#""tab\there\r\n\0""#),
+            vec![TokenKind::StringLiteral("tab\there\r\n\0".to_string())]
+        );
+    }
+
+    #[test]
+    fn escaped_quote_keeps_literal_open() {
+        // `\"` does not terminate the literal and becomes a plain quote.
+        assert_eq!(
+            token_kinds(r#""say \"hi\" now""#),
+            vec![TokenKind::StringLiteral("say \"hi\" now".to_string())]
+        );
+    }
+
+    #[test]
+    fn escaped_backslash_and_unknown_escape_verbatim() {
+        assert_eq!(
+            token_kinds(r#""path\\end\q""#),
+            vec![TokenKind::StringLiteral("path\\end\\q".to_string())]
+        );
+    }
+
+    #[test]
+    fn escaped_dollar_suppresses_interpolation() {
+        // `\${` is literal text, not an interpolation opening.
+        assert_eq!(
+            token_kinds(r#""price is \${5} today""#),
+            vec![TokenKind::StringLiteral("price is ${5} today".to_string())]
+        );
+    }
+
+    #[test]
+    fn escape_in_interpolated_segment() {
+        let kinds = token_kinds(r#""a${n}\tb""#);
+        assert!(kinds.contains(&TokenKind::StringSegment("a".to_string())));
+        assert!(kinds.contains(&TokenKind::StringSegment("\tb".to_string())));
     }
 }

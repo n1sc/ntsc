@@ -91,6 +91,9 @@ pub(crate) enum RawToken {
     DotDot,
     #[token("?.")]
     QuestionDot,
+    #[token("@")]
+    At,
+
     #[token("/")]
     Slash,
 
@@ -205,6 +208,8 @@ pub(crate) enum RawToken {
     Async,
     #[token("await")]
     Await,
+    #[token("extern")]
+    Extern,
 
     // `view`/`mut`/`shared`/`copy` — ownership keywords: borrow, exclusive
     // borrow, refcounted, deep copy.
