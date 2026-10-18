@@ -17,6 +17,7 @@ archive = ["dep:tar", "dep:flate2", "dep:crc32fast"]
 crypto = ["dep:sha2", "dep:base64", "dep:md5", "dep:hmac", "dep:crc32fast"]
 
 [dependencies]
+crossterm = "0.28"
 sha2 = { version = "0.10", optional = true }
 base64 = { version = "0.22", optional = true }
 regex = { version = "1.11", optional = true }

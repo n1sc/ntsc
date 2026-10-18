@@ -442,6 +442,14 @@ pub(crate) fn register_op() -> i64 {
 pub(crate) fn complete_op(core: i64, result: i64) {
     let mut guard = GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(op) = guard.ops.get_mut(&core) else {
+        drop(guard);
+        // A future can be dropped while its offload job is still running. The
+        // job owns the produced registry handle until it is published here;
+        // if cancellation removed the op first, reclaim that handle instead
+        // of silently losing it.
+        if result != NULL {
+            let _ = registry::remove(result);
+        }
         return;
     };
     op.result = result;
@@ -482,12 +490,18 @@ pub(crate) fn op_done(core: i64) -> bool {
 /// Drop an offloaded job that will never be reaped (e.g. its future was
 /// dropped mid-flight), releasing the result handle if one arrived.
 pub(crate) fn drop_op(core: i64) {
-    let mut guard = GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(op) = guard.ops.remove(&core)
-        && op.done
-        && op.result != NULL
-    {
-        let _ = registry::remove(op.result);
+    let result = {
+        let mut guard = GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .ops
+            .remove(&core)
+            .filter(|op| op.done)
+            .map(|op| op.result)
+    };
+    // Drop the scheduler lock before running arbitrary registry destructors.
+    // An opaque result may have a destructor that needs another runtime lock.
+    if let Some(result) = result.filter(|&result| result != NULL) {
+        let _ = registry::remove(result);
     }
 }
 
@@ -498,6 +512,74 @@ mod tests {
     /// A goroutine dropped while parked on a timer must leave no deadline
     /// behind: a stale entry would keep `TIMER_PENDING` above zero and the
     /// reactor scanning forever.
+    #[test]
+    fn completing_a_dropped_offload_reclaims_its_result() {
+        let core = register_op();
+        drop_op(core);
+        let result = registry::put_string("orphaned offload result".to_string());
+        complete_op(core, result);
+        assert!(registry::get_string(result).is_none());
+    }
+
+    #[test]
+    fn dropping_a_completed_offload_reclaims_its_result() {
+        let core = register_op();
+        let result = registry::put_string("completed offload result".to_string());
+        complete_op(core, result);
+        drop_op(core);
+        assert!(registry::get_string(result).is_none());
+    }
+
+    #[test]
+    fn async_result_transfers_once_and_cancelling_reclaims_late_result() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let payload = registry::put_string("transferred async payload".to_string());
+        let future = registry::async_op_new(Box::new(move || payload));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while registry::async_op_poll(future) == 0 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(registry::async_op_result(future), payload);
+        assert_eq!(registry::async_op_result(future), NULL);
+        registry::async_op_drop(future);
+        assert_eq!(
+            registry::take_string(payload),
+            Some("transferred async payload".to_string())
+        );
+
+        let release = Arc::new(AtomicBool::new(false));
+        let produced = Arc::new(Mutex::new(None));
+        let worker_release = Arc::clone(&release);
+        let worker_produced = Arc::clone(&produced);
+        let cancelled = registry::async_op_new(Box::new(move || {
+            while !worker_release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            let payload = registry::put_string("cancelled async payload".to_string());
+            *worker_produced.lock().unwrap_or_else(|p| p.into_inner()) = Some(payload);
+            payload
+        }));
+        assert_eq!(registry::async_op_poll(cancelled), 0);
+        registry::async_op_drop(cancelled);
+        release.store(true, Ordering::Release);
+
+        let payload = loop {
+            if let Some(payload) = *produced.lock().unwrap_or_else(|p| p.into_inner()) {
+                break payload;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        };
+        while registry::get_string(payload).is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(registry::get_string(payload).is_none());
+    }
+
     #[test]
     fn dropping_a_timer_parked_goroutine_clears_its_deadline() {
         extern "C" fn never_done(_: i64) -> i8 {

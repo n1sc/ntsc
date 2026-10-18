@@ -1,10 +1,14 @@
 //! Minimal runtime + standard library support for NTSC-compiled binaries.
 //!
 //! All functions here use `extern "C"` ABI so they can be called from
-//! LLVM-generated code. No raw pointers cross the boundary: every owned heap
-//! value (string, array, shared box, future, opaque module value) lives in the
-//! handle registry under an `i64` key, and generated code passes only those
-//! keys. The whole crate is safe Rust — there is no `unsafe` anywhere.
+//! LLVM-generated code. No raw pointers cross the boundary except through
+//! the cross-adaptor shared-object API (`ntsc_shared_object_*`), where adaptor
+//! crates exchange heap values as opaque pointers with creator-side drop
+//! glue; every other owned heap value (string, array, shared box, future,
+//! opaque module value) lives in the handle registry under an `i64` key,
+//! and generated code passes only those keys. `unsafe` appears only in the
+//! shared-object boundary functions, where the caller contracts are
+//! documented per function.
 //!
 //! ## Ownership rules
 //!
@@ -46,6 +50,40 @@ use crate::registry::NULL;
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_runtime_init() {}
 
+/// Enter a blocking section on the calling thread. When the caller is a
+/// scheduler worker and every regular worker is already blocked, a
+/// temporary coverage worker is spawned so ready goroutines still find a
+/// driver (see `ntask::scheduler::worker_will_block`). Always paired with
+/// [`ntsc_worker_did_unblock`]; a no-op off scheduler workers.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_worker_will_block() {
+    ntask::scheduler::worker_will_block();
+}
+
+/// Leave a blocking section entered with [`ntsc_worker_will_block`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_worker_did_unblock() {
+    ntask::scheduler::worker_did_unblock();
+}
+
+/// RAII guard for blocking sections inside the runtime: enters on
+/// construction, leaves on drop, so every return path — including a caught
+/// panic unwinding through generated-code frames — stays balanced.
+pub(crate) struct BlockGuard;
+
+impl BlockGuard {
+    pub(crate) fn enter() -> Self {
+        ntask::scheduler::worker_will_block();
+        BlockGuard
+    }
+}
+
+impl Drop for BlockGuard {
+    fn drop(&mut self) {
+        ntask::scheduler::worker_did_unblock();
+    }
+}
+
 /// Exit point — called after `main` returns. Reports leaked registry
 /// entries to stderr (only when `report != 0`, i.e. debug builds) and
 /// aborts on an uncaught pending exception.
@@ -58,6 +96,11 @@ pub extern "C" fn ntsc_runtime_shutdown(report: i8) {
     // reclaim their registry entries.
     ntask::reactor::shutdown();
     ntask::scheduler::shutdown();
+    // Capability loads keep an `Arc` in a thread-local fast-path cache. It is
+    // not a registry entry, so clear it explicitly before process shutdown to
+    // release the final backing allocation even when no later memory access
+    // invalidates that cache.
+    registry::clear_memory_cache();
     let leaks = registry::live_count();
     if report != 0 && leaks > 0 {
         let entries = registry::live_entries();
@@ -105,9 +148,11 @@ pub extern "C" fn ntsc_leak_mark(id: i64, line: i64, column: i64) {
 // ══════════════════════════════════════════════════════════════════════════
 
 /// Print the string behind `msg` to stdout, followed by a newline. Borrows
-/// the string; the null handle is a no-op.
+/// the string; the null handle is a no-op. Guarded: a slow pipe reader
+/// blocks the writing thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_say(msg: i64) {
+    let _block = BlockGuard::enter();
     let Some(text) = registry::with_string(msg, str::to_string) else {
         return;
     };
@@ -122,12 +167,14 @@ pub extern "C" fn ntsc_say(msg: i64) {
 /// newline.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_print_i64(val: i64) {
+    let _block = BlockGuard::enter();
     println!("{val}");
 }
 
 /// Print a 64-bit float to stdout as a string, followed by newline.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_print_f64(val: f64) {
+    let _block = BlockGuard::enter();
     println!("{val}");
 }
 
@@ -222,6 +269,94 @@ pub extern "C" fn ntsc_string_from_words_permanent(words: i64, byte_count: i64) 
     string_from_words_impl(words, byte_count, true)
 }
 
+/// Byte length of the string behind `s` (0 for null or non-string).
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_string_len(s: i64) -> i64 {
+    registry::with_string(s, |t| t.len() as i64).unwrap_or(0)
+}
+
+/// Byte at `index` in the string behind `s` (0-255), or -1 for out of
+/// bounds, null, or non-string.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_string_byte_at(s: i64, index: i64) -> i64 {
+    if index < 0 {
+        return -1;
+    }
+    registry::with_string(s, |t| {
+        t.as_bytes()
+            .get(index as usize)
+            .copied()
+            .map(|b| b as i64)
+            .unwrap_or(-1)
+    })
+    .unwrap_or(-1)
+}
+
+/// Create a new string handle from a raw byte buffer. `ptr` must point to
+/// at least `len` readable bytes. The bytes are interpreted as UTF-8 with
+/// lossy replacement. Returns the null handle for null ptr or zero length.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to at least `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ntsc_string_from_bytes(ptr: *const u8, len: i64) -> i64 {
+    // An empty string is a real string: the poll-family bridges hand back
+    // an empty handle for "no event", and Neutron compares it against "".
+    // The pointer is never dereferenced for len == 0, so a null pointer is
+    // only rejected when bytes would actually be read.
+    if len < 0 || (ptr.is_null() && len != 0) {
+        return NULL;
+    }
+    if len == 0 {
+        return registry::put_string(String::new());
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    registry::put_string(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Overwrite the string behind `handle` with the given bytes (interpreted
+/// as UTF-8 with lossy replacement), so callers observe mutated out-buffers
+/// in place. Returns whether the handle referred to a live string.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to at least `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ntsc_string_assign_bytes(handle: i64, ptr: *const u8, len: i64) -> i8 {
+    if handle == NULL || ptr.is_null() || len < 0 {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    i8::from(registry::assign_string(
+        handle,
+        String::from_utf8_lossy(bytes).into_owned(),
+    ))
+}
+
+/// Copy the bytes of the string behind `handle` into `out_buf`, writing
+/// at most `max_len` bytes. Returns the number of bytes actually written
+/// (0 for null/unknown handle or zero-length buffer).
+///
+/// # Safety
+///
+/// `out_buf` must be non-null and point to at least `max_len` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ntsc_string_to_bytes(handle: i64, out_buf: *mut u8, max_len: i64) -> i64 {
+    if handle == NULL || out_buf.is_null() || max_len <= 0 {
+        return 0;
+    }
+    registry::with_string(handle, |s| {
+        let bytes = s.as_bytes();
+        let to_copy = bytes.len().min(max_len as usize);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, to_copy);
+        }
+        to_copy as i64
+    })
+    .unwrap_or(0)
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // Panic / error handling
 // ══════════════════════════════════════════════════════════════════════════
@@ -288,6 +423,14 @@ pub extern "C" fn ntsc_array_len(id: i64) -> i64 {
     registry::array_len(id)
 }
 
+/// Whether `id` names a live dynamic array (0 for the null handle or any
+/// other value kind). Generated Rust bridges use this to reject wrong-kind
+/// handles with a precise error instead of decoding them as empty.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_array_is_array(id: i64) -> i8 {
+    i8::from(registry::is_array(id))
+}
+
 /// Read the element at `index`. Returns the raw element value for scalar
 /// arrays and the stored handle for string/nested-array elements (a
 /// *borrow*: the array keeps ownership). An out-of-bounds index throws
@@ -345,6 +488,126 @@ pub extern "C" fn ntsc_array_pop(id: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_array_drop(id: i64) {
     registry::array_drop(id);
+}
+
+/// Cross-adaptor shared objects: one process-wide handle space letting
+/// generated adaptor crates exchange opaque values (see
+/// `registry::shared_object_put`). Unlike strings and arrays, shared values
+/// cross as pointers with creator-side drop glue: the runtime stores
+/// both opaquely and only hands the pointer back after checking the
+/// entry's type tag.
+///
+/// Safety on every function below: `ptr`/`len`/`out` arguments must be
+/// live, readable/writable for their lengths, and pointers handed to
+/// `ntsc_shared_object_put` must be live `Box` allocations whose layout matches
+/// `drop_fn`; ownership of a put pointer transfers to the registry.
+/// Pointers returned by borrow/take are valid until the matching release
+/// (borrow) or until the caller frees them (take).
+///
+/// # Safety
+///
+/// The caller must ensure `ptr` is readable for `len` bytes and that the
+/// pointer range is valid for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ntsc_shared_object_tag(ptr: *const u8, len: i64) -> u64 {
+    if ptr.is_null() || len <= 0 {
+        return 0;
+    }
+    // SAFETY: caller guarantees `ptr..ptr+len` is readable (adaptor-side
+    // constant tag strings).
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return 0;
+    };
+    registry::shared_object_tag(text)
+}
+
+/// Copy the text of one interned tag into the caller's buffer (up to
+/// `cap` bytes) and return the bytes written. Unknown ids and
+/// non-positive caps write nothing.
+///
+/// # Safety
+///
+/// The caller must ensure `out` is writable for `cap` bytes when `cap` is
+/// positive and that the pointer remains valid for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ntsc_shared_object_tag_text(id: u64, out: *mut u8, cap: i64) -> i64 {
+    if out.is_null() || cap <= 0 {
+        return 0;
+    }
+    let Some(name) = registry::shared_object_tag_name(id) else {
+        return 0;
+    };
+    let bytes = name.as_bytes();
+    let count = bytes.len().min(cap as usize);
+    // SAFETY: caller guarantees `out..out+cap` is writable.
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, count);
+    }
+    count as i64
+}
+
+/// Register one heap value shared across adaptors (`refs == 1`). Null
+/// pointers, null drop glue, and the zero tag fail closed to the null
+/// handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_shared_object_put(
+    ptr: *mut std::ffi::c_void,
+    drop_fn: Option<extern "C" fn(*mut std::ffi::c_void)>,
+    tag: u64,
+) -> i64 {
+    registry::shared_object_put(ptr, drop_fn, tag)
+}
+
+/// Borrow the shared value behind `id` after checking `tag`: retains and
+/// returns its pointer (null on mismatch). The caller must call
+/// `ntsc_shared_object_release` after use.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_shared_object_borrow(id: i64, tag: u64) -> *mut std::ffi::c_void {
+    registry::shared_object_borrow(id, tag)
+}
+
+/// Borrow an exclusively owned object mutably. The pointer stays valid until
+/// `ntsc_shared_object_release_mut`; other borrows and takes fail meanwhile.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_shared_object_borrow_mut(id: i64, tag: u64) -> *mut std::ffi::c_void {
+    registry::shared_object_borrow_mut(id, tag)
+}
+
+/// End a mutable borrow without consuming the object's owning handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_shared_object_release_mut(id: i64) {
+    registry::shared_object_release_mut(id);
+}
+
+/// Take ownership of the shared value behind `id` after checking `tag`:
+/// removes the entry without running drop glue and returns its pointer
+/// (null on mismatch or while a borrow is outstanding).
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_shared_object_take(id: i64, tag: u64) -> *mut std::ffi::c_void {
+    registry::shared_object_take(id, tag)
+}
+
+/// Release one shared-object reference; at zero the entry is removed and
+/// its drop glue runs once. Null, unknown, and wrong-kind handles are
+/// no-ops.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_shared_object_release(id: i64) {
+    registry::shared_object_release(id);
+}
+
+/// Record another live Neutron-side share. Unknown handles are no-ops
+/// returning the input unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_shared_object_retain(id: i64) -> i64 {
+    registry::shared_object_retain(id)
+}
+
+/// The tag of the shared object behind `id`, or 0 for null, unknown, and
+/// wrong-kind handles.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_shared_object_tag_of(id: i64) -> u64 {
+    registry::shared_object_tag_of(id)
 }
 
 /// Return a new array with the element at `index` removed (negative = from
@@ -529,9 +792,15 @@ pub extern "C" fn ntsc_throw(msg: i64) -> i64 {
     } else {
         msg
     };
-    PENDING_EXCEPTION.with(|pending| {
-        *pending.borrow_mut() = Some(message);
-    });
+    let previous = PENDING_EXCEPTION.with(|pending| pending.borrow_mut().replace(message));
+    if let Some(previous) = previous
+        && previous != message
+    {
+        // A nested runtime failure may replace an exception before generated
+        // code gets a chance to take it. The pending slot owns the old
+        // message, so replacing it must release that ownership immediately.
+        let _ = registry::take_string(previous);
+    }
     NULL
 }
 
@@ -578,9 +847,11 @@ pub extern "C" fn ntsc_exception_clear() {
     let _ = registry::take_string(message);
 }
 
-/// Report an uncaught exception (print the message to stderr) and abort.
-/// The pending slot is left empty afterwards (the process is ending
-/// anyway).
+/// Report an uncaught exception (print the message to stderr) and exit with a
+/// failure code. The pending slot is left empty afterwards (the process is
+/// ending anyway): `abort` would also be legitimate, but a thrown-value error
+/// is a normal user-visible failure in a 0.1 language, and aborting with
+/// SIGABRT turns every user's unhandled error into a core dump.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_uncaught_exception() -> ! {
     let message = ntsc_exception_take_message();
@@ -595,7 +866,7 @@ pub extern "C" fn ntsc_uncaught_exception() -> ! {
     let mut handle = stderr.lock();
     let _ = writeln!(handle, "uncaught exception: {text}");
     let _ = handle.flush();
-    std::process::abort();
+    std::process::exit(1);
 }
 
 /// Internal helper: throw a string literal owned by the runtime itself.
@@ -668,10 +939,18 @@ pub extern "C" fn ntsc_async_op_poll(id: i64) -> i8 {
     registry::async_op_poll(id)
 }
 
-/// Reap the result handle of a completed offloaded future.
+/// Reap the result handle of a completed offloaded future. A negative
+/// value marks an exception the bridge threw on its worker thread (the
+/// negated message handle): it is re-raised on the awaiting thread here,
+/// so the resumed goroutine unwinds exactly like a synchronous call.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_async_op_result(id: i64) -> i64 {
-    registry::async_op_result(id)
+    let result = registry::async_op_result(id);
+    if result < 0 {
+        ntsc_throw(-result);
+        return NULL;
+    }
+    result
 }
 
 /// Drop an offloaded-blocking future handle.
@@ -1135,6 +1414,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn async_op_result_reraises_worker_exceptions_on_this_thread() {
+        // The work fn mimics the generated async-bridge wrapper: the sync
+        // call throws (parking its message in this thread's pending slot),
+        // the wrapper takes it and completes the op with the negated
+        // handle.
+        extern "C" fn work(id: i64) -> i64 {
+            let message = registry::put_string(format!("boom-{id}"));
+            ntsc_throw(message);
+            let pending = ntsc_exception_pending();
+            assert_eq!(pending, 1);
+            let taken = ntsc_exception_take_message();
+            -taken
+        }
+
+        let id = ntsc_async_op_new(work, 7);
+        // The first poll starts the work on the offload pool.
+        let _ = ntsc_async_op_poll(id);
+        let mut ready = 0;
+        for _ in 0..5_000 {
+            if ntsc_async_op_poll(id) == 1 {
+                ready = 1;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(ready, 1, "offloaded work must complete");
+
+        // Reaping re-raises the exception on the calling thread instead of
+        // returning the encoded value.
+        assert_eq!(ntsc_exception_pending(), 0);
+        let value = ntsc_async_op_result(id);
+        assert_eq!(value, NULL);
+        assert_eq!(ntsc_exception_pending(), 1);
+        let message = ntsc_exception_take_message();
+        assert_eq!(
+            registry::with_string(message, str::to_string),
+            Some("boom-7".to_string())
+        );
+        registry::take_string(message);
+        ntsc_async_op_drop(id);
+    }
+
+    #[test]
     fn string_handles_balance_and_null_is_a_noop() {
         let s = ntsc_i64_to_string(42);
         assert_ne!(s, NULL);
@@ -1222,6 +1544,21 @@ mod tests {
     }
 
     #[test]
+    fn array_is_array_distinguishes_kinds() {
+        // Generated collection bridges guard on this before decoding, so a
+        // wrong-kind handle throws a precise error instead of reading as
+        // an empty collection.
+        assert_eq!(ntsc_array_is_array(NULL), 0);
+        let s = ntsc_i64_to_string(1);
+        assert_eq!(ntsc_array_is_array(s), 0);
+        let arr = ntsc_array_new(8, 0);
+        assert_eq!(ntsc_array_is_array(arr), 1);
+        ntsc_array_drop(arr);
+        assert_eq!(ntsc_array_is_array(arr), 0);
+        ntsc_string_drop(s);
+    }
+
+    #[test]
     fn array_get_out_of_bounds_throws() {
         let arr = ntsc_array_new(8, 0);
         ntsc_array_push(arr, 1);
@@ -1286,6 +1623,19 @@ mod tests {
         assert_eq!(taken, borrowed);
         assert_eq!(ntsc_exception_pending(), 0);
         ntsc_string_drop(taken);
+    }
+
+    #[test]
+    fn replacing_a_pending_exception_reclaims_the_old_message() {
+        ntsc_exception_clear();
+        let first = ntsc_i64_to_string(1);
+        let second = ntsc_i64_to_string(2);
+        ntsc_throw(first);
+        ntsc_throw(second);
+        assert_eq!(registry::get_string(first), None);
+        assert_eq!(registry::get_string(second), Some("2".to_string()));
+        ntsc_exception_clear();
+        assert_eq!(registry::get_string(second), None);
     }
 
     #[test]

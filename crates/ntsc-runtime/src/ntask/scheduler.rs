@@ -71,6 +71,110 @@ thread_local! {
     static CURRENT_STATE: std::cell::Cell<TaskState> = const {
         std::cell::Cell::new(TaskState::IDLE)
     };
+
+    /// Spin-watchdog state. Always active: the last driven goroutine id
+    /// and its consecutive instant-drive streak on this worker. Healthy
+    /// goroutines park, complete, or yield to others between drives;
+    /// thousands of consecutive drives of one id mean an instant
+    /// poll→requeue loop that never suspends.
+    static WATCH_LAST_GID: std::cell::Cell<i64> = const { std::cell::Cell::new(-1) };
+    static WATCH_STREAK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static WATCH_DRIVES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static WATCH_QUIET_UNTIL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Consecutive instant drives after which a requeue yields to the shared
+/// queue instead of the worker-local LIFO slot. The local slot is the fast
+/// path for a parent that suspends one turn before its child parks, but an
+/// instant poll→requeue loop that never parks would otherwise bounce on the
+/// same core at 100% and starve every other goroutine there. Yielding moves
+/// the spinner to the shared queue where any worker can interleave, and the
+/// OS yield lets a timer or offload completion run.
+const SPIN_YIELD_THRESHOLD: u32 = 10_000;
+
+/// Consecutive instant drives that trip the spin watchdog. Hundreds of
+/// thousands of polls returning "not done, no park" in a row is seconds of
+/// a core at 100% with zero forward progress by definition (no suspension
+/// point was reached); legitimate ping-ponging alternates goroutine ids
+/// and resets the streak.
+const SPIN_WATCH_THRESHOLD: u32 = 200_000;
+
+/// Cooldown between watchdog reports on one worker, in millis of wall time.
+const SPIN_WATCH_COOLDOWN_MS: u64 = 30_000;
+
+/// Note one drive of `gid` for the spin watchdog. Callers: every path in
+/// [`drive`] that requeues instantly without parking or completing.
+/// Always active; the per-drive cost is two thread-local comparisons.
+/// Returns the consecutive-drive streak so callers can yield a spinner to
+/// the shared queue instead of hot-looping the local slot.
+fn watchdog_note_drive(gid: i64) -> u32 {
+    let streak = if WATCH_LAST_GID.with(|last| last.get()) == gid {
+        let next = WATCH_STREAK.with(|streak| streak.get().saturating_add(1));
+        WATCH_STREAK.with(|streak| streak.set(next));
+        next
+    } else {
+        WATCH_LAST_GID.with(|last| last.set(gid));
+        WATCH_STREAK.with(|streak| streak.set(1));
+        1
+    };
+    if streak >= SPIN_WATCH_THRESHOLD {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let quiet_until = WATCH_QUIET_UNTIL.with(|quiet| quiet.get());
+        if now_ms >= quiet_until {
+            WATCH_QUIET_UNTIL.with(|quiet| quiet.set(now_ms + SPIN_WATCH_COOLDOWN_MS));
+            let worker = WORKER_INDEX.with(|index| {
+                index
+                    .get()
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "?".into())
+            });
+            eprintln!(
+                "[sched] HOT SPIN: goroutine {gid} requeued without parking {streak} times in a row on worker {worker} (no suspension point reached; check for a future that never parks)"
+            );
+        }
+        WATCH_STREAK.with(|streak| streak.set(0));
+        return SPIN_WATCH_THRESHOLD;
+    }
+    streak
+}
+
+/// Requeue `gid` after an instant drive. Healthy one-turn suspends stay on
+/// the worker-local LIFO slot; a goroutine past [`SPIN_YIELD_THRESHOLD`]
+/// consecutive instant drives goes to the shared queue with an OS yield so
+/// timer, channel, and offload completions can interleave.
+fn requeue_instant(gid: i64) {
+    let streak = watchdog_note_drive(gid);
+    if streak >= SPIN_YIELD_THRESHOLD || note_instant_drive() {
+        core::push_ready(gid);
+        notify_one();
+        std::thread::yield_now();
+        return;
+    }
+    make_runnable(gid);
+}
+
+fn note_instant_drive() -> bool {
+    WATCH_DRIVES.with(|count| {
+        let next = count.get().saturating_add(1);
+        count.set(if next >= SPIN_YIELD_THRESHOLD {
+            0
+        } else {
+            next
+        });
+        next >= SPIN_YIELD_THRESHOLD
+    })
+}
+
+/// Note that `gid` settled (parked with a waiter, or completed): a settled
+/// goroutine is by definition not spinning, so any streak ends here.
+fn watchdog_note_settled(gid: i64) {
+    WATCH_DRIVES.with(|count| count.set(0));
+    if WATCH_LAST_GID.with(|last| last.get()) == gid {
+        WATCH_STREAK.with(|streak| streak.set(0));
+    }
 }
 
 /// Per-poll suspension state mirrored onto the worker thread. Every field is a
@@ -126,6 +230,59 @@ thread_local! {
     static WORKER_INDEX: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
+/// Extra run-queue slots preallocated for temporary coverage workers (see
+/// [`worker_will_block`]). 2 KiB per queue; idle temps return their slot.
+const EXTRA_SLOTS: usize = 64;
+
+/// Idle 10 ms park rounds after which a temporary worker exits and returns
+/// its queue slot (about one second of finding nothing to drive).
+const TEMP_IDLE_ROUNDS: u32 = 100;
+
+/// Grace period at shutdown for workers stuck in blocking calls to finish
+/// before their threads are abandoned to die with the process (Tokio's
+/// `shutdown_timeout` precedent). Overridable via `NTS_SHUTDOWN_GRACE_MS`.
+fn shutdown_grace_ms() -> u64 {
+    static GRACE: LazyLock<u64> = LazyLock::new(|| {
+        std::env::var("NTS_SHUTDOWN_GRACE_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(500)
+    });
+    *GRACE
+}
+
+/// Cap on live temporary workers. Overridable via
+/// `NTS_MAX_BLOCKING_THREADS` (default 64, hard-capped by EXTRA_SLOTS).
+fn max_extra_workers() -> usize {
+    static MAX: LazyLock<usize> = LazyLock::new(|| {
+        std::env::var("NTS_MAX_BLOCKING_THREADS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(64)
+            .clamp(0, EXTRA_SLOTS)
+    });
+    *MAX
+}
+
+/// Regular (non-temporary) worker count, fixed at pool startup.
+static REGULAR_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Workers currently inside a blocking section (see [`worker_will_block`]).
+/// Incremented before the blocking call, decremented after, so a worker
+/// wedged forever (an infinite blocking loop) keeps its count — coverage
+/// then over-provisions slightly instead of starving, and idle temps exit
+/// on their own.
+static BLOCKED_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Live temporary coverage workers.
+static EXTRA_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Free extra queue-slot indices for temporary workers to claim.
+static EXTRA_FREE: LazyLock<Mutex<Vec<usize>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Temporary workers spawned over the process lifetime (diagnostic only).
+static TEMP_SPAWNS: AtomicUsize = AtomicUsize::new(0);
+
 /// Start the worker pool. Idempotent. Call once (or let the first spawn
 /// trigger it).
 pub(crate) fn start() {
@@ -136,16 +293,26 @@ pub(crate) fn start() {
     if !workers.is_empty() {
         return;
     }
-    let count = QUEUES
-        .get_or_init(|| {
-            let count = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-                .max(1);
-            (0..count).map(|_| RunQueue::new()).collect()
-        })
-        .len();
-    for index in 0..count {
+    QUEUES.get_or_init(|| {
+        let count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .max(1);
+        REGULAR_WORKERS.store(count, Ordering::Release);
+        (0..count + EXTRA_SLOTS).map(|_| RunQueue::new()).collect()
+    });
+    let regular = REGULAR_WORKERS.load(Ordering::Acquire).max(1);
+    // Replenish claimable temp slots (a restart after abandoned temps may
+    // find some still checked out; those leak boundedly until process end).
+    {
+        let mut free = EXTRA_FREE.lock().unwrap_or_else(|p| p.into_inner());
+        for index in (regular..regular + EXTRA_SLOTS).rev() {
+            if !free.contains(&index) {
+                free.push(index);
+            }
+        }
+    }
+    for index in 0..regular {
         if let Ok(worker) = std::thread::Builder::new()
             .name(format!("ntask-worker-{index}"))
             .spawn(move || worker_loop(index))
@@ -154,6 +321,121 @@ pub(crate) fn start() {
         }
     }
     STARTED.store(true, Ordering::Release);
+}
+
+/// Enter a blocking section on a scheduler worker (Tokio's `block_in_place`
+/// doctrine: never block a worker without cover).
+///
+/// Called by blocking runtime entries (`time.sleep`, synchronous socket and
+/// subprocess operations) and by every generated Rust bridge around the
+/// dependency call, whose duration the compiler cannot know. When every
+/// regular worker is already blocked, a temporary coverage worker is
+/// spawned (bounded by [`max_extra_workers`]) so newly-ready goroutines —
+/// timer wakeups, channel handoffs, event arrivals — still find a driver.
+/// A no-op off scheduler workers (offload-pool, Tokio, and main threads).
+pub(crate) fn worker_will_block() {
+    if WORKER_INDEX.with(|index| index.get()).is_none() {
+        return;
+    }
+    if SHUTDOWN.load(Ordering::Relaxed) {
+        return;
+    }
+    BLOCKED_WORKERS.fetch_add(1, Ordering::SeqCst);
+    let regular = REGULAR_WORKERS.load(Ordering::Acquire);
+    let extra = EXTRA_WORKERS.load(Ordering::Acquire);
+    let blocked = BLOCKED_WORKERS.load(Ordering::Acquire);
+    // Unblocked drivers left after this worker parks: regular + extra -
+    // blocked. Below one, bring cover. The counts are racy by nature; an
+    // overshoot spawns a thread that idle-exits within about a second.
+    if regular > 0 && regular + extra <= blocked {
+        spawn_temp_worker();
+    }
+}
+
+/// Leave a blocking section. Balances [`worker_will_block`]; safe to call
+/// off scheduler workers (a no-op there, mirroring the entry).
+pub(crate) fn worker_did_unblock() {
+    if WORKER_INDEX.with(|index| index.get()).is_none() {
+        return;
+    }
+    BLOCKED_WORKERS.fetch_sub(1, Ordering::SeqCst);
+}
+
+/// Spawn one temporary coverage worker on a free extra queue slot. Racy
+/// overshoots are bounded by the freelist and the live cap; surplus temps
+/// idle-exit on their own.
+fn spawn_temp_worker() {
+    let index = match EXTRA_FREE.lock().unwrap_or_else(|p| p.into_inner()).pop() {
+        Some(index) => index,
+        None => return,
+    };
+    if EXTRA_WORKERS.fetch_add(1, Ordering::SeqCst) >= max_extra_workers() {
+        EXTRA_WORKERS.fetch_sub(1, Ordering::SeqCst);
+        EXTRA_FREE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(index);
+        return;
+    }
+    TEMP_SPAWNS.fetch_add(1, Ordering::Relaxed);
+    match std::thread::Builder::new()
+        .name(format!("ntask-worker-temp-{index}"))
+        .spawn(move || temp_worker_loop(index))
+    {
+        Ok(handle) => {
+            WORKERS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(handle);
+            notify_one();
+        }
+        Err(_) => {
+            EXTRA_WORKERS.fetch_sub(1, Ordering::SeqCst);
+            EXTRA_FREE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(index);
+        }
+    }
+}
+
+/// A temporary coverage worker: the regular [`worker_loop`] plus an idle
+/// exit that returns its queue slot. Leftover queued work (only possible
+/// via a race with a concurrent spawn onto this queue) is returned to the
+/// shared queue rather than dropped.
+fn temp_worker_loop(index: usize) {
+    WORKER_INDEX.with(|worker| worker.set(Some(index)));
+    IDLE_STATE.fetch_add(1 << UNPARKED_SHIFT, Ordering::SeqCst);
+    let mut tick: u32 = 0;
+    let mut idle_rounds: u32 = 0;
+    loop {
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            break;
+        }
+        tick = tick.wrapping_add(1);
+        match pop_ready(index, tick) {
+            Some(gid) => {
+                idle_rounds = 0;
+                drive_tracked(gid, index);
+            }
+            None => {
+                idle_rounds += 1;
+                if idle_rounds >= TEMP_IDLE_ROUNDS {
+                    break;
+                }
+                wait_for_work_budget(index, 1);
+            }
+        }
+    }
+    for gid in queues()[index].drain() {
+        core::push_ready(gid);
+    }
+    IDLE_STATE.fetch_sub(1 << UNPARKED_SHIFT, Ordering::SeqCst);
+    EXTRA_WORKERS.fetch_sub(1, Ordering::SeqCst);
+    EXTRA_FREE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(index);
 }
 
 /// Start the bounded offload pool. Idempotent. A small, fixed number of
@@ -282,13 +564,25 @@ fn spawn_detached_batched(goroutine: Goroutine) -> i64 {
             start
         }
     });
-    let should_flush = DETACHED_BATCH.with(|batch| {
-        let mut batch = batch.borrow_mut();
-        batch.push((gid, goroutine));
-        batch.len() >= DETACHED_BATCH_CAP
-    });
-    if should_flush {
-        flush_detached_batch();
+    // Publish immediately. Batching stranded the child in this worker's
+    // thread-local batch whenever the spawning goroutine never yields (a
+    // hot `while (true)` poll loop), because the flush only runs after a
+    // poll returns. `notify_one` already skips its futex when no worker is
+    // parked, so the amortization bought nothing here.
+    {
+        let mut guard = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
+        guard.goroutines.insert(gid, goroutine);
+    }
+    if let Some(queue) = local_queue() {
+        if let Some(displaced) = queue.push_next(gid)
+            && !queue.push(displaced)
+        {
+            overflow_to_shared(queue, displaced);
+        }
+        notify_spawn_burst();
+    } else {
+        core::push_ready(gid);
+        notify_one();
     }
     gid
 }
@@ -458,7 +752,11 @@ fn report_stats() {
     if !stats_enabled() {
         return;
     }
-    let workers = queues().len().min(MAX_TRACKED_WORKERS);
+    // Temporary workers share untracked queue slots past the regular
+    // range: report the regular rows plus aggregate temp activity.
+    let workers = REGULAR_WORKERS
+        .load(Ordering::Relaxed)
+        .min(MAX_TRACKED_WORKERS);
     let total_polls: usize = (0..workers)
         .map(|i| STAT_POLLS[i].load(Ordering::Relaxed))
         .sum();
@@ -485,6 +783,26 @@ fn report_stats() {
         );
     }
     eprintln!("[sched] total polls {total_polls}");
+    eprintln!(
+        "[sched] workers in blocking sections now: {} (temp workers live: {}, spawned total: {}, extra cap: {})",
+        BLOCKED_WORKERS.load(Ordering::Relaxed),
+        EXTRA_WORKERS.load(Ordering::Relaxed),
+        TEMP_SPAWNS.load(Ordering::Relaxed),
+        max_extra_workers()
+    );
+}
+
+/// Drive one goroutine, tracking per-worker polls and busy time when
+/// scheduler statistics are enabled and the index is tracked.
+fn drive_tracked(gid: i64, index: usize) {
+    if stats_enabled() && index < MAX_TRACKED_WORKERS {
+        STAT_POLLS[index].fetch_add(1, Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        drive(gid);
+        STAT_BUSY_NS[index].fetch_add(started.elapsed().as_nanos() as usize, Ordering::Relaxed);
+    } else {
+        drive(gid);
+    }
 }
 
 /// The worker loop: pull a runnable goroutine and drive it, sleeping when
@@ -501,17 +819,7 @@ fn worker_loop(index: usize) {
         }
         tick = tick.wrapping_add(1);
         match pop_ready(index, tick) {
-            Some(gid) => {
-                if stats_enabled() && index < MAX_TRACKED_WORKERS {
-                    STAT_POLLS[index].fetch_add(1, Ordering::Relaxed);
-                    let started = std::time::Instant::now();
-                    drive(gid);
-                    STAT_BUSY_NS[index]
-                        .fetch_add(started.elapsed().as_nanos() as usize, Ordering::Relaxed);
-                } else {
-                    drive(gid);
-                }
-            }
+            Some(gid) => drive_tracked(gid, index),
             None => wait_for_work(index),
         }
     }
@@ -580,6 +888,13 @@ const SPIN_BEFORE_PARK: u32 = 64;
 
 /// Sleep until a goroutine becomes runnable or we are asked to stop.
 fn wait_for_work(index: usize) {
+    wait_for_work_budget(index, u32::MAX);
+}
+
+/// Park up to `rounds` 10 ms slices waiting for work. Returns `false` when
+/// the budget expired with no work and no shutdown — the temporary-worker
+/// idle exit. A full budget behaves exactly like [`wait_for_work`].
+fn wait_for_work_budget(index: usize, mut rounds: u32) -> bool {
     let track = stats_enabled() && index < MAX_TRACKED_WORKERS;
     let spin_started = track.then(std::time::Instant::now);
     // Counted as searching while spinning, so a concurrent spawn skips its wake:
@@ -598,14 +913,14 @@ fn wait_for_work(index: usize) {
         STAT_SPIN_NS[index].fetch_add(started.elapsed().as_nanos() as usize, Ordering::Relaxed);
     }
     if found {
-        return;
+        return true;
     }
     // The last searcher to give up must re-check every queue before sleeping,
     // and wake a peer if it finds anything: a spawn that ran concurrently with
     // the decrement above may have skipped its notification.
     if was_last_searcher && has_work() {
         notify_one();
-        return;
+        return true;
     }
 
     let (lock, cvar) = &*SIGNAL;
@@ -615,6 +930,15 @@ fn wait_for_work(index: usize) {
         if SHUTDOWN.load(Ordering::Relaxed) || has_work() {
             break;
         }
+        if rounds == 0 {
+            IDLE_STATE.fetch_add(1 << UNPARKED_SHIFT, Ordering::SeqCst);
+            if let Some(started) = park_started {
+                STAT_PARK_NS[index]
+                    .fetch_add(started.elapsed().as_nanos() as usize, Ordering::Relaxed);
+            }
+            return false;
+        }
+        rounds -= 1;
         let guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let _ = cvar
             .wait_timeout(guard, std::time::Duration::from_millis(10))
@@ -624,6 +948,7 @@ fn wait_for_work(index: usize) {
     if let Some(started) = park_started {
         STAT_PARK_NS[index].fetch_add(started.elapsed().as_nanos() as usize, Ordering::Relaxed);
     }
+    true
 }
 
 /// Whether any queue holds a runnable goroutine. Every check is an atomic load,
@@ -659,10 +984,49 @@ fn drive(gid: i64) {
         }
     };
     CURRENT_GID.with(|cur| cur.set(Some(gid)));
-    crate::install_async_tasks(tasks);
-    crate::poll_async_tasks_once();
-    flush_detached_batch();
-    let tasks = crate::take_async_tasks();
+    let poll_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::install_async_tasks(tasks);
+        crate::poll_async_tasks_once();
+        flush_detached_batch();
+        crate::take_async_tasks()
+    }));
+    let tasks = match poll_outcome {
+        Ok(tasks) => tasks,
+        Err(_) => {
+            let _ = crate::take_async_tasks();
+            CURRENT_GID.with(|cur| cur.set(None));
+            CURRENT_STATE.with(|state| state.set(TaskState::IDLE));
+            let message = crate::registry::put_string("goroutine panicked".to_string());
+            let mut g = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
+            let found = g.goroutines.contains_key(&gid);
+            if !found {
+                drop(g);
+                let _ = crate::registry::remove(message);
+                return;
+            }
+            let joiners = g
+                .goroutines
+                .get_mut(&gid)
+                .map(|gr| {
+                    gr.tasks = Vec::new();
+                    gr.done = true;
+                    gr.cleanup = None;
+                    gr.pending_exception = message;
+                    std::mem::take(&mut gr.joiners)
+                })
+                .unwrap_or_default();
+            for j in &joiners {
+                g.ready.push_back(*j);
+            }
+            core::sync_ready_len(&g);
+            drop(g);
+            eprintln!(
+                "[sched] goroutine {gid} panicked; parked as failed (never silently dropped)"
+            );
+            notify_all();
+            return;
+        }
+    };
     let done = tasks.is_empty();
     CURRENT_GID.with(|cur| cur.set(None));
     let state = CURRENT_STATE.with(|state| state.replace(TaskState::IDLE));
@@ -685,11 +1049,12 @@ fn drive(gid: i64) {
             gr.recv_result_owned = state.recv_result_owned;
             gr.recv_ok = state.recv_ok;
         }
-        make_runnable(gid);
+        requeue_instant(gid);
         return;
     }
     let mut g = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
     if done {
+        watchdog_note_settled(gid);
         let (joiners, reclaim, handle) = {
             let Some(gr) = g.goroutines.get_mut(&gid) else {
                 return;
@@ -750,8 +1115,14 @@ fn drive(gid: i64) {
         Park::None => {
             requeue_local = true;
         }
-        Park::Chan { core, op } => woke = chan_op(&mut g, gid, core, op),
+        Park::Chan { core, op } => {
+            // Handoff or park: either way this drive settled (a handoff
+            // completed its operation; a park waits).
+            watchdog_note_settled(gid);
+            woke = chan_op(&mut g, gid, core, op);
+        }
         Park::Timer { at } => {
+            watchdog_note_settled(gid);
             g.timers.entry(at).or_default().push(gid);
             core::timers_pending_offset(1);
             let pending = !g.ready.is_empty();
@@ -763,6 +1134,7 @@ fn drive(gid: i64) {
             return;
         }
         Park::Fd { io, read } => {
+            watchdog_note_settled(gid);
             let fd = g.ios.get_mut(&io).map(|slot| {
                 slot.parked = true;
                 // `ready` stays set; consumed via `io_ready` when it re-polls.
@@ -774,7 +1146,12 @@ fn drive(gid: i64) {
             super::reactor::register_fd(io, fd, read);
             return;
         }
-        Park::Join { target } => woke = join_park(&mut g, gid, target),
+        Park::Join { target } => {
+            // A completed join target hands off (progress); a pending one
+            // parks. Either way this drive settled.
+            watchdog_note_settled(gid);
+            woke = join_park(&mut g, gid, target);
+        }
         Park::Job { core } => {
             let done = g.ops.get_mut(&core).map(|op| op.done).unwrap_or(false);
             if done {
@@ -783,15 +1160,30 @@ fn drive(gid: i64) {
                 requeue_local = true;
             } else if let Some(op) = g.ops.get_mut(&core) {
                 op.waiter = Some(gid);
+                watchdog_note_settled(gid);
             } else {
-                requeue_local = true;
+                // Unknown job id: re-parking on it would spin forever
+                // (requeue → re-park with no waiter ever completing it).
+                // Park a 1 ms timer instead so the goroutine retries on a
+                // bounded schedule and other work interleaves.
+                watchdog_note_settled(gid);
+                let at = core::now_ms().saturating_add(1);
+                g.timers.entry(at).or_default().push(gid);
+                core::timers_pending_offset(1);
+                let pending = !g.ready.is_empty();
+                drop(g);
+                super::reactor::wake_reactor();
+                if pending {
+                    notify_all();
+                }
+                return;
             }
         }
     }
     core::sync_ready_len(&g);
     drop(g);
     if requeue_local {
-        make_runnable(gid);
+        requeue_instant(gid);
         return;
     }
     // A bare park made nothing runnable: whoever later completes it (offload
@@ -1166,8 +1558,42 @@ pub(crate) fn join_blocking(gid: i64) -> i64 {
     }
 }
 
+/// Join worker threads, abandoning (detaching) any still blocked past the
+/// grace period so shutdown cannot hang on a wedged worker. Finished
+/// threads are joined normally; only the stuck remainder is abandoned.
+fn join_with_grace(workers: Vec<std::thread::JoinHandle<()>>) {
+    let mut pending = workers;
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(shutdown_grace_ms());
+    let mut index = 0;
+    while index < pending.len() {
+        if pending[index].is_finished() {
+            let handle = pending.remove(index);
+            let _ = handle.join();
+            continue;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        index += 1;
+        if index >= pending.len() {
+            index = 0;
+        }
+    }
+    // Dropping the surviving handles detaches their threads.
+    drop(pending);
+}
+
 /// Stop the worker pool and reactor, joining their threads. Idempotent, and
 /// resets global state so it can be reused across tests in one binary.
+///
+/// Workers wedged in never-returning blocking sections (an infinite blocking
+/// loop, with no suspension point for the stop flag to reach) are abandoned
+/// after the grace period and die with the process instead of hanging
+/// shutdown forever (Tokio's `shutdown_timeout` precedent). Dropping a
+/// `JoinHandle` detaches its thread; wedged workers hold no scheduler locks
+/// while blocked, so abandoning them cannot deadlock the teardown below.
 pub(crate) fn shutdown() {
     if !SHUTDOWN.swap(true, Ordering::Relaxed) {
         // Unconditional: a worker that is about to park has not yet been
@@ -1175,16 +1601,17 @@ pub(crate) fn shutdown() {
         notify_all_unconditional();
     }
     let workers: Vec<_> = std::mem::take(&mut *WORKERS.lock().unwrap_or_else(|p| p.into_inner()));
-    for w in workers {
-        let _ = w.join();
-    }
+    join_with_grace(workers);
     let reactor = REACTOR.lock().unwrap_or_else(|p| p.into_inner()).take();
     if let Some(r) = reactor {
         let _ = r.join();
     }
     super::reactor::reset();
     // Stop and join the offload pool: flag the workers and wake them with a
-    // sentinel job each so they exit their blocking `recv`.
+    // sentinel job each so they exit their blocking `recv`. A job that never
+    // returns (a hung fetch or gateway `block_on`) must not hang shutdown
+    // forever, so apply the same grace period as scheduler workers and
+    // detach the stragglers to die with the process.
     if OFFLOADING.load(Ordering::SeqCst) {
         OFFLOAD_STOP.store(true, Ordering::Relaxed);
         let count = OFFLOAD_THREADS
@@ -1200,9 +1627,7 @@ pub(crate) fn shutdown() {
         drop(send);
         let offload: Vec<_> =
             std::mem::take(&mut *OFFLOAD_THREADS.lock().unwrap_or_else(|p| p.into_inner()));
-        for handle in offload {
-            let _ = handle.join();
-        }
+        join_with_grace(offload);
         OFFLOAD_SEND
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -1232,9 +1657,16 @@ pub(crate) fn shutdown() {
     g.goroutines.clear();
     core::clear_ready(&mut g);
     g.timers.clear();
-    g.ops.clear();
+    let abandoned_ops: Vec<i64> = g
+        .ops
+        .drain()
+        .filter_map(|(_, op)| (op.done && op.result != NULL).then_some(op.result))
+        .collect();
     core::timers_reset();
     drop(g);
+    for result in abandoned_ops {
+        let _ = crate::registry::remove(result);
+    }
     for abandoned in pending {
         crate::registry::remove_goroutine_handle(abandoned.handle);
         if abandoned.exception != NULL {
@@ -1287,5 +1719,75 @@ pub(crate) fn wake_workers(count: usize) {
     let _g = lock.lock().unwrap_or_else(|p| p.into_inner());
     for _ in 0..count {
         cvar.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_guard_is_a_noop_off_scheduler_workers() {
+        // Unit tests run on plain threads (no WORKER_INDEX), so entering
+        // and leaving blocking sections must not touch the counters.
+        assert_eq!(BLOCKED_WORKERS.load(Ordering::SeqCst), 0);
+        worker_will_block();
+        worker_did_unblock();
+        {
+            let _guard = crate::BlockGuard::enter();
+        }
+        assert_eq!(BLOCKED_WORKERS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn watchdog_helpers_are_safe_to_call_repeatedly() {
+        // The watchdog is always active; alternate ids so the streak never
+        // reaches the report threshold (no stderr noise), then verify the
+        // streak/yield math and the settled reset without overflow.
+        for i in 0..300_000u32 {
+            watchdog_note_drive((i % 2) as i64);
+        }
+        watchdog_note_settled(0);
+        watchdog_note_settled(1);
+        watchdog_note_settled(12345);
+        assert!(watchdog_note_drive(9) < SPIN_YIELD_THRESHOLD);
+    }
+
+    #[test]
+    fn alternating_instant_requeues_still_get_a_scheduler_yield_budget() {
+        WATCH_DRIVES.with(|count| count.set(0));
+        for i in 0..SPIN_YIELD_THRESHOLD {
+            watchdog_note_drive((i % 3) as i64);
+            assert_eq!(note_instant_drive(), i + 1 == SPIN_YIELD_THRESHOLD);
+        }
+        assert_eq!(WATCH_DRIVES.with(|count| count.get()), 0);
+        watchdog_note_settled(0);
+        assert_eq!(WATCH_DRIVES.with(|count| count.get()), 0);
+    }
+
+    #[test]
+    fn temp_worker_exits_idle_and_returns_its_slot() {
+        // No shutdown() here: like the offload pool, the started worker
+        // pool persists for the rest of the test binary (shutting down
+        // would clear scheduler-global state other tests may be using).
+        start();
+        let baseline_extra = EXTRA_WORKERS.load(Ordering::SeqCst);
+        let baseline_spawns = TEMP_SPAWNS.load(Ordering::Relaxed);
+        spawn_temp_worker();
+        assert_eq!(EXTRA_WORKERS.load(Ordering::SeqCst), baseline_extra + 1);
+        // An idle temp exits after about a second and releases its slot;
+        // allow generous wall-clock slack for loaded CI hosts.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while EXTRA_WORKERS.load(Ordering::SeqCst) != baseline_extra {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "temp worker never exited"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(TEMP_SPAWNS.load(Ordering::Relaxed) > baseline_spawns);
+        // The slot came back: a second spawn succeeds immediately.
+        spawn_temp_worker();
+        assert_eq!(EXTRA_WORKERS.load(Ordering::SeqCst), baseline_extra + 1);
     }
 }

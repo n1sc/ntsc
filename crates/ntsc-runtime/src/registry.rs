@@ -25,8 +25,8 @@ use std::any::Any;
 use std::collections::HashSet;
 
 use crate::idmap::IdMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::sync::{LazyLock, Mutex};
 
 /// The null handle: no value.
@@ -82,8 +82,9 @@ static REGISTRY_GEN: AtomicU64 = AtomicU64::new(0);
 thread_local! {
     /// Last capability resolved on this thread. A load or store in a loop
     /// touches the same handle repeatedly, and resolving it through the
-    /// registry would take the global lock every time; the cached `Arc` keeps
-    /// the bytes alive and reachable without it.
+    /// registry would take the global lock every time; the cached weak
+    /// reference avoids prolonging
+    /// the allocation's lifetime after its last capability is dropped.
     static MEMORY_CACHE: std::cell::RefCell<Option<CachedRegion>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -91,7 +92,7 @@ thread_local! {
 struct CachedRegion {
     id: i64,
     generation: u64,
-    bytes: Arc<Mutex<Vec<u8>>>,
+    bytes: Weak<Mutex<Vec<u8>>>,
     offset: usize,
 }
 
@@ -104,7 +105,8 @@ fn memory_region(id: i64) -> Option<(Arc<Mutex<Vec<u8>>>, usize)> {
         let cache = cache.borrow();
         cache.as_ref().and_then(|entry| {
             (entry.id == id && entry.generation == generation)
-                .then(|| (Arc::clone(&entry.bytes), entry.offset))
+                .then(|| entry.bytes.upgrade().map(|bytes| (bytes, entry.offset)))
+                .flatten()
         })
     });
     if let Some(region) = cached {
@@ -118,11 +120,21 @@ fn memory_region(id: i64) -> Option<(Arc<Mutex<Vec<u8>>>, usize)> {
         *cache.borrow_mut() = Some(CachedRegion {
             id,
             generation,
-            bytes: Arc::clone(&region.0),
+            bytes: Arc::downgrade(&region.0),
             offset: region.1,
         });
     });
     Some(region)
+}
+
+/// Clear the thread-local capability cache before shutdown. The cache uses a
+/// weak reference, so it cannot keep the backing allocation alive, but
+/// clearing it avoids retaining stale capability metadata on long-lived
+/// embedding threads.
+pub(crate) fn clear_memory_cache() {
+    MEMORY_CACHE.with(|cache| {
+        *cache.borrow_mut() = None;
+    });
 }
 
 /// An owned value stored in the registry.
@@ -169,6 +181,11 @@ pub(crate) enum Handle {
     /// An opaque value owned by a stdlib module (files, sockets,
     /// channels...).
     Opaque(Box<dyn Any + Send>),
+
+    /// A cross-adaptor shared object: a heap value owned by one generated
+    /// adaptor crate but referenceable from any other through the
+    /// process-wide handle space (see the shared-object section below).
+    SharedObject(SharedObjectData),
 
     /// A safe pointer capability into a shared byte allocation.
     Memory(MemoryData),
@@ -271,8 +288,12 @@ pub(crate) fn slice_to_array(id: i64) -> Option<i64> {
     let (elem_size, string_elements) = with_array(array, |a| (a.elem_size, a.string_elements))?;
     let out = array_new(elem_size as i64, len as i64, i8::from(string_elements));
     for offset in 0..len {
-        let element = array_get(array, (start + offset) as i64)?;
+        let Some(element) = array_get(array, (start + offset) as i64) else {
+            array_drop(out);
+            return None;
+        };
         if !array_push(out, element) {
+            array_drop(out);
             return None;
         }
     }
@@ -608,6 +629,7 @@ pub(crate) fn live_entries() -> Vec<LeakEntry> {
                 Handle::AsyncIo { .. } => "async io future",
                 Handle::AsyncOp { .. } => "offloaded future",
                 Handle::Opaque(_) => "opaque",
+                Handle::SharedObject(_) => "shared object",
                 Handle::Memory(_) => "pointer capability",
                 Handle::Slice(_) => "slice",
             };
@@ -619,6 +641,13 @@ pub(crate) fn live_entries() -> Vec<LeakEntry> {
                     }
                     Some(preview)
                 }
+                Handle::SharedObject(object) => shared_object_tag_name(object.tag).map(|name| {
+                    let mut preview: String = name.chars().take(80).collect();
+                    if name.chars().count() > 80 {
+                        preview.push_str("...");
+                    }
+                    preview
+                }),
                 _ => None,
             };
             Some(LeakEntry {
@@ -636,14 +665,14 @@ pub(crate) fn live_entries() -> Vec<LeakEntry> {
 // ── Strings ────────────────────────────────────────────────────────────────
 
 /// Register an owned string and return its handle.
-pub(crate) fn put_string(s: String) -> i64 {
+pub fn put_string(s: String) -> i64 {
     insert(Handle::String(s))
 }
 
 /// Register an owned string as permanent (a compile-time constant such as
 /// a string literal). It is never removed and excluded from leak
 /// reporting.
-pub(crate) fn put_string_permanent(s: String) -> i64 {
+pub fn put_string_permanent(s: String) -> i64 {
     insert_permanent(Handle::String(s))
 }
 
@@ -653,9 +682,24 @@ pub(crate) fn put_string_permanent(s: String) -> i64 {
 /// A non-string handle (array, shared box, opaque resource, ...) is left
 /// untouched and reads as `None`: destructive takes must never destroy the
 /// wrong kind of value, so a misplaced drop cannot corrupt the registry.
-pub(crate) fn take_string(id: i64) -> Option<String> {
+pub fn take_string(id: i64) -> Option<String> {
     if id == NULL {
         return None;
+    }
+    // Compile-time literals are shared by every use site.  A generated drop
+    // for an async local may pass one of these handles here, but it must not
+    // remove the registry entry or later uses of the literal will decode as
+    // an empty string.
+    if PERMANENT_IDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&id)
+    {
+        return borrow(id, |handle| match handle {
+            Handle::String(value) => Some(value.clone()),
+            _ => None,
+        })
+        .flatten();
     }
     let mut guard = shard_lock(id);
     if !matches!(guard.get(&id), Some(Handle::String(_))) {
@@ -672,7 +716,7 @@ pub(crate) fn take_string(id: i64) -> Option<String> {
 
 /// Clone the string behind `id` (a borrow), registering a fresh owned
 /// copy.
-pub(crate) fn clone_string(id: i64) -> Option<i64> {
+pub fn clone_string(id: i64) -> Option<i64> {
     if id == NULL {
         return None;
     }
@@ -687,7 +731,7 @@ pub(crate) fn clone_string(id: i64) -> Option<i64> {
 }
 
 /// Read the string behind `id` (a borrow) without removing it.
-pub(crate) fn get_string(id: i64) -> Option<String> {
+pub fn get_string(id: i64) -> Option<String> {
     if id == NULL {
         return None;
     }
@@ -700,7 +744,7 @@ pub(crate) fn get_string(id: i64) -> Option<String> {
 
 /// Run `f` on the string behind `id`. The closure must not call back into
 /// the registry.
-pub(crate) fn with_string<R>(id: i64, f: impl FnOnce(&str) -> R) -> Option<R> {
+pub fn with_string<R>(id: i64, f: impl FnOnce(&str) -> R) -> Option<R> {
     if id == NULL {
         return None;
     }
@@ -708,6 +752,22 @@ pub(crate) fn with_string<R>(id: i64, f: impl FnOnce(&str) -> R) -> Option<R> {
     match guard.get(&id) {
         Some(Handle::String(s)) => Some(f(s)),
         _ => None,
+    }
+}
+
+/// Replace the string behind `id` with `s`. Returns whether the handle
+/// referred to a live string.
+pub fn assign_string(id: i64, s: String) -> bool {
+    if id == NULL {
+        return false;
+    }
+    let mut guard = shard_lock(id);
+    match guard.get_mut(&id) {
+        Some(Handle::String(existing)) => {
+            *existing = s;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -813,9 +873,14 @@ pub(crate) fn array_push(id: i64, elem: i64) -> bool {
         value = insert(Handle::String(text));
     }
     let mut guard = shard_lock(id);
-    let arr = match guard.get_mut(&id) {
-        Some(Handle::Array(arr)) => arr,
-        _ => return false,
+    let Some(Handle::Array(arr)) = guard.get_mut(&id) else {
+        // The string copy was registered before reacquiring the array shard.
+        // A concurrent removal or invalidated handle must not strand it.
+        if string_elements {
+            drop(guard);
+            take_string(value);
+        }
+        return false;
     };
     arr.push(value);
     true
@@ -842,11 +907,18 @@ pub(crate) fn array_set(id: i64, index: i64, elem: i64) -> bool {
         value = insert(Handle::String(text));
     }
     let mut guard = shard_lock(id);
-    let arr = match guard.get_mut(&id) {
-        Some(Handle::Array(arr)) => arr,
-        _ => return false,
+    let Some(Handle::Array(arr)) = guard.get_mut(&id) else {
+        if string_elements {
+            drop(guard);
+            take_string(value);
+        }
+        return false;
     };
     if index as usize >= arr.elements.len() {
+        if string_elements {
+            drop(guard);
+            take_string(value);
+        }
         return false;
     }
     let old = std::mem::replace(&mut arr.elements[index as usize], value);
@@ -984,7 +1056,13 @@ pub(crate) fn array_fill(val: i64, count: i64, elem_size: i64, string_elements: 
         return NULL;
     }
     let string_elements = string_elements != 0;
-    let mut data = ArrayData::new(elem_size as usize, count as usize, string_elements);
+    let Ok(count) = usize::try_from(count) else {
+        return NULL;
+    };
+    if count > MAX_INITIAL_CAPACITY {
+        return NULL;
+    }
+    let mut data = ArrayData::new(elem_size as usize, count, string_elements);
     for _ in 0..count {
         let elem = if string_elements {
             match clone_string(val) {
@@ -1001,7 +1079,21 @@ pub(crate) fn array_fill(val: i64, count: i64, elem_size: i64, string_elements: 
 
 /// Build a fresh `i64` array holding `start..end`.
 pub(crate) fn array_range(start: i64, end: i64) -> i64 {
-    let mut data = ArrayData::new(PTR_SIZE, 0, false);
+    let count = if end <= start {
+        0
+    } else {
+        let Some(count) = end
+            .checked_sub(start)
+            .and_then(|count| usize::try_from(count).ok())
+        else {
+            return NULL;
+        };
+        count
+    };
+    if count > MAX_INITIAL_CAPACITY {
+        return NULL;
+    }
+    let mut data = ArrayData::new(PTR_SIZE, count, false);
     for value in start..end {
         data.push(value);
     }
@@ -1074,18 +1166,32 @@ fn array_reverse_inner(id: i64) -> i64 {
 
 /// A new empty array with the same element representation as the array
 /// behind `id`.
+/// Empty the array behind `id` in place, reclaiming any owned string
+/// elements, and return the same handle. `arrays.clear` is documented as an
+/// in-place `void` operation like `arrays.push`; returning a fresh array
+/// instead left the caller's array untouched, so `arrays.clear(a)` appeared
+/// to do nothing and everything after it kept the old elements.
 fn array_clear_inner(id: i64) -> i64 {
     if id == NULL {
         return NULL;
     }
-    let (elem_size, string_elements) = {
-        let guard = shard_lock(id);
-        match guard.get(&id) {
-            Some(Handle::Array(a)) => (a.elem_size, a.string_elements),
-            _ => return NULL,
-        }
+    let (string_elements, dropped) = {
+        let mut guard = shard_lock(id);
+        let Some(Handle::Array(arr)) = guard.get_mut(&id) else {
+            return NULL;
+        };
+        let string_elements = arr.string_elements;
+        let dropped = std::mem::take(&mut arr.elements);
+        (string_elements, dropped)
     };
-    put_array(ArrayData::new(elem_size, 1, string_elements))
+    // Reclaim outside the array's own shard: `take_string` locks the
+    // element's shard, which may be this one.
+    if string_elements {
+        for handle in dropped {
+            take_string(handle);
+        }
+    }
+    id
 }
 
 /// A new array with the element at `index` (negative = from the end)
@@ -1383,17 +1489,48 @@ pub(crate) fn async_op_poll(id: i64) -> i8 {
         });
     if let Some(work) = start_work {
         let op_id = crate::ntask::scheduler::register_op();
+        // Publish the scheduler operation before enqueueing work. If the
+        // future was dropped after `work` was taken but before this point,
+        // cancellation can still remove the operation and the completion
+        // path will reclaim the eventual result handle.
+        let installed = {
+            let mut guard = shard_lock(id);
+            match guard.get_mut(&id) {
+                Some(Handle::AsyncOp { state, op, .. }) if *state == 0 => {
+                    *state = 1;
+                    *op = op_id;
+                    true
+                }
+                _ => false,
+            }
+        };
         crate::ntask::scheduler::run_offload(move || {
             let value = work();
             crate::ntask::scheduler::complete_op(op_id, value);
         });
-        if let Some(handle) = shard_lock(id).get_mut(&id)
-            && let Handle::AsyncOp { state, op, .. } = handle
-        {
-            *state = 1;
-            *op = op_id;
+        if !installed {
+            // The future was cancelled before publication. No waiter can
+            // consume this operation, so remove it now; a later completion
+            // will dispose of the produced registry handle as an orphan.
+            crate::ntask::scheduler::drop_op(op_id);
+            return 0;
         }
-        crate::ntask::scheduler::park_op(op_id);
+        // Cancellation can win immediately after publication. Avoid marking
+        // the current scheduler task as waiting on an operation that has
+        // already been removed; a plain-thread poll simply skips this park.
+        let still_active = shard_lock(id).get(&id).is_some_and(|handle| {
+            matches!(
+                handle,
+                Handle::AsyncOp {
+                    state: 1,
+                    op,
+                    ..
+                } if *op == op_id
+            )
+        });
+        if still_active {
+            crate::ntask::scheduler::park_op(op_id);
+        }
         return 0;
     }
 
@@ -1403,38 +1540,62 @@ pub(crate) fn async_op_poll(id: i64) -> i8 {
     });
     if let Some(op) = op {
         if !crate::ntask::scheduler::op_done(op) {
-            crate::ntask::scheduler::park_op(op);
+            let still_active = shard_lock(id).get(&id).is_some_and(|handle| {
+                matches!(
+                    handle,
+                    Handle::AsyncOp {
+                        state: 1,
+                        op: active_op,
+                        ..
+                    } if *active_op == op
+                )
+            });
+            if still_active {
+                crate::ntask::scheduler::park_op(op);
+            }
             return 0;
         }
         let value = crate::ntask::scheduler::op_result(op);
-        if let Some(handle) = shard_lock(id).get_mut(&id)
-            && let Handle::AsyncOp { state, result, .. } = handle
-        {
-            *state = 2;
-            *result = value;
+        let stored = {
+            let mut guard = shard_lock(id);
+            match guard.get_mut(&id) {
+                Some(Handle::AsyncOp { state, result, .. }) => {
+                    *state = 2;
+                    *result = value;
+                    true
+                }
+                _ => false,
+            }
+        };
+        // Cancellation may remove the future after op_result transfers the
+        // value but before it can be stored on the future. The poller then
+        // owns that value and must reclaim it rather than lose it.
+        if !stored && value != NULL {
+            let _ = crate::registry::remove(value);
         }
     }
     1
 }
 
-/// Reap the result handle of a completed offloaded future.
+/// Reap the result handle of a completed offloaded future. Reaping transfers
+/// ownership exactly once; a second reap returns `NULL`.
 pub(crate) fn async_op_result(id: i64) -> i64 {
     if id == NULL {
         return NULL;
     }
-    shard_lock(id)
-        .get(&id)
-        .map(|handle| match handle {
-            Handle::AsyncOp {
-                state: 2, result, ..
-            } => *result,
-            _ => NULL,
-        })
-        .unwrap_or(NULL)
+    let mut guard = shard_lock(id);
+    match guard.get_mut(&id) {
+        Some(Handle::AsyncOp {
+            state: 2, result, ..
+        }) => std::mem::replace(result, NULL),
+        _ => NULL,
+    }
 }
 
-/// Drop an offloaded future. If it is still running, its pending op is
-/// dropped; a completed result handle is left for the caller to reap.
+/// Drop an offloaded future. A pending operation is cancelled first so its
+/// worker either has its result reclaimed here or observes the missing op and
+/// reclaims it on completion. A result already stored on the future is also
+/// reclaimed; callers must reap it before dropping when they want to keep it.
 pub(crate) fn async_op_drop(id: i64) {
     if id == NULL {
         return;
@@ -1446,7 +1607,13 @@ pub(crate) fn async_op_drop(id: i64) {
     if let Some(op) = pending_op {
         crate::ntask::scheduler::drop_op(op);
     }
-    let _ = remove_kind(id, |handle| matches!(handle, Handle::AsyncOp { .. }));
+    let result = match remove_kind(id, |handle| matches!(handle, Handle::AsyncOp { .. })) {
+        Some(Handle::AsyncOp { result, .. }) => result,
+        _ => NULL,
+    };
+    if result != NULL {
+        let _ = crate::registry::remove(result);
+    }
 }
 
 // ── Goroutine handles ───────────────────────────────────────────────────
@@ -1643,6 +1810,243 @@ pub(crate) fn with_opaque_io<T: Any + Send, R>(id: i64, f: impl FnOnce(T) -> (T,
     Some(r)
 }
 
+// ── Shared cross-adaptor objects ───────────────────────────────────────────
+//
+// Generated adaptor crates (`ntsc-adaptor-*`, one per Rust dependency)
+// exchange opaque values through this process-wide handle space. Every
+// adaptor links the same runtime, so unlike the old per-adaptor maps a
+// handle created by one adaptor resolves in any other: a `ClientBuilder`
+// built by the `serenity` adaptor can be consumed by the `songbird`
+// adaptor's `register` bridge, with no per-crate support code anywhere.
+//
+// Each entry carries a type tag (an interned string naming the owning
+// crate, its exact version and feature set, and the type path) chosen by
+// the creating adaptor. Every lookup checks the tag: a handle of the
+// wrong type — including the same type path built from a different crate
+// version, which may differ in layout — fails closed (null) instead of
+// reinterpreting memory. The tag text is available for diagnostics, so a
+// mismatch reports both sides.
+//
+// Ownership mirrors `Box`: the entry owns one allocation plus its
+// creator-side drop glue. `borrow` retains (bumps `refs`) and hands out
+// the pointer; the borrower must `release` after use, so the allocation
+// provably outlives every in-flight borrow. `take` transfers ownership
+// to the caller but only when no borrow is outstanding (`refs == 1`);
+// `release` drops to zero, runs the drop glue exactly once, and removes
+// the entry. Unknown, null, and wrong-kind handles are no-ops throughout,
+// like every other registry API.
+
+/// Drop glue for one shared object: drops the box behind `ptr` in place
+/// and deallocates it. Monomorphized for the concrete value type by the
+/// creating adaptor, so the runtime never names adaptor types.
+pub(crate) type SharedObjectDrop = extern "C" fn(*mut std::ffi::c_void);
+
+/// One heap value shared across adaptor crates.
+pub(crate) struct SharedObjectData {
+    /// The allocation, from `Box::into_raw` on the creating side. Owned
+    /// by this entry until `take` transfers it or `release` drops it.
+    ptr: *mut std::ffi::c_void,
+    /// Runs exactly once, with `ptr`, when the last reference is
+    /// released. Recorded together with `ptr` at insertion and never
+    /// separated from it.
+    drop_fn: SharedObjectDrop,
+    /// Interned type tag; every access must present the same tag.
+    tag: u64,
+    /// Live references: the entry itself (1) plus one per outstanding
+    /// borrow or Neutron-side share.
+    refs: usize,
+    exclusive_borrow: bool,
+}
+
+// SAFETY: the entry owns `ptr` (a live heap allocation) and `drop_fn`
+// (valid for exactly that allocation). The entry is only accessed under
+// its shard lock, except for raw pointers handed out by `borrow`/`take`,
+// which the refcount protocol keeps alive for the whole use. Sharing
+// `&SharedObjectData` across threads therefore cannot race on the
+// allocation itself. Callers creating `&mut T` aliases from one entry on
+// two threads would race exactly as with any aliased `&mut`; Neutron
+// bridges hold at most the borrows their single call needs, matching the
+// previous per-adaptor maps' contract.
+unsafe impl Send for SharedObjectData {}
+
+/// Interned shared-object type tags: tag text to small id.
+static SHARED_OBJECT_TAGS: LazyLock<Mutex<std::collections::HashMap<String, u64>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+/// Tag id to text (`id == index + 1`), for mismatch diagnostics.
+static SHARED_OBJECT_TAG_NAMES: LazyLock<Mutex<Vec<String>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Intern `name` as a shared-object type tag and return its id (0 is
+/// never a valid id). Idempotent: the same text always yields the same id.
+pub(crate) fn shared_object_tag(name: &str) -> u64 {
+    let mut tags = SHARED_OBJECT_TAGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(&id) = tags.get(name) {
+        return id;
+    }
+    let mut names = SHARED_OBJECT_TAG_NAMES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    names.push(name.to_string());
+    let id = names.len() as u64;
+    tags.insert(name.to_string(), id);
+    id
+}
+
+/// The text of one interned tag, if any.
+pub(crate) fn shared_object_tag_name(id: u64) -> Option<String> {
+    SHARED_OBJECT_TAG_NAMES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(id.checked_sub(1)? as usize)
+        .cloned()
+}
+
+/// Register one heap value shared across adaptors and return its handle
+/// (`refs == 1`). Fail-closed: a null pointer or null drop glue could
+/// never be freed, so such an entry must never exist.
+pub(crate) fn shared_object_put(
+    ptr: *mut std::ffi::c_void,
+    drop_fn: Option<SharedObjectDrop>,
+    tag: u64,
+) -> i64 {
+    let Some(drop_fn) = drop_fn else {
+        return NULL;
+    };
+    if ptr.is_null() || tag == 0 {
+        return NULL;
+    }
+    insert(Handle::SharedObject(SharedObjectData {
+        ptr,
+        drop_fn,
+        tag,
+        refs: 1,
+        exclusive_borrow: false,
+    }))
+}
+
+/// Borrow the value behind `id` after checking its tag: retains (bumps
+/// `refs`) and returns the pointer. The caller must `shared_object_release`
+/// after use. Returns null for the null handle, unknown or wrong-kind
+/// handles, and tag mismatches.
+pub(crate) fn shared_object_borrow(id: i64, tag: u64) -> *mut std::ffi::c_void {
+    if id == NULL {
+        return std::ptr::null_mut();
+    }
+    let mut guard = shard_lock(id);
+    match guard.get_mut(&id) {
+        Some(Handle::SharedObject(object)) if object.tag == tag && !object.exclusive_borrow => {
+            object.refs = object.refs.saturating_add(1);
+            object.ptr
+        }
+        _ => std::ptr::null_mut(),
+    }
+}
+
+pub(crate) fn shared_object_borrow_mut(id: i64, tag: u64) -> *mut std::ffi::c_void {
+    let mut guard = shard_lock(id);
+    match guard.get_mut(&id) {
+        Some(Handle::SharedObject(object)) if object.tag == tag && object.refs == 1 => {
+            object.exclusive_borrow = true;
+            object.refs += 1;
+            object.ptr
+        }
+        _ => std::ptr::null_mut(),
+    }
+}
+
+pub(crate) fn shared_object_release_mut(id: i64) {
+    {
+        let mut guard = shard_lock(id);
+        match guard.get_mut(&id) {
+            Some(Handle::SharedObject(object)) if object.exclusive_borrow => {
+                object.exclusive_borrow = false;
+            }
+            _ => return,
+        }
+    }
+    shared_object_release(id);
+}
+
+/// Take ownership of the value behind `id` after checking its tag:
+/// removes the entry (without running the drop glue) and returns the
+/// pointer. Requires unique ownership (`refs == 1`): an outstanding
+/// borrow keeps raw pointers alive, so taking over them would free
+/// memory still in use. Returns null for the null handle, unknown or
+/// wrong-kind handles, tag mismatches, and busy entries.
+pub(crate) fn shared_object_take(id: i64, tag: u64) -> *mut std::ffi::c_void {
+    if id == NULL {
+        return std::ptr::null_mut();
+    }
+    let mut guard = shard_lock(id);
+    match guard.get(&id) {
+        Some(Handle::SharedObject(object)) if object.tag == tag && object.refs == 1 => {}
+        _ => return std::ptr::null_mut(),
+    }
+    match guard.remove(&id) {
+        Some(Handle::SharedObject(object)) => {
+            LIVE.fetch_sub(1, Ordering::Relaxed);
+            REGISTRY_GEN.fetch_add(1, Ordering::Release);
+            object.ptr
+        }
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// Release one reference to the shared object behind `id`. At zero the
+/// entry is removed and its drop glue runs exactly once. Null, unknown,
+/// and wrong-kind handles are no-ops.
+pub(crate) fn shared_object_release(id: i64) {
+    if id == NULL {
+        return;
+    }
+    let taken = {
+        let mut guard = shard_lock(id);
+        let object = match guard.get_mut(&id) {
+            Some(Handle::SharedObject(object)) => object,
+            _ => return,
+        };
+        object.refs = object.refs.saturating_sub(1);
+        if object.refs > 0 {
+            return;
+        }
+        guard.remove(&id)
+    };
+    if taken.is_some() {
+        LIVE.fetch_sub(1, Ordering::Relaxed);
+        REGISTRY_GEN.fetch_add(1, Ordering::Release);
+    }
+    if let Some(Handle::SharedObject(object)) = taken {
+        (object.drop_fn)(object.ptr);
+    }
+}
+
+/// Record another live Neutron-side share of the object behind `id`.
+/// Unknown, null, and wrong-kind handles are no-ops returning the input
+/// unchanged, matching the retain protocol everywhere else.
+pub(crate) fn shared_object_retain(id: i64) -> i64 {
+    if id == NULL {
+        return id;
+    }
+    borrow_mut(id, |handle| {
+        if let Handle::SharedObject(object) = handle {
+            object.refs = object.refs.saturating_add(1);
+        }
+    });
+    id
+}
+
+/// The tag of the shared object behind `id`, or 0 for null, unknown,
+/// and wrong-kind handles.
+pub(crate) fn shared_object_tag_of(id: i64) -> u64 {
+    borrow(id, |handle| match handle {
+        Handle::SharedObject(object) => object.tag,
+        _ => 0,
+    })
+    .unwrap_or(0)
+}
+
 // ── High-level array operations used by lib.rs / modules ───────────────────
 
 pub(crate) fn array_slice(id: i64, start: i64, end: i64) -> i64 {
@@ -1797,7 +2201,48 @@ mod capability_benchmark {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clearing_then_pushing_reuses_the_same_array() {
+        let arr = put_array(ArrayData::new(8, 1, false));
+        assert!(array_push(arr, 1));
+        assert!(array_push(arr, 2));
+        assert_eq!(array_clear(arr), arr);
+        assert!(array_push(arr, 9));
+        assert_eq!(array_len(arr), 1);
+    }
     use super::*;
+
+    #[test]
+    fn invalid_string_array_set_reclaims_its_temporary_copy() {
+        let text = "invalid_string_array_set_copy";
+        let array = array_new(8, 0, 1);
+        let source = put_string(text.to_string());
+        assert!(array_push(array, source));
+        for index in [-1, 1, 99] {
+            assert!(!array_set(array, index, source));
+        }
+        assert_eq!(array_len(array), 1);
+        take_string(source);
+        array_drop(array);
+        assert!(
+            !live_entries()
+                .iter()
+                .any(|entry| entry.detail.as_deref() == Some(text))
+        );
+    }
+
+    #[test]
+    fn capability_cache_does_not_keep_dropped_memory_alive() {
+        let pointer = memory_alloc(8);
+        let weak = borrow(pointer, |handle| match handle {
+            Handle::Memory(memory) => Arc::downgrade(&memory.bytes),
+            _ => panic!("expected memory"),
+        })
+        .unwrap();
+        assert_eq!(memory_load(pointer, 8), Some(0));
+        memory_drop(pointer);
+        assert!(weak.upgrade().is_none());
+    }
 
     #[test]
     fn array_slice_with_reversed_or_out_of_range_bounds_is_empty() {
@@ -2008,6 +2453,14 @@ mod tests {
         assert_counters_agree_with_map("insert_permanent");
     }
 
+    #[test]
+    fn taking_a_permanent_string_keeps_it_available() {
+        let id = put_string_permanent("shared literal".to_string());
+        assert_eq!(take_string(id), Some("shared literal".to_string()));
+        assert_eq!(get_string(id), Some("shared literal".to_string()));
+        assert!(is_registered(id));
+    }
+
     /// A channel handle is reference counted: `go f(ch)` and `var b = ch`
     /// retain it, so the core survives until the last holder drops it, and
     /// only the removing drop touches `LIVE`.
@@ -2057,5 +2510,198 @@ mod tests {
 
         chan_drop(id);
         assert!(!is_registered(id));
+    }
+
+    /// Drop glue plus a drop counter for the shared-object tests: the box
+    /// holds a `String`, and every run records one drop.
+    static SHARED_OBJECT_TEST_DROPS: AtomicI64 = AtomicI64::new(0);
+
+    extern "C" fn drop_test_string(ptr: *mut std::ffi::c_void) {
+        SHARED_OBJECT_TEST_DROPS.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: test-only glue paired with boxes made by `share_object_test`.
+        unsafe {
+            drop(Box::from_raw(ptr as *mut String));
+        }
+    }
+
+    fn share_object_test(value: &str, tag: u64) -> i64 {
+        let boxed = Box::new(value.to_string());
+        shared_object_put(
+            Box::into_raw(boxed) as *mut std::ffi::c_void,
+            Some(drop_test_string),
+            tag,
+        )
+    }
+
+    fn read_test(ptr: *mut std::ffi::c_void) -> String {
+        // SAFETY: test pointers come from live shared entries.
+        unsafe { (*(ptr as *const String)).clone() }
+    }
+
+    #[test]
+    fn shared_objects_borrow_take_and_release_exactly_once() {
+        let tag = shared_object_tag("test-crate@1.0+feat/Type");
+        let drops_before = SHARED_OBJECT_TEST_DROPS.load(Ordering::Relaxed);
+        let id = share_object_test("hello", tag);
+        assert!(is_registered(id));
+        assert_counters_agree_with_map("shared put");
+
+        // Borrow retains and reads back the value; release balances it.
+        let ptr = shared_object_borrow(id, tag);
+        assert!(!ptr.is_null());
+        assert_eq!(read_test(ptr), "hello");
+        shared_object_release(id);
+        assert!(is_registered(id));
+
+        // Take transfers ownership without running drop glue; the caller
+        // frees the box itself.
+        let taken = shared_object_take(id, tag);
+        assert!(!taken.is_null());
+        assert!(!is_registered(id));
+        assert_eq!(read_test(taken), "hello");
+        assert_eq!(
+            SHARED_OBJECT_TEST_DROPS.load(Ordering::Relaxed),
+            drops_before
+        );
+        drop_test_string(taken);
+        assert_eq!(
+            SHARED_OBJECT_TEST_DROPS.load(Ordering::Relaxed),
+            drops_before + 1
+        );
+        assert_counters_agree_with_map("shared take and manual drop");
+    }
+
+    #[test]
+    fn mutable_object_borrows_are_exclusive_and_preserve_the_handle() {
+        let tag = shared_object_tag("mutable-fixture/String");
+        let id = share_object_test("before", tag);
+        let shared = shared_object_borrow(id, tag);
+        assert!(!shared.is_null());
+        assert!(shared_object_borrow_mut(id, tag).is_null());
+        shared_object_release(id);
+        let exclusive = shared_object_borrow_mut(id, tag);
+        assert!(!exclusive.is_null());
+        assert!(shared_object_borrow(id, tag).is_null());
+        assert!(shared_object_borrow_mut(id, tag).is_null());
+        assert!(shared_object_take(id, tag).is_null());
+        // SAFETY: this pointer has the string tag and the sole mutable borrow.
+        unsafe { (*(exclusive as *mut String)).push_str(" after") };
+        shared_object_release_mut(id);
+        let shared = shared_object_borrow(id, tag);
+        assert_eq!(read_test(shared), "before after");
+        shared_object_release(id);
+        shared_object_release(id);
+        assert!(!is_registered(id));
+    }
+
+    #[test]
+    fn shared_object_release_runs_drop_glue_at_zero() {
+        let tag = shared_object_tag("test-crate@1.0+feat/Other");
+        let drops_before = SHARED_OBJECT_TEST_DROPS.load(Ordering::Relaxed);
+        let id = share_object_test("bye", tag);
+        assert_eq!(shared_object_retain(id), id);
+        shared_object_release(id);
+        assert!(is_registered(id));
+        assert_eq!(
+            SHARED_OBJECT_TEST_DROPS.load(Ordering::Relaxed),
+            drops_before
+        );
+        shared_object_release(id);
+        assert!(!is_registered(id));
+        assert_eq!(
+            SHARED_OBJECT_TEST_DROPS.load(Ordering::Relaxed),
+            drops_before + 1
+        );
+        assert_counters_agree_with_map("shared release to zero");
+    }
+
+    #[test]
+    fn shared_tag_mismatch_fails_closed() {
+        let tag = shared_object_tag("test-crate@1.0+feat/Same");
+        let other = shared_object_tag("test-crate@2.0+feat/Same");
+        assert_ne!(tag, other);
+        let drops_before = SHARED_OBJECT_TEST_DROPS.load(Ordering::Relaxed);
+        let id = share_object_test("guarded", tag);
+
+        assert!(shared_object_borrow(id, other).is_null());
+        assert!(shared_object_take(id, other).is_null());
+        // The entry is untouched: the right tag still borrows...
+        let ptr = shared_object_borrow(id, tag);
+        assert!(!ptr.is_null());
+        shared_object_release(id);
+        // ...and takes once unique ownership is restored.
+        let taken = shared_object_take(id, tag);
+        assert!(!taken.is_null());
+        assert!(!is_registered(id));
+        drop_test_string(taken);
+        assert_eq!(
+            SHARED_OBJECT_TEST_DROPS.load(Ordering::Relaxed),
+            drops_before + 1
+        );
+    }
+
+    #[test]
+    fn shared_take_refuses_outstanding_borrows() {
+        let tag = shared_object_tag("test-crate@1.0+feat/Busy");
+        let id = share_object_test("busy", tag);
+        let ptr = shared_object_borrow(id, tag);
+        assert!(!ptr.is_null());
+        // An in-flight borrow holds a raw pointer: taking over it would
+        // free live memory, so the take fails and the entry survives.
+        assert!(shared_object_take(id, tag).is_null());
+        assert!(is_registered(id));
+        shared_object_release(id);
+        let taken = shared_object_take(id, tag);
+        assert!(!taken.is_null());
+        drop_test_string(taken);
+    }
+
+    #[test]
+    fn shared_wrong_kind_and_stale_handles_are_no_ops() {
+        let tag = shared_object_tag("test-crate@1.0+feat/Kind");
+        let string = put_string("plain".to_string());
+        assert!(shared_object_borrow(string, tag).is_null());
+        assert!(shared_object_take(string, tag).is_null());
+        assert_eq!(shared_object_tag_of(string), 0);
+        shared_object_release(string);
+        assert_eq!(get_string(string), Some("plain".to_string()));
+
+        let stale = 987_654_321;
+        assert!(shared_object_borrow(stale, tag).is_null());
+        assert!(shared_object_take(stale, tag).is_null());
+        assert_eq!(shared_object_retain(stale), stale);
+        assert_eq!(shared_object_tag_of(stale), 0);
+        shared_object_release(stale);
+        shared_object_release(NULL);
+        assert_eq!(take_string(string), Some("plain".to_string()));
+
+        // Fail-closed puts never create entries.
+        assert_eq!(
+            shared_object_put(std::ptr::null_mut(), Some(drop_test_string), tag),
+            NULL
+        );
+        let leaked = Box::into_raw(Box::new("leak-check".to_string()));
+        assert_eq!(
+            shared_object_put(leaked as *mut std::ffi::c_void, None, tag),
+            NULL
+        );
+        // SAFETY: the rejected put transferred nothing; free it here.
+        unsafe {
+            drop(Box::from_raw(leaked));
+        }
+        assert_counters_agree_with_map("shared no-op paths");
+    }
+
+    #[test]
+    fn shared_tags_intern_stably_and_report_text() {
+        let first = shared_object_tag("some-crate@0.1+a,b/Type");
+        assert_eq!(shared_object_tag("some-crate@0.1+a,b/Type"), first);
+        assert_ne!(first, 0);
+        assert_eq!(
+            shared_object_tag_name(first).as_deref(),
+            Some("some-crate@0.1+a,b/Type")
+        );
+        assert_eq!(shared_object_tag_name(u64::MAX), None);
+        assert_eq!(shared_object_tag_of(987_654_321), 0);
     }
 }
