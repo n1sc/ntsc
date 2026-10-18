@@ -15,6 +15,435 @@ pub(crate) fn call_result_to_value<'ctx>(
         .unwrap_or_else(|| default_llvm_value(&Ty::Any, fn_ctx.context))
 }
 
+fn normalize_ffi_result<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    value: BasicValueEnum<'ctx>,
+    ty: &Ty,
+) -> Result<BasicValueEnum<'ctx>, crate::CodegenError> {
+    match ty {
+        Ty::Bool if value.is_int_value() => {
+            let value = value.into_int_value();
+            if value.get_type().get_bit_width() == 1 {
+                Ok(value.into())
+            } else {
+                Ok(fn_ctx
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        value,
+                        value.get_type().const_zero(),
+                        "ffi_bool",
+                    )?
+                    .into())
+            }
+        }
+        Ty::Int if value.is_int_value() => {
+            let value = value.into_int_value();
+            if value.get_type().get_bit_width() < 64 {
+                Ok(fn_ctx
+                    .builder
+                    .build_int_s_extend(value, fn_ctx.context.i64_type(), "ffi_int")?
+                    .into())
+            } else {
+                Ok(value.into())
+            }
+        }
+        Ty::Float if value.is_float_value() => {
+            let value = value.into_float_value();
+            if value.get_type().get_bit_width() < 64 {
+                Ok(fn_ctx
+                    .builder
+                    .build_float_ext(value, fn_ctx.context.f64_type(), "ffi_float")?
+                    .into())
+            } else {
+                Ok(value.into())
+            }
+        }
+        _ => Ok(value),
+    }
+}
+
+/// Argument ownership for a routed `arrays.*` op, used to decide which fresh
+/// borrowed temporaries to drop after the call.
+///
+/// Only `push` moves its value argument into the array: the runtime deep-copies
+/// string elements into a fresh handle it owns, but every other element type is
+/// stored by value (the array adopts the same handle/pointer). For the element
+/// types the array's drop loop later reclaims — the set mirrored in
+/// `emit_drop_value` — that fresh temporary must not be dropped here, or the
+/// stored element would be freed out from under the array. Strings and scalars
+/// keep the previous borrowed behavior (an empty slice), so a fresh string temp
+/// is still dropped once the array has copied it.
+fn array_op_param_types(prop_name: &str, arg_values: &[TypedValue<'_>]) -> Vec<Ty> {
+    if prop_name != "push" {
+        return Vec::new();
+    }
+    let Some(array_arg) = arg_values.first() else {
+        return Vec::new();
+    };
+    let elem_ty = array_elem_ty(&array_arg.ntsc_type);
+    let element_is_moved = matches!(
+        elem_ty,
+        Ty::Array(_) | Ty::Class(_) | Ty::Option(_) | Ty::Result { .. } | Ty::Shared(_)
+    );
+    if !element_is_moved {
+        return Vec::new();
+    }
+    vec![
+        Ty::View(Box::new(array_arg.ntsc_type.clone()), false),
+        elem_ty,
+    ]
+}
+
+/// Coerce any Neutron value to the raw `i64` an adaptor bridge expects
+/// (bools/ints sign- or zero-extended, floats bit-cast, handles as-is).
+pub(crate) fn coerce_to_i64<'ctx>(
+    fn_ctx: &FunctionContext<'ctx, '_>,
+    val: BasicValueEnum<'ctx>,
+) -> Result<inkwell::values::IntValue<'ctx>, crate::CodegenError> {
+    let i64_ty = fn_ctx.context.i64_type();
+    if val.is_int_value() {
+        let iv = val.into_int_value();
+        let width = iv.get_type().get_bit_width();
+        if width == 1 {
+            return Ok(fn_ctx
+                .builder
+                .build_int_z_extend(iv, i64_ty, "bool_to_i64")?);
+        }
+        if width != 64 {
+            return Ok(fn_ctx
+                .builder
+                .build_int_s_extend_or_bit_cast(iv, i64_ty, "ext")?);
+        }
+        return Ok(iv);
+    }
+    if val.is_float_value() {
+        let bits = fn_ctx
+            .builder
+            .build_bit_cast(val.into_float_value(), i64_ty, "f64_to_i64")?;
+        return Ok(bits.into_int_value());
+    }
+    if val.is_pointer_value() {
+        return Ok(fn_ctx.builder.build_ptr_to_int(
+            val.into_pointer_value(),
+            i64_ty,
+            "ptr_to_i64",
+        )?);
+    }
+    Ok(i64_ty.const_zero())
+}
+
+/// Lower a raw `i64` adaptor return to Neutron's value representation
+/// using the manifest-declared return label: `bool` becomes i1 (`!= 0`),
+/// `float` is bit-cast from the i64 bits, an `object[T]`/`result[object]`
+/// return records its type for the enclosing declaration to track, and
+/// everything else (handles, ints) already matches. Unmanifested calls
+/// keep the historical string-handle view.
+fn lower_rust_call_result<'ctx>(
+    fn_ctx: &FunctionContext<'ctx, '_>,
+    raw: BasicValueEnum<'ctx>,
+    crate_name: &str,
+    fn_name: &str,
+) -> (BasicValueEnum<'ctx>, Ty) {
+    let label = super::rust_return_label(crate_name, fn_name);
+    // `object[T]` returns carry a handle; the enclosing declaration or
+    // assignment picks up ownership from the call shape itself (see
+    // `fresh_object_call`), so no global state is needed here.
+    let ret_ty = match label.as_deref() {
+        Some("bool") => Ty::Bool,
+        Some("int") => Ty::Int,
+        Some("float") => Ty::Float,
+        Some("void") => Ty::Void,
+        Some(label) if label.starts_with("object[") || label.starts_with("result[object[") => {
+            Ty::String
+        }
+        // `option[object[T]]`: a registry handle, or the null handle for
+        // `None` — opaque to the type system, checked against 0.
+        Some(label) if label.starts_with("option[object[") => Ty::Any,
+        Some(label) if matches!(label, "option[int]" | "option[bool]" | "option[float]") => {
+            super::rust_option_scalar_ty(label)
+                .map(|inner| Ty::Option(Box::new(inner)))
+                .unwrap_or(Ty::Any)
+        }
+        // Collection bridges return array handles (`option`/`result`
+        // wrappers are unwrapped by the bridge itself: null handle for
+        // `None`, a throw for `Err`).
+        Some(label) => super::rust_array_elem_ty(label).unwrap_or(Ty::String),
+        _ => Ty::String,
+    };
+    let lowered = match &ret_ty {
+        Ty::Bool => {
+            let raw = raw.into_int_value();
+            fn_ctx
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    raw,
+                    fn_ctx.context.i64_type().const_zero(),
+                    "rust_bool",
+                )
+                .unwrap()
+                .into()
+        }
+        Ty::Float => fn_ctx
+            .builder
+            .build_bit_cast(raw, fn_ctx.context.f64_type(), "rust_f64")
+            .unwrap(),
+        _ => raw,
+    };
+    (lowered, ret_ty)
+}
+
+/// The type path inside an `object[T]` or `result[object[T]]` label.
+pub(crate) fn rust_object_label_type(label: &str) -> Option<String> {
+    if let Some(inner) = label
+        .strip_prefix("object[")
+        .and_then(|s| s.strip_suffix(']'))
+    {
+        return Some(inner.to_string());
+    }
+    if let Some(inner) = label
+        .strip_prefix("option[object[")
+        .and_then(|s| s.strip_suffix("]]"))
+    {
+        return Some(inner.to_string());
+    }
+    let inner = label
+        .strip_prefix("result[object[")
+        .and_then(|s| s.strip_suffix("]]"))?;
+    Some(inner.to_string())
+}
+
+/// If `expr` is a call whose result is a fresh caller-owned object handle,
+/// return its `(owning crate, type path)`. This covers Rust bridge calls
+/// (`@crate.fn(..)` and `handle.method(..)`, including `await` callees, which
+/// share the call shape) and user-function calls recorded in
+/// [`super::user_function_object_return`] as returning such an object. Every
+/// call site classifies through this one predicate, so a user object-returning
+/// call is tracked and released exactly like a bridge call.
+pub(crate) fn fresh_object_call(expr: &Expr) -> Option<(String, String)> {
+    fresh_bridge_object_call(expr).or_else(|| user_object_call(expr))
+}
+
+/// A call to a user function recorded as returning a fresh owned object.
+/// Separate from [`fresh_bridge_object_call`] so the pre-pass computing those
+/// records can classify bridge calls without consulting the still-empty
+/// global table.
+fn user_object_call(expr: &Expr) -> Option<(String, String)> {
+    if let Expr::Call { callee, .. } = expr
+        && let Expr::Variable { name } = callee.as_ref()
+    {
+        return super::user_function_object_return(name.lexeme());
+    }
+    None
+}
+
+/// The bridge half of [`fresh_object_call`]: `@crate.fn(..)` and
+/// `handle.method(..)` shapes resolved purely from syntax and the manifest,
+/// reading no global tracking state.
+fn fresh_bridge_object_call(expr: &Expr) -> Option<(String, String)> {
+    let callee = match expr {
+        Expr::Call { callee, .. } => callee.as_ref(),
+        other => other,
+    };
+    // Method-style: `re.is_match(s)` resolves through the manifest.
+    if let Some((crate_name, bridge_name, _)) = rust_member_call_target(callee) {
+        let label = super::rust_return_label(&crate_name, &bridge_name)?;
+        let owner = super::rust_return_origin(&crate_name, &bridge_name).unwrap_or(crate_name);
+        return rust_object_label_type(&label).map(|type_path| (owner, type_path));
+    }
+    // Direct `@crate.fn(..)`: same namespace and label lookup as the
+    // synchronous call path in `emit_call` below.
+    if let Expr::Member { object, property } = callee
+        && let Expr::Variable { name } = object.as_ref()
+    {
+        let namespace = name.lexeme().trim_start_matches('@');
+        let crate_name =
+            super::RUST_CRATE_NAMESPACES.with(|m| m.borrow().get(namespace).cloned())?;
+        let prop_name = property.lexeme().to_string();
+        let label = super::rust_return_label(&crate_name, &prop_name)?;
+        let owner = super::rust_return_origin(&crate_name, &prop_name).unwrap_or(crate_name);
+        return rust_object_label_type(&label).map(|type_path| (owner, type_path));
+    }
+    None
+}
+
+/// Compute, for every free function, the fresh Rust object it hands back to
+/// its caller. A function qualifies when a `return` yields a bridge object
+/// call, a local bound to one, or a call to another object-returning
+/// function; the last case is resolved to a fixpoint so a chain of forwarding
+/// functions is fully classified. Imprecision here is safe — a missed
+/// function only keeps the historical leak, never a double free (release
+/// bridges no-op on foreign or stale handles).
+pub(crate) fn compute_user_object_returns(program: &Program) -> HashMap<String, (String, String)> {
+    let functions: Vec<(&str, &[Stmt])> = program
+        .statements
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::Function { name, body, .. } => Some((name.lexeme(), body.as_slice())),
+            _ => None,
+        })
+        .collect();
+
+    let mut resolved: HashMap<String, (String, String)> = HashMap::new();
+    loop {
+        let mut changed = false;
+        for (name, body) in &functions {
+            if resolved.contains_key(*name) {
+                continue;
+            }
+            if let Some(object) = function_returns_object(body, &resolved) {
+                resolved.insert((*name).to_string(), object);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    resolved
+}
+
+/// The fresh object `body` returns, if every information source available so
+/// far (bridge calls, object-bound locals, already-resolved callees) proves
+/// one of its `return`s transfers a caller-owned handle.
+fn function_returns_object(
+    body: &[Stmt],
+    resolved: &HashMap<String, (String, String)>,
+) -> Option<(String, String)> {
+    let mut object_locals: HashMap<String, (String, String)> = HashMap::new();
+    walk_stmts(body, &mut |stmt| {
+        if let Stmt::Var {
+            name,
+            initializer: Some(init),
+            ..
+        } = stmt
+            && let Some(object) =
+                fresh_bridge_object_call(init).or_else(|| resolved_call_object(init, resolved))
+        {
+            object_locals.insert(name.lexeme().to_string(), object);
+        }
+    });
+
+    let mut result = None;
+    walk_stmts(body, &mut |stmt| {
+        if result.is_none()
+            && let Stmt::Return { value: Some(expr) } = stmt
+        {
+            result = resolve_object_return(expr, resolved, &object_locals);
+        }
+    });
+    result
+}
+
+/// Resolve a returned expression to the fresh object it carries.
+fn resolve_object_return(
+    expr: &Expr,
+    resolved: &HashMap<String, (String, String)>,
+    object_locals: &HashMap<String, (String, String)>,
+) -> Option<(String, String)> {
+    if let Some(object) = fresh_bridge_object_call(expr) {
+        return Some(object);
+    }
+    if let Some(object) = resolved_call_object(expr, resolved) {
+        return Some(object);
+    }
+    if let Expr::Variable { name } = expr {
+        return object_locals.get(name.lexeme()).cloned();
+    }
+    None
+}
+
+/// A call to a user function already known to return a fresh object.
+fn resolved_call_object(
+    expr: &Expr,
+    resolved: &HashMap<String, (String, String)>,
+) -> Option<(String, String)> {
+    if let Expr::Call { callee, .. } = expr
+        && let Expr::Variable { name } = callee.as_ref()
+    {
+        return resolved.get(name.lexeme()).cloned();
+    }
+    None
+}
+
+/// Visit every statement in `body` and its nested control-flow blocks, in
+/// source order, without descending into nested item declarations. Mirrors
+/// the recursion of [`super::escape::collect_class_drop_candidates`].
+pub(super) fn walk_stmts(body: &[Stmt], visit: &mut dyn FnMut(&Stmt)) {
+    for stmt in body {
+        visit(stmt);
+        match stmt {
+            Stmt::Block { statements, .. } => walk_stmts(statements, visit),
+            Stmt::If {
+                then_branch,
+                elif_branches,
+                else_branch,
+                ..
+            } => {
+                walk_stmts(std::slice::from_ref(then_branch), visit);
+                for elif in elif_branches {
+                    walk_stmts(std::slice::from_ref(&elif.body), visit);
+                }
+                if let Some(else_body) = else_branch {
+                    walk_stmts(std::slice::from_ref(else_body), visit);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                walk_stmts(std::slice::from_ref(body), visit);
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(init_stmt) = init {
+                    walk_stmts(std::slice::from_ref(init_stmt), visit);
+                }
+                walk_stmts(std::slice::from_ref(body), visit);
+            }
+            Stmt::ForIn { body, .. }
+            | Stmt::ForAwait { body, .. }
+            | Stmt::ChanRecvFor { body, .. } => {
+                walk_stmts(std::slice::from_ref(body), visit);
+            }
+            Stmt::Match {
+                cases,
+                default_case,
+                ..
+            } => {
+                for case in cases {
+                    walk_stmts(std::slice::from_ref(&case.body), visit);
+                }
+                if let Some(default_body) = default_case {
+                    walk_stmts(std::slice::from_ref(default_body), visit);
+                }
+            }
+            Stmt::Try {
+                try_block,
+                catch_block,
+                finally_block,
+                ..
+            } => {
+                walk_stmts(std::slice::from_ref(try_block), visit);
+                if let Some(catch) = catch_block {
+                    walk_stmts(std::slice::from_ref(catch), visit);
+                }
+                if let Some(finally) = finally_block {
+                    walk_stmts(std::slice::from_ref(finally), visit);
+                }
+            }
+            Stmt::Retry {
+                body, catch_block, ..
+            } => {
+                walk_stmts(std::slice::from_ref(body), visit);
+                if let Some(catch) = catch_block {
+                    walk_stmts(std::slice::from_ref(catch), visit);
+                }
+            }
+            Stmt::Unsafe { body } => walk_stmts(std::slice::from_ref(body), visit),
+            Stmt::Quiet { body, .. } => walk_stmts(std::slice::from_ref(body), visit),
+            _ => {}
+        }
+    }
+}
+
 /// Map a stdlib ABI function name to its return type. Most modules' C
 /// functions return a fixed type (all `ntsc_math_*` return `f64`, ...);
 /// everything else defaults to `Any` and stdlib call sites then re-derive
@@ -38,7 +467,8 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         "ntsc_time_sleep" => Ty::Void,
 
         "ntsc_sys_read" | "ntsc_sys_listdir" | "ntsc_sys_cwd" | "ntsc_sys_env"
-        | "ntsc_sys_args" | "ntsc_sys_walk" | "ntsc_sys_readlink" => Ty::String,
+        | "ntsc_sys_walk" | "ntsc_sys_readlink" => Ty::String,
+        "ntsc_sys_args" => Ty::Array(Box::new(Ty::String)),
         "ntsc_sys_write"
         | "ntsc_sys_append"
         | "ntsc_sys_exists"
@@ -49,6 +479,11 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         | "ntsc_sys_is_symlink" => Ty::Bool,
         "ntsc_sys_exit" | "ntsc_sys_sleep" => Ty::Void,
         "ntsc_sys_exec" => Ty::Int,
+
+        "ntsc_term_is_tty" | "ntsc_term_poll_key" | "ntsc_term_key_ctrl" => Ty::Bool,
+        "ntsc_term_open" => Ty::Int,
+        "ntsc_term_restore" => Ty::Bool,
+        "ntsc_term_key_code" | "ntsc_term_key_character" => Ty::String,
 
         "ntsc_strings_contains"
         | "ntsc_strings_starts_with"
@@ -61,9 +496,11 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         | "ntsc_strings_count"
         | "ntsc_strings_index_of"
         | "ntsc_strings_last_index_of"
-        | "ntsc_strings_char_code" => Ty::Int,
+        | "ntsc_strings_char_code"
+        | "ntsc_json_length" => Ty::Int,
         "ntsc_strings_split"
         | "ntsc_strings_join"
+        | "ntsc_strings_join_all"
         | "ntsc_strings_trim"
         | "ntsc_strings_trim_left"
         | "ntsc_strings_trim_right"
@@ -86,6 +523,8 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         | "ntsc_json_parse"
         | "ntsc_json_stringify"
         | "ntsc_json_get"
+        | "ntsc_json_at"
+        | "ntsc_json_escape_string"
         | "ntsc_json_keys"
         | "ntsc_json_stringify_pretty" => Ty::String,
         "ntsc_json_is_valid" | "ntsc_json_has" => Ty::Bool,
@@ -99,6 +538,7 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         | "ntsc_http_head"
         | "ntsc_http_patch"
         | "ntsc_http_request"
+        | "ntsc_http_request_full"
         | "ntsc_http_get_range"
         | "ntsc_http_get_file"
         | "ntsc_http_download_with_progress"
@@ -157,6 +597,9 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         | "ntsc_regex_split"
         | "ntsc_regex_escape" => Ty::String,
 
+        "ntsc_sort_binary_search" => Ty::Int,
+        "ntsc_sort_stable_sort" => Ty::Array(Box::new(Ty::Any)),
+
         "ntsc_arrays_length" | "ntsc_arrays_index_of" | "ntsc_arrays_range" => Ty::Int,
         "ntsc_arrays_new"
         | "ntsc_arrays_join"
@@ -165,12 +608,11 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         | "ntsc_arrays_remove"
         | "ntsc_arrays_remove_at"
         | "ntsc_arrays_slice"
-        | "ntsc_arrays_clear"
         | "ntsc_arrays_clone"
         | "ntsc_arrays_fill"
         | "ntsc_arrays_flat"
         | "ntsc_arrays_shuffle" => Ty::String,
-        "ntsc_arrays_push" => Ty::Void,
+        "ntsc_arrays_push" | "ntsc_arrays_clear" => Ty::Void,
         "ntsc_arrays_pop"
         | "ntsc_arrays_at"
         | "ntsc_arrays_contains"
@@ -191,12 +633,14 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         | "ntsc_os_path_basename"
         | "ntsc_os_path_ext"
         | "ntsc_os_path_stem"
-        | "ntsc_os_path_abs" => Ty::String,
+        | "ntsc_os_path_abs"
+        | "ntsc_os_executable_path" => Ty::String,
         "ntsc_os_setenv"
         | "ntsc_os_unsetenv"
         | "ntsc_os_has_env"
         | "ntsc_os_is_abs"
-        | "ntsc_os_file_unlock" => Ty::Bool,
+        | "ntsc_os_file_unlock"
+        | "ntsc_os_rename" => Ty::Bool,
         "ntsc_os_file_lock" => Ty::Int,
 
         "ntsc_io_stdin" | "ntsc_io_stdout" | "ntsc_io_stderr" | "ntsc_io_open"
@@ -208,6 +652,7 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         | "ntsc_net_tcp_listen"
         | "ntsc_net_local_port"
         | "ntsc_net_tcp_accept"
+        | "ntsc_net_accept_poll"
         | "ntsc_net_send"
         | "ntsc_net_send_line"
         | "ntsc_net_udp_bind"
@@ -236,8 +681,9 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         "ntsc_memory_store8" | "ntsc_memory_store64" => Ty::Bool,
 
         "ntsc_random_seed" | "ntsc_random_bool" => Ty::Bool,
-        "ntsc_random_int" => Ty::Int,
+        "ntsc_random_int" | "ntsc_random_weighted" => Ty::Int,
         "ntsc_random_float" => Ty::Float,
+        "ntsc_random_shuffle" => Ty::Array(Box::new(Ty::Any)),
 
         // ── paths module ─────────────────────────────────────────────────
         "ntsc_paths_join"
@@ -343,6 +789,33 @@ pub(crate) fn flatten_array_elements(elements: &[Expr]) -> Result<Vec<&Expr>, cr
         }
     }
     Ok(flat)
+}
+
+fn rust_member_call_target(callee: &Expr) -> Option<(String, String, String)> {
+    fn collect_path<'a>(expr: &'a Expr, segments: &mut Vec<&'a str>) -> Option<&'a str> {
+        match expr {
+            Expr::Variable { name } => Some(name.lexeme()),
+            Expr::Member { object, property } => {
+                let root = collect_path(object, segments)?;
+                segments.push(property.lexeme());
+                Some(root)
+            }
+            _ => None,
+        }
+    }
+
+    let mut segments = Vec::new();
+    let root = collect_path(callee, &mut segments)?;
+    if segments.is_empty() {
+        return None;
+    }
+    let namespace = root.trim_start_matches('@');
+    let crate_name =
+        super::RUST_CRATE_NAMESPACES.with(|map| map.borrow().get(namespace).cloned())?;
+    let path = segments.join("::");
+    let bridge_name = super::rust_path_name(&crate_name, &path)
+        .or_else(|| (segments.len() == 1).then(|| segments[0].to_string()))?;
+    Some((crate_name, bridge_name, path))
 }
 
 pub(crate) fn emit_call<'ctx>(
@@ -587,12 +1060,85 @@ pub(crate) fn emit_call<'ctx>(
                 "say_call",
             )?;
 
+            // `ntsc_say` borrows the string: when the argument needed a
+            // conversion (`say(some_bool)`), the fresh converted string is
+            // released after printing.
+            if arg_values[0].ntsc_type != Ty::String {
+                emit_drop_value(fn_ctx, &converted)?;
+            }
+
             emit_drop_borrowed_fresh_args(fn_ctx, &arguments, &arg_values, &[])?;
 
             return Ok(TypedValue::new(
                 fn_ctx.context.i8_type().const_zero().into(),
                 Ty::Void,
             ));
+        }
+
+        let bare = name_str.trim_start_matches('@').to_string();
+        if let Some(crate_name) =
+            super::RUST_SELECTIVE_IMPORTS.with(|m| m.borrow().get(&bare).cloned())
+        {
+            let crate_escaped = crate_name.replace('-', "_");
+            let symbol = format!("ntsc_adaptor_{}_{}", crate_escaped, bare);
+            let i64_ty = fn_ctx.context.i64_type();
+            let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                arg_values.iter().map(|_| i64_ty.into()).collect();
+            let fn_ty = i64_ty.fn_type(&param_tys, false);
+            let fn_val = fn_ctx.module.get_function(&symbol).unwrap_or_else(|| {
+                fn_ctx
+                    .module
+                    .add_function(&symbol, fn_ty, Some(inkwell::module::Linkage::External))
+            });
+            let mut llvm_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+            for arg in &arg_values {
+                let val = arg.value;
+                let coerced: inkwell::values::BasicValueEnum = if val.is_int_value() {
+                    let iv = val.into_int_value();
+                    if iv.get_type().get_bit_width() == 1 {
+                        fn_ctx
+                            .builder
+                            .build_int_z_extend(iv, i64_ty, "bool_to_i64")
+                            .unwrap()
+                            .into()
+                    } else if iv.get_type().get_bit_width() != 64 {
+                        fn_ctx
+                            .builder
+                            .build_int_s_extend_or_bit_cast(iv, i64_ty, "ext")
+                            .unwrap()
+                            .into()
+                    } else {
+                        iv.into()
+                    }
+                } else if val.is_float_value() {
+                    let fv = val.into_float_value();
+                    fn_ctx
+                        .builder
+                        .build_bit_cast(fv, i64_ty, "f64_to_i64")
+                        .unwrap()
+                } else if val.is_pointer_value() {
+                    fn_ctx
+                        .builder
+                        .build_ptr_to_int(val.into_pointer_value(), i64_ty, "ptr_to_i64")
+                        .unwrap()
+                        .into()
+                } else {
+                    i64_ty.const_zero().into()
+                };
+                llvm_args.push(coerced.into());
+            }
+            let result = fn_ctx.builder.build_call(fn_val, &llvm_args, "rust_call")?;
+            let ret_val = call_result_to_value(fn_ctx, &result);
+            emit_drop_borrowed_fresh_args(fn_ctx, &arguments, &arg_values, &[])?;
+            super::share_object_call_args(
+                fn_ctx,
+                &super::ObjectCallee::Foreign,
+                &arguments,
+                &arg_values,
+            )?;
+            fn_ctx.emit_pending_exception_check()?;
+            let ret_val = lower_rust_call_result(fn_ctx, ret_val, &crate_name, &bare);
+            return Ok(TypedValue::new(ret_val.0, ret_val.1));
         }
 
         let var_fn_info = fn_ctx
@@ -646,6 +1192,11 @@ pub(crate) fn emit_call<'ctx>(
                     .map(llvm_ret_ty_to_ty)
                     .unwrap_or(Ty::Void)
             });
+            let result_val = if is_ffi_function(name_str) {
+                normalize_ffi_result(fn_ctx, result_val, &ret_ty)?
+            } else {
+                result_val
+            };
             fn_ctx.emit_pending_exception_check()?;
 
             return Ok(TypedValue::new(result_val, ret_ty));
@@ -710,8 +1261,129 @@ pub(crate) fn emit_call<'ctx>(
     if let Expr::Member { object, property } = callee {
         let prop_name = property.lexeme();
 
+        if let Some((crate_name, bridge_name, _path)) = rust_member_call_target(callee) {
+            if super::rust_async(&crate_name, &bridge_name) {
+                return Err(crate::CodegenError::LLVMError(format!(
+                    "`{bridge_name}` from crate `{crate_name}` is async: call it with `await @{crate_name}.{bridge_name}(...)` instead of a plain call (a plain call would return an unpolled op handle)"
+                )));
+            }
+            let crate_escaped = crate_name.replace('-', "_");
+            let symbol = format!("ntsc_adaptor_{crate_escaped}_{bridge_name}");
+            let arg_values = emit_call_arguments(fn_ctx, &arguments)?;
+            let i64_ty = fn_ctx.context.i64_type();
+            let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                arg_values.iter().map(|_| i64_ty.into()).collect();
+            let fn_ty = i64_ty.fn_type(&param_tys, false);
+            let fn_val = fn_ctx.module.get_function(&symbol).unwrap_or_else(|| {
+                fn_ctx
+                    .module
+                    .add_function(&symbol, fn_ty, Some(inkwell::module::Linkage::External))
+            });
+            let llvm_args: Vec<_> = arg_values
+                .iter()
+                .map(|arg| coerce_to_i64(fn_ctx, arg.value).map(Into::into))
+                .collect::<Result<_, _>>()?;
+            let result = fn_ctx.builder.build_call(fn_val, &llvm_args, "rust_call")?;
+            let ret_val = call_result_to_value(fn_ctx, &result);
+            let (ret_val, ret_ty) =
+                lower_rust_call_result(fn_ctx, ret_val, &crate_name, &bridge_name);
+            emit_drop_borrowed_fresh_args(fn_ctx, &arguments, &arg_values, &[])?;
+            super::share_object_call_args(
+                fn_ctx,
+                &super::ObjectCallee::Foreign,
+                &arguments,
+                &arg_values,
+            )?;
+            fn_ctx.emit_pending_exception_check()?;
+            return Ok(TypedValue::new(ret_val, ret_ty));
+        }
+
         if let Expr::Variable { name } = object.as_ref() {
             let module_name = name.lexeme();
+            let stripped_module = module_name.trim_start_matches('@').to_string();
+            if let Some(crate_name) =
+                super::RUST_CRATE_NAMESPACES.with(|m| m.borrow().get(&stripped_module).cloned())
+            {
+                if super::rust_async(&crate_name, prop_name) {
+                    return Err(crate::CodegenError::LLVMError(format!(
+                        "`{prop_name}` from crate `{crate_name}` is async: call it with `await @{stripped_module}.{prop_name}(...)` instead of a plain call (a plain call would return an unpolled op handle)"
+                    )));
+                }
+                let crate_escaped = crate_name.replace('-', "_");
+                let symbol = format!("ntsc_adaptor_{}_{}", crate_escaped, prop_name);
+                let arg_values = emit_call_arguments(fn_ctx, &arguments)?;
+                let i64_ty = fn_ctx.context.i64_type();
+                let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                    arg_values.iter().map(|_| i64_ty.into()).collect();
+                let fn_ty = i64_ty.fn_type(&param_tys, false);
+                let fn_val = fn_ctx.module.get_function(&symbol).unwrap_or_else(|| {
+                    fn_ctx.module.add_function(
+                        &symbol,
+                        fn_ty,
+                        Some(inkwell::module::Linkage::External),
+                    )
+                });
+                let mut llvm_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                for arg in &arg_values {
+                    let val = arg.value;
+                    let coerced: inkwell::values::BasicValueEnum = if val.is_int_value() {
+                        let iv = val.into_int_value();
+                        if iv.get_type().get_bit_width() == 1 {
+                            fn_ctx
+                                .builder
+                                .build_int_z_extend(iv, i64_ty, "bool_to_i64")
+                                .unwrap()
+                                .into()
+                        } else if iv.get_type().get_bit_width() != 64 {
+                            fn_ctx
+                                .builder
+                                .build_int_s_extend_or_bit_cast(iv, i64_ty, "ext")
+                                .unwrap()
+                                .into()
+                        } else {
+                            iv.into()
+                        }
+                    } else if val.is_float_value() {
+                        let fv = val.into_float_value();
+                        fn_ctx
+                            .builder
+                            .build_bit_cast(fv, i64_ty, "f64_to_i64")
+                            .unwrap()
+                    } else if val.is_pointer_value() {
+                        fn_ctx
+                            .builder
+                            .build_ptr_to_int(val.into_pointer_value(), i64_ty, "ptr_to_i64")
+                            .unwrap()
+                            .into()
+                    } else {
+                        // For string handles (i64) or other, fallback to i64 zero.
+                        i64_ty.const_zero().into()
+                    };
+                    llvm_args.push(coerced.into());
+                }
+                let result = fn_ctx.builder.build_call(fn_val, &llvm_args, "rust_call")?;
+                let ret_val = call_result_to_value(fn_ctx, &result);
+                let (ret_val, ret_ty) =
+                    lower_rust_call_result(fn_ctx, ret_val, &crate_name, prop_name);
+                emit_drop_borrowed_fresh_args(fn_ctx, &arguments, &arg_values, &[])?;
+                super::share_object_call_args(
+                    fn_ctx,
+                    &super::ObjectCallee::Foreign,
+                    &arguments,
+                    &arg_values,
+                )?;
+                fn_ctx.emit_pending_exception_check()?;
+                return Ok(TypedValue::new(ret_val, ret_ty));
+            }
+            if module_name.starts_with('@')
+                && super::RUST_CRATE_NAMESPACES
+                    .with(|m| m.borrow().get(&stripped_module).cloned())
+                    .is_none()
+            {
+                return Err(crate::CodegenError::LLVMError(format!(
+                    "unknown Rust crate `{module_name}`: add it under `[rust-deps]` in neutron.toml and run `ntsc cargo install {stripped_module}`"
+                )));
+            }
 
             // `chan.new(capacity)` — create a virtual-task channel. The
             // element-ownership flag comes from the annotated slot type the
@@ -775,7 +1447,8 @@ pub(crate) fn emit_call<'ctx>(
                 }
                 let result = emit_rc_array_op(fn_ctx, prop_name, &arg_values)?;
 
-                emit_drop_borrowed_fresh_args(fn_ctx, &arguments, &arg_values, &[])?;
+                let param_types = array_op_param_types(prop_name, &arg_values);
+                emit_drop_borrowed_fresh_args(fn_ctx, &arguments, &arg_values, &param_types)?;
                 fn_ctx.emit_pending_exception_check()?;
                 return Ok(result);
             }
@@ -853,6 +1526,18 @@ pub(crate) fn emit_call<'ctx>(
                 let arg_values = emit_call_arguments(fn_ctx, &arguments)?;
 
                 let param_tys = fn_val.get_type().get_param_types();
+                if arg_values.len() != param_tys.len() {
+                    // The stdlib ABI is a fixed C signature, and the caller
+                    // below zips provided values against declared params,
+                    // which would either truncate extra arguments or feed
+                    // the verifier a short call.
+                    return Err(crate::CodegenError::LLVMError(format!(
+                        "`{module_name}.{prop_name}` expects {} argument{}, got {}",
+                        param_tys.len(),
+                        if param_tys.len() == 1 { "" } else { "s" },
+                        arg_values.len()
+                    )));
+                }
                 let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
                 for (arg_val, param_ty) in arg_values.iter().zip(param_tys.iter()) {
                     llvm_args.push(coerce_value_to_llvm(fn_ctx, arg_val.clone(), param_ty)?);
@@ -886,6 +1571,43 @@ pub(crate) fn emit_call<'ctx>(
         let obj_val = deref_shared(fn_ctx, obj_val)?;
 
         let arg_values = emit_call_arguments(fn_ctx, &arguments)?;
+
+        // A Rust object handle held in a tracked variable dispatches its
+        // method syntax to the crate's adaptor bridge (`re.is_match(s)`
+        // becomes `ntsc_adaptor_regex_Regex_is_match_2(re, s)`).
+        if let Expr::Variable { name } = object.as_ref()
+            && let Some((crate_name, type_path)) = super::rust_object_var(name.lexeme())
+            && let Some((bridge_name, _ret_label)) =
+                super::rust_method(&crate_name, &type_path, prop_name)
+        {
+            let crate_escaped = crate_name.replace('-', "_");
+            let symbol = format!("ntsc_adaptor_{crate_escaped}_{bridge_name}");
+            let i64_ty = fn_ctx.context.i64_type();
+            let mut param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                arg_values.iter().map(|_| i64_ty.into()).collect();
+            param_tys.insert(0, i64_ty.into());
+            let fn_ty = i64_ty.fn_type(&param_tys, false);
+            let fn_val = fn_ctx.module.get_function(&symbol).unwrap_or_else(|| {
+                fn_ctx
+                    .module
+                    .add_function(&symbol, fn_ty, Some(inkwell::module::Linkage::External))
+            });
+            let mut llvm_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+            let receiver = coerce_to_i64(fn_ctx, obj_val.value)?;
+            llvm_args.push(receiver.into());
+            for arg in &arg_values {
+                llvm_args.push(coerce_to_i64(fn_ctx, arg.value)?.into());
+            }
+            let result = fn_ctx
+                .builder
+                .build_call(fn_val, &llvm_args, "rust_method")?;
+            let ret_val = call_result_to_value(fn_ctx, &result);
+            let (ret_val, ret_ty) =
+                lower_rust_call_result(fn_ctx, ret_val, &crate_name, &bridge_name);
+            emit_drop_borrowed_fresh_args(fn_ctx, &arguments, &arg_values, &[])?;
+            fn_ctx.emit_pending_exception_check()?;
+            return Ok(TypedValue::new(ret_val, ret_ty));
+        }
 
         // Result/option combinators (`r.map(f)`, `opt.ok_or(e)`, ...) are
         // builtins on those types; a class method with the same name wins

@@ -167,6 +167,16 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_async_sleep_drop", void_ty, i64_ty);
 
     declare!(
+        "ntsc_async_op_new",
+        i64_ty,
+        ctx.ptr_type(AddressSpace::default()),
+        i64_ty
+    );
+    declare!("ntsc_async_op_poll", i8_ty, i64_ty);
+    declare!("ntsc_async_op_result", i64_ty, i64_ty);
+    declare!("ntsc_async_op_drop", void_ty, i64_ty);
+
+    declare!(
         "ntsc_async_wait_any",
         i64_ty,
         async_poll_fn,
@@ -350,6 +360,14 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_http_head", i64_ty, i64_ty);
     declare!("ntsc_http_patch", i64_ty, i64_ty, i64_ty);
     declare!("ntsc_http_request", i64_ty, i64_ty, i64_ty, i64_ty);
+    declare!(
+        "ntsc_http_request_full",
+        i64_ty,
+        i64_ty,
+        i64_ty,
+        i64_ty,
+        i64_ty
+    );
     declare!("ntsc_http_status_code", i64_ty, i64_ty);
     declare!("ntsc_http_get_range", i64_ty, i64_ty, i64_ty, i64_ty);
     declare!("ntsc_http_get_file", i64_ty, i64_ty, i64_ty);
@@ -407,6 +425,8 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_json_stringify", i64_ty, i64_ty);
     declare!("ntsc_json_stringify_pretty", i64_ty, i64_ty);
     declare!("ntsc_json_get", i64_ty, i64_ty, i64_ty);
+    declare!("ntsc_json_length", i64_ty, i64_ty);
+    declare!("ntsc_json_at", i64_ty, i64_ty, i64_ty);
     declare!("ntsc_json_has", i8_ty, i64_ty, i64_ty);
     declare!("ntsc_json_keys", i64_ty, i64_ty);
     declare!("ntsc_json_is_valid", i8_ty, i64_ty);
@@ -451,6 +471,7 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_net_tcp_connect", i64_ty, i64_ty, i64_ty);
     declare!("ntsc_net_tcp_listen", i64_ty, i64_ty);
     declare!("ntsc_net_tcp_accept", i64_ty, i64_ty);
+    declare!("ntsc_net_accept_poll", i64_ty, i64_ty, f64_ty);
     declare!("ntsc_net_udp_bind", i64_ty, i64_ty);
     declare!("ntsc_net_udp_send", i64_ty, i64_ty, i64_ty, i64_ty, i64_ty);
     declare!("ntsc_net_udp_recv", i64_ty, i64_ty, i64_ty);
@@ -480,6 +501,17 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_os_temp_path", i64_ty, i64_ty);
     declare!("ntsc_os_file_lock", i64_ty, i64_ty);
     declare!("ntsc_os_file_unlock", i8_ty, i64_ty);
+    declare!("ntsc_os_rename", i8_ty, i64_ty, i64_ty);
+    declare!("ntsc_os_executable_path", i64_ty);
+
+    // ── term module ───────────────────────────────────────────────────────
+    declare!("ntsc_term_is_tty", i8_ty);
+    declare!("ntsc_term_open", i64_ty);
+    declare!("ntsc_term_restore", i8_ty, i64_ty);
+    declare!("ntsc_term_poll_key", i8_ty, i64_ty, f64_ty);
+    declare!("ntsc_term_key_code", i64_ty);
+    declare!("ntsc_term_key_character", i64_ty);
+    declare!("ntsc_term_key_ctrl", i8_ty);
 
     // ── process module ───────────────────────────────────────────────────
 
@@ -555,6 +587,7 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_strings_replace_first", i64_ty, i64_ty, i64_ty, i64_ty);
     declare!("ntsc_strings_split", i64_ty, i64_ty, i64_ty);
     declare!("ntsc_strings_join", i64_ty, i64_ty, i64_ty, i64_ty);
+    declare!("ntsc_strings_join_all", i64_ty, i64_ty, i64_ty);
     declare!("ntsc_strings_repeat", i64_ty, i64_ty, i64_ty);
     declare!("ntsc_strings_reverse", i64_ty, i64_ty);
     declare!("ntsc_strings_count", i64_ty, i64_ty, i64_ty);
