@@ -13,6 +13,7 @@ fn fail(fn_name: &str, msg: impl std::fmt::Display) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_sys_read(path: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let path = registry::get_string(path).unwrap_or_default();
     match fs::read_to_string(&path) {
         Ok(content) => registry::put_string(content),
@@ -22,6 +23,7 @@ pub extern "C" fn ntsc_sys_read(path: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_sys_write(path: i64, content: i64) -> i8 {
+    let _block = crate::BlockGuard::enter();
     let path = registry::get_string(path).unwrap_or_default();
     let content = registry::get_string(content).unwrap_or_default();
     match fs::write(&path, content) {
@@ -35,6 +37,7 @@ pub extern "C" fn ntsc_sys_write(path: i64, content: i64) -> i8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_sys_append(path: i64, content: i64) -> i8 {
+    let _block = crate::BlockGuard::enter();
     let path = registry::get_string(path).unwrap_or_default();
     let content = registry::get_string(content).unwrap_or_default();
     use std::io::Write;
@@ -109,11 +112,17 @@ pub extern "C" fn ntsc_sys_env(var_name: i64) -> i64 {
     }
 }
 
-/// `sys.args()` — command-line arguments joined by newlines.
+/// `sys.args()` — command-line arguments as an array of strings.
+/// Element 0 is the program name, mirroring Go's `os.Args`.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_sys_args() -> i64 {
-    let args: Vec<String> = std::env::args().collect();
-    registry::put_string(args.join("\n"))
+    let args = registry::array_new(registry::PTR_SIZE as i64, 0, 1);
+    for arg in std::env::args() {
+        let temp = registry::put_string(arg);
+        registry::array_push(args, temp);
+        crate::ntsc_string_drop(temp);
+    }
+    args
 }
 
 #[unsafe(no_mangle)]
@@ -123,6 +132,7 @@ pub extern "C" fn ntsc_sys_exit(code: i64) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_sys_sleep(ms: f64) {
+    let _block = crate::BlockGuard::enter();
     let duration = std::time::Duration::from_millis(ms.max(0.0) as u64);
     std::thread::sleep(duration);
 }
@@ -130,6 +140,7 @@ pub extern "C" fn ntsc_sys_sleep(ms: f64) {
 /// `sys.exec(command)` — runs through `/bin/sh -c`; returns the exit code.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_sys_exec(command: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let cmd = registry::get_string(command).unwrap_or_default();
     let mut process = std::process::Command::new("sh");
     super::os::apply_environment(&mut process);
@@ -141,6 +152,7 @@ pub extern "C" fn ntsc_sys_exec(command: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_sys_cp(src: i64, dst: i64) -> i8 {
+    let _block = crate::BlockGuard::enter();
     let src = registry::get_string(src).unwrap_or_default();
     let dst = registry::get_string(dst).unwrap_or_default();
     match fs::copy(&src, &dst) {
@@ -303,6 +315,17 @@ mod tests {
             ntsc_sys_env(put("NTSC_SYS_ENV_OVERLAY_TEST")),
             registry::NULL
         );
+    }
+
+    #[test]
+    fn test_args_returns_argv_array() {
+        let args = ntsc_sys_args();
+        let len = registry::array_len(args);
+        assert!(len >= 1, "argv always contains at least the program name");
+        let prog = registry::array_get(args, 0).expect("argv[0] exists");
+        let name = registry::get_string(prog).unwrap_or_default();
+        assert!(!name.is_empty());
+        registry::array_drop(args);
     }
 
     #[test]

@@ -32,7 +32,11 @@ pub extern "C" fn ntsc_sort_sort_by(
     if cloned == registry::NULL {
         return fail("sort_by", "cannot sort array");
     }
-    let mut elements: Vec<i64> = registry::array_to_vec(handle);
+    // Sort the clone's own element handles. Using the source handles here
+    // would overwrite the clone's freshly owned string elements and leak
+    // every one of those copies when `array_write_elements` replaced its
+    // vector.
+    let mut elements: Vec<i64> = registry::array_to_vec(cloned);
     // The comparator may call back into the registry, so no registry borrow
     // is held across the loop: element bits are pre-read into a local vector.
     let len = elements.len();
@@ -49,6 +53,7 @@ pub extern "C" fn ntsc_sort_sort_by(
     }
     let _ = mode;
     if !registry::array_write_elements(cloned, elements) {
+        registry::array_drop(cloned);
         return fail("sort_by", "cannot sort array");
     }
     cloned
@@ -144,6 +149,33 @@ mod tests {
         registry::array_drop(arr);
         registry::array_drop(asc);
         registry::array_drop(desc);
+    }
+
+    extern "C" fn string_ascending(a: i64, b: i64) -> i8 {
+        let left = registry::get_string(a).unwrap_or_default();
+        let right = registry::get_string(b).unwrap_or_default();
+        i8::from(left <= right)
+    }
+
+    #[test]
+    fn test_sort_by_string_elements_reclaims_clone_handles() {
+        let before = registry::live_count();
+        let arr = registry::array_new(8, 0, 1);
+        for value in ["c", "a", "b"] {
+            let source = registry::put_string(value.to_string());
+            assert!(registry::array_push(arr, source));
+            registry::take_string(source);
+        }
+        let sorted = ntsc_sort_sort_by(arr, string_ascending, 2);
+        assert_eq!(
+            (0..3)
+                .map(|index| registry::get_string(registry::array_get(sorted, index).unwrap()))
+                .collect::<Vec<_>>(),
+            vec![Some("a".into()), Some("b".into()), Some("c".into())]
+        );
+        registry::array_drop(sorted);
+        registry::array_drop(arr);
+        assert_eq!(registry::live_count(), before);
     }
 
     #[test]

@@ -24,6 +24,25 @@ pub extern "C" fn ntsc_strings_join(a: i64, b: i64, delim: i64) -> i64 {
     registry::put_string(format!("{a}{delim}{b}"))
 }
 
+/// `strings.join_all(arr, sep)` — the elements of a string array joined by
+/// `sep`, the inverse of `strings.split`. Non-string elements read as their
+/// decimal form, so a mixed array still joins instead of failing.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_strings_join_all(arr: i64, sep: i64) -> i64 {
+    let sep = registry::get_string(sep).unwrap_or_default();
+    let len = registry::array_len(arr);
+    let mut out = String::new();
+    for index in 0..len {
+        if index > 0 {
+            out.push_str(&sep);
+        }
+        if let Some(handle) = registry::array_get(arr, index) {
+            out.push_str(&registry::get_string(handle).unwrap_or_default());
+        }
+    }
+    registry::put_string(out)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_strings_trim(s: i64) -> i64 {
     let s = registry::get_string(s).unwrap_or_default();

@@ -106,6 +106,7 @@ pub extern "C" fn ntsc_io_stderr() -> i64 {
 /// "" at end of input.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_io_input() -> i64 {
+    let _block = crate::BlockGuard::enter();
     let result = read_line(&mut std::io::stdin().lock());
     match result {
         Ok(mut text) => {
@@ -126,6 +127,7 @@ pub extern "C" fn ntsc_io_input() -> i64 {
 /// opened.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_io_open(path: i64, mode: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let path = match registry::get_string(path) {
         Some(path) => path,
         None => return fail("open", "null path"),
@@ -157,6 +159,7 @@ pub extern "C" fn ntsc_io_close(handle: i64) -> i8 {
 /// `io.read(handle, count)` — up to `count` bytes; "" at end of file.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_io_read(handle: i64, count: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let outcome = match handle {
         STDIN_HANDLE => Some(read_bytes(&mut std::io::stdin().lock(), count)),
         STDOUT_HANDLE | STDERR_HANDLE => {
@@ -173,6 +176,7 @@ pub extern "C" fn ntsc_io_read(handle: i64, count: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_io_read_line(handle: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let outcome = match handle {
         STDIN_HANDLE => Some(read_line(&mut std::io::stdin().lock())),
         STDOUT_HANDLE | STDERR_HANDLE => {
@@ -192,6 +196,7 @@ pub extern "C" fn ntsc_io_read_line(handle: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_io_read_all(handle: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let outcome = match handle {
         STDIN_HANDLE => Some(read_all(&mut std::io::stdin().lock())),
         STDOUT_HANDLE | STDERR_HANDLE => {
@@ -208,6 +213,7 @@ pub extern "C" fn ntsc_io_read_all(handle: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_io_write(handle: i64, data: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let data = registry::get_string(data).unwrap_or_default();
     let outcome = match handle {
         STDIN_HANDLE => return fail("write", "standard input is not writable"),
@@ -226,6 +232,7 @@ pub extern "C" fn ntsc_io_write(handle: i64, data: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_io_write_line(handle: i64, data: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let data = registry::get_string(data).unwrap_or_default();
     let mut bytes = data.into_bytes();
     bytes.push(b'\n');

@@ -15,6 +15,10 @@ pub extern "C" fn ntsc_time_now() -> f64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_time_sleep(ms: f64) {
+    // A blocking OS sleep on a scheduler worker would wedge it without a
+    // suspension point; the guard brings cover instead (see
+    // `ntask::scheduler::worker_will_block`).
+    let _block = crate::BlockGuard::enter();
     let duration = std::time::Duration::from_millis(ms.max(0.0) as u64);
     std::thread::sleep(duration);
 }

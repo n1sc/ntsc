@@ -19,34 +19,26 @@ fn parse_csv_row(row: &str) -> Vec<String> {
     let mut fields = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let bytes = row.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    while i < len {
-        let c = bytes[i];
+    let mut chars = row.chars().peekable();
+    while let Some(c) = chars.next() {
         if in_quotes {
-            if c == b'"' {
-                if i + 1 < len && bytes[i + 1] == b'"' {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
                     current.push('"');
-                    i += 2;
+                    chars.next();
                 } else {
                     in_quotes = false;
-                    i += 1;
                 }
             } else {
-                current.push(c as char);
-                i += 1;
+                current.push(c);
             }
-        } else if c == b'"' {
+        } else if c == '"' {
             in_quotes = true;
-            i += 1;
-        } else if c == b',' {
+        } else if c == ',' {
             fields.push(current);
             current = String::new();
-            i += 1;
         } else {
-            current.push(c as char);
-            i += 1;
+            current.push(c);
         }
     }
     fields.push(current);
@@ -468,6 +460,16 @@ mod tests {
         let r = ntsc_csv_parse(put(input));
         let s = read(r);
         assert!(s.contains("\"has a, comma\""));
+    }
+
+    #[test]
+    fn test_parse_unicode_fields() {
+        let input = "name,city\nAlice,Москва\n\"Böb\",\"Zürich, Stadt\"";
+        let r = ntsc_csv_parse(put(input));
+        let s = read(r);
+        assert!(s.contains("Москва"), "plain: {s}");
+        assert!(s.contains("Böb"), "quoted: {s}");
+        assert!(s.contains("Zürich, Stadt"), "quoted comma: {s}");
     }
 
     #[test]

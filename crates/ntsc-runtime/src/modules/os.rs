@@ -243,6 +243,27 @@ pub extern "C" fn ntsc_os_file_lock(path: i64) -> i64 {
 /// `os.file_unlock(path)` — release the advisory file lock acquired by
 /// `os.file_lock`. Returns 1 when the path is unlocked in this process
 /// (including when it was never locked here), 0 on failure.
+/// `os.rename(from, to)` — moves a file or directory. Returns false when the
+/// move is not possible; the target is left alone in that case.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_os_rename(from: i64, to: i64) -> i8 {
+    let _block = crate::BlockGuard::enter();
+    let from = registry::get_string(from).unwrap_or_default();
+    let to = registry::get_string(to).unwrap_or_default();
+    i8::from(std::fs::rename(&from, &to).is_ok())
+}
+
+/// `os.executable_path()` — the running program's own path, or `""` when the
+/// platform cannot report it.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_os_executable_path() -> i64 {
+    let _block = crate::BlockGuard::enter();
+    match std::env::current_exe() {
+        Ok(path) => registry::put_string(path.to_string_lossy().to_string()),
+        Err(_) => registry::put_string(String::new()),
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_os_file_unlock(path: i64) -> i8 {
     let path = registry::get_string(path).unwrap_or_default();

@@ -77,6 +77,7 @@ fn adopt_stream(stream: TcpStream) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_net_tcp_connect(host: i64, port: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let host = match registry::get_string(host) {
         Some(host) => host,
         None => return fail("tcp_connect", "null string argument"),
@@ -125,8 +126,69 @@ pub extern "C" fn ntsc_net_local_port(handle: i64) -> i64 {
 
 /// `net.tcp_accept(listener)` — blocks until a client connects; returns a
 /// stream handle.
+/// `net.accept_poll(listener, timeout_ms)` — accept a connection, giving up
+/// after `timeout_ms` and returning the null handle.
+///
+/// The listener is switched to non-blocking the first time and left that
+/// way. Toggling it back per call looked harmless and was not: a connection
+/// that arrived while the socket was in blocking mode was accepted by the
+/// kernel but then dropped, so the client connected and never got a reply.
+/// A listener polled this way must not also be used with `net.tcp_accept`,
+/// which expects a blocking listener. The wait is a short sleep between
+/// tries: the runtime has no readiness poller to wait on.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_net_accept_poll(handle: i64, timeout_ms: f64) -> i64 {
+    let _block = crate::BlockGuard::enter();
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.max(0.0) as u64);
+    loop {
+        let outcome = registry::with_opaque_io::<
+            NetHandle,
+            Option<Result<Option<TcpStream>, String>>,
+        >(handle, |net| match net {
+            NetHandle::TcpListener(listener) => {
+                let _ = listener.set_nonblocking(true);
+                match listener.accept() {
+                    Ok((stream, _peer)) => {
+                        // The client socket must block: a non-blocking read
+                        // returns "would block" with no bytes, which the
+                        // line reader cannot tell from end-of-stream, so the
+                        // request looked empty and the connection closed with
+                        // no response at all. It also gets a read timeout: a
+                        // half-open connection must not stall the caller in
+                        // a blocking read forever.
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                        (NetHandle::TcpListener(listener), Some(Ok(Some(stream))))
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        (NetHandle::TcpListener(listener), Some(Ok(None)))
+                    }
+                    Err(e) => (
+                        NetHandle::TcpListener(listener),
+                        Some(Err(format!("cannot accept connection: {e}"))),
+                    ),
+                }
+            }
+            other => (other, None),
+        });
+        match outcome {
+            Some(Some(Ok(Some(stream)))) => return adopt_stream(stream),
+            Some(Some(Ok(None))) => {}
+            Some(Some(Err(msg))) => return fail("accept_poll", msg),
+            Some(None) => return fail("accept_poll", "handle is not a TCP listener"),
+            None => return fail("accept_poll", "invalid (null) socket handle"),
+        }
+        if std::time::Instant::now() >= deadline {
+            return registry::NULL;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_net_tcp_accept(handle: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let outcome =
         registry::with_opaque_io::<NetHandle, Option<Result<TcpStream, String>>>(handle, |net| {
             match net {
@@ -151,6 +213,7 @@ pub extern "C" fn ntsc_net_tcp_accept(handle: i64) -> i64 {
 /// `net.send(handle, data)` — returns the number of bytes written.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_net_send(handle: i64, data: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let data = registry::get_string(data).unwrap_or_default();
     match stream_mut("send", handle, |stream| -> Result<usize, String> {
         match stream.write_all(data.as_bytes()) {
@@ -168,6 +231,7 @@ pub extern "C" fn ntsc_net_send(handle: i64, data: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_net_send_line(handle: i64, data: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let data = registry::get_string(data).unwrap_or_default();
     let mut bytes = data.as_bytes().to_vec();
     bytes.push(b'\n');
@@ -188,6 +252,7 @@ pub extern "C" fn ntsc_net_send_line(handle: i64, data: i64) -> i64 {
 /// `net.recv(handle, count)` — up to `count` bytes; "" at end of stream.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_net_recv(handle: i64, count: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     match stream_mut("recv", handle, |stream| -> Result<String, String> {
         if count <= 0 {
             return Ok(String::new());
@@ -211,6 +276,7 @@ pub extern "C" fn ntsc_net_recv(handle: i64, count: i64) -> i64 {
 /// stream.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_net_recv_line(handle: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     match stream_mut("recv_line", handle, |stream| -> Result<String, String> {
         // Read in blocks and keep what follows the newline for the next call:
         // one byte per `read` syscall made a short line cost as many syscalls
@@ -276,6 +342,7 @@ pub extern "C" fn ntsc_net_udp_bind(port: i64) -> i64 {
 /// sent.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_net_udp_send(handle: i64, host: i64, port: i64, data: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let host = match registry::get_string(host) {
         Some(host) => host,
         None => return fail("udp_send", "null string argument"),
@@ -301,6 +368,7 @@ pub extern "C" fn ntsc_net_udp_send(handle: i64, host: i64, port: i64, data: i64
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_net_udp_recv(handle: i64, count: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     match udp_mut("udp_recv", handle, |socket| -> Result<String, String> {
         if count <= 0 {
             return Ok(String::new());

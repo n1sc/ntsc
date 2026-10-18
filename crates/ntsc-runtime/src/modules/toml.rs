@@ -45,10 +45,18 @@ impl<'a> TomlParser<'a> {
         c
     }
 
+    fn advance_char(&mut self) -> Option<char> {
+        let c = self.input[self.pos..].chars().next()?;
+        self.pos += c.len_utf8();
+        Some(c)
+    }
+
     fn parse_key(&mut self) -> Result<String, String> {
         self.skip_whitespace_and_comments();
         if self.peek() == Some(b'"') {
             self.parse_bare_string()
+        } else if self.peek() == Some(b'\'') {
+            self.parse_literal_key()
         } else {
             let start = self.pos;
             while let Some(c) = self.peek() {
@@ -85,21 +93,21 @@ impl<'a> TomlParser<'a> {
         self.advance();
         let mut result = String::new();
         loop {
-            match self.advance() {
-                Some(b'"') => {
+            match self.advance_char() {
+                Some('"') => {
                     let escaped = result.replace('\\', "\\\\").replace('"', "\\\"");
                     return Ok(format!("\"{escaped}\""));
                 }
-                Some(b'\\') => match self.advance() {
-                    Some(b'"') => result.push('"'),
-                    Some(b'\\') => result.push('\\'),
-                    Some(b'n') => result.push('\n'),
-                    Some(b'r') => result.push('\r'),
-                    Some(b't') => result.push('\t'),
-                    Some(c) => result.push(c as char),
+                Some('\\') => match self.advance_char() {
+                    Some('"') => result.push('"'),
+                    Some('\\') => result.push('\\'),
+                    Some('n') => result.push('\n'),
+                    Some('r') => result.push('\r'),
+                    Some('t') => result.push('\t'),
+                    Some(c) => result.push(c),
                     None => return Err("unexpected end in string escape".to_string()),
                 },
-                Some(c) => result.push(c as char),
+                Some(c) => result.push(c),
                 None => return Err("unterminated string".to_string()),
             }
         }
@@ -107,6 +115,22 @@ impl<'a> TomlParser<'a> {
 
     fn parse_bare_string(&mut self) -> Result<String, String> {
         self.parse_quoted_string()
+    }
+
+    fn parse_literal_key(&mut self) -> Result<String, String> {
+        self.advance();
+        let start = self.pos;
+        while let Some(c) = self.peek() {
+            if c == b'\'' {
+                let s = self.input[start..self.pos].to_string();
+                self.advance();
+                // Re-quote so downstream treats the key as one atomic
+                // segment (literal keys never split on dots).
+                return Ok(format!("\"{s}\""));
+            }
+            self.pos += 1;
+        }
+        Err("unterminated literal key".to_string())
     }
 
     fn parse_literal_string(&mut self) -> Result<String, String> {
@@ -128,8 +152,50 @@ impl<'a> TomlParser<'a> {
         if self.peek() == Some(b'-') {
             self.advance();
         }
+        // TOML radix integers (`0x`, `0o`, `0b`): underscores separate
+        // digits and the value is emitted decimal.
+        if self.input[self.pos..].starts_with("0x")
+            || self.input[self.pos..].starts_with("0o")
+            || self.input[self.pos..].starts_with("0b")
+        {
+            let radix = match self.input.as_bytes()[self.pos + 1] {
+                b'x' => 16,
+                b'o' => 8,
+                _ => 2,
+            };
+            self.pos += 2;
+            let digits = self.pos;
+            while let Some(c) = self.peek() {
+                if c == b'_' || char::from(c).is_digit(radix) {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            let text: String = self.input[digits..self.pos]
+                .chars()
+                .filter(|&c| c != '_')
+                .collect();
+            if text.is_empty() {
+                return Err("invalid radix integer".to_string());
+            }
+            let negative = self.input[start..self.pos].starts_with('-');
+            let val = i64::from_str_radix(&text, radix).map_err(|e| format!("invalid int: {e}"))?;
+            return Ok(if negative {
+                (-val).to_string()
+            } else {
+                val.to_string()
+            });
+        }
         while let Some(c) = self.peek() {
-            if c.is_ascii_digit() || c == b'.' || c == b'e' || c == b'E' || c == b'+' || c == b'-' {
+            if c.is_ascii_digit()
+                || c == b'.'
+                || c == b'e'
+                || c == b'E'
+                || c == b'+'
+                || c == b'-'
+                || c == b'_'
+            {
                 if (c == b'+' || c == b'-')
                     && (self.pos == start
                         || (self.pos > 0
@@ -143,7 +209,10 @@ impl<'a> TomlParser<'a> {
                 break;
             }
         }
-        let text = self.input[start..self.pos].to_string();
+        let text: String = self.input[start..self.pos]
+            .chars()
+            .filter(|&c| c != '_')
+            .collect();
         if text.contains('.') || text.contains('e') || text.contains('E') {
             let val: f64 = text.parse().map_err(|e| format!("invalid float: {e}"))?;
             Ok(format!("{val}"))
@@ -268,11 +337,11 @@ impl<'a> TomlParser<'a> {
             }
             let val = self.parse_value()?;
             let full_key = if current_table.is_empty() {
-                format!("\"{key}\"")
+                quote_dotted_key(&key)
             } else {
                 let prefix: Vec<String> =
-                    current_table.iter().map(|k| format!("\"{k}\"")).collect();
-                format!("{}.\"{}\"", prefix.join("."), key)
+                    current_table.iter().map(|k| quote_dotted_key(k)).collect();
+                format!("{}.{}", prefix.join("."), quote_dotted_key(&key))
             };
             if !first {
                 result.push(',');
@@ -282,12 +351,7 @@ impl<'a> TomlParser<'a> {
             self.skip_whitespace_and_comments();
         }
 
-        let mut nested = build_nested_json(&result)?;
-        if nested.ends_with(',') {
-            nested.pop();
-        }
-        nested.push('}');
-        Ok(nested)
+        build_nested_json(&result)
     }
 
     fn parse_section_header(&mut self) -> Result<Vec<String>, String> {
@@ -311,67 +375,189 @@ impl<'a> TomlParser<'a> {
     }
 }
 
+/// Quote one raw key for the flat intermediate format: a key that arrived
+/// quoted in source (`"b.c"`) stays one atomic quoted piece, while a bare
+/// dotted key (`a.b`) splits into individually quoted segments. Every
+/// piece the regrouper sees is therefore exactly one path segment.
+fn quote_dotted_key(key: &str) -> String {
+    if key.starts_with('"') {
+        return key.to_string();
+    }
+    key.split('.')
+        .map(|piece| format!("\"{}\"", piece.trim()))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// A node of the regrouped document: either a verbatim JSON value or an
+/// ordered object. Ordering follows first appearance, matching the source.
+enum NestedNode {
+    Value(String),
+    Section(Vec<(String, NestedNode)>),
+}
+
+/// Regroup flat `key:val` entries (keys may carry dotted, quoted section
+/// prefixes like `"a"."b"."x"`) into properly nested JSON objects, so
+/// `[a.b]` merges into `[a]` instead of sitting beside it as a sibling.
+///
+/// The input carries the leading `{` the top-level loop opens with;
+/// without stripping it the depth tracker never splits anything and the
+/// whole document collapses into a single entry.
 fn build_nested_json(flat: &str) -> Result<String, String> {
     let flat = flat.trim();
+    let flat = flat.strip_prefix('{').unwrap_or(flat).trim();
     if flat.is_empty() {
-        return Ok(String::from("{"));
+        return Ok(String::from("{}"));
     }
-    let mut result = String::from("{");
     let entries = split_json_entries(flat)?;
-    let mut root_keys: Vec<String> = Vec::new();
-    let mut sections: Vec<(Vec<String>, Vec<String>)> = Vec::new();
-
+    let mut root: Vec<(String, NestedNode)> = Vec::new();
     for entry in &entries {
-        if let Some(colon_pos) = entry.find(':') {
-            let key_part = &entry[..colon_pos];
-            let val_part = &entry[colon_pos + 1..];
-            let parts: Vec<String> = key_part
-                .split('.')
-                .map(|s| s.trim().trim_matches('"').to_string())
-                .collect();
-            if parts.len() == 1 {
-                root_keys.push(entry.clone());
-            } else {
-                let section_key = parts[..parts.len() - 1].to_vec();
-                let field_key = parts.last().unwrap().clone();
-                let field_val = val_part.trim().to_string();
-                let entry_str = format!("\"{field_key}\":{field_val}");
-                if let Some(existing) = sections.iter_mut().find(|(k, _)| *k == section_key) {
-                    existing.1.push(entry_str);
-                } else {
-                    sections.push((section_key, vec![entry_str]));
-                }
+        let Some(colon_pos) = find_json_key_colon(entry) else {
+            continue;
+        };
+        let path = split_key_path(entry[..colon_pos].trim())?;
+        let value = entry[colon_pos + 1..].trim().to_string();
+        insert_nested(&mut root, &path, value);
+    }
+    let mut out = String::from("{");
+    write_nested(&mut out, &root);
+    out.push('}');
+    Ok(out)
+}
+
+/// Split a dotted key path on dots outside double quotes (`"a"."b:c"."x"`
+/// yields three segments). A segment that was never quoted is split
+/// further on dots (bare `[a.b]` headers arrive as one dotted piece);
+/// quoted segments stay atomic. Each segment is then canonicalized by
+/// stripping surrounding quotes until none remain and unescaping
+/// `\"`/`\\`.
+fn split_key_path(path: &str) -> Result<Vec<String>, String> {
+    let mut parts: Vec<(String, bool)> = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut in_str = false;
+    let mut escape_next = false;
+    for c in path.chars() {
+        if escape_next {
+            current.push(c);
+            escape_next = false;
+        } else if in_str && c == '\\' {
+            current.push(c);
+            escape_next = true;
+        } else if c == '"' {
+            in_str = !in_str;
+            quoted = true;
+            current.push(c);
+        } else if c == '.' && !in_str {
+            parts.push((current.clone(), quoted));
+            current.clear();
+            quoted = false;
+        } else {
+            current.push(c);
+        }
+    }
+    if in_str {
+        return Err("unterminated quoted key".to_string());
+    }
+    parts.push((current, quoted));
+    let mut out = Vec::new();
+    for (part, was_quoted) in parts {
+        // A quoted piece is one atomic key even when it holds dots
+        // (`[a."b.c"]`); a bare piece (`[a.b]` arrives pre-wrapped and
+        // unquoted inside) splits further on dots.
+        let trimmed = part.trim();
+        let atomic =
+            was_quoted && trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2;
+        if atomic {
+            out.push(canonical_key_segment(trimmed));
+        } else {
+            for piece in trimmed.split('.') {
+                out.push(canonical_key_segment(piece));
             }
         }
     }
+    Ok(out)
+}
 
+/// Strip surrounding quotes until none remain and unescape `\"`/`\\`.
+fn canonical_key_segment(part: &str) -> String {
+    let mut part = part.trim().to_string();
+    loop {
+        let stripped = part
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .map(str::to_string);
+        match stripped {
+            Some(inner) => part = inner,
+            None => break,
+        }
+    }
+    part.replace("\\\"", "\"").replace("\\\\", "\\")
+}
+
+/// Insert `value` at `path`, creating intermediate sections. A repeated
+/// full path overwrites (later `[[table]]` blocks win over earlier ones).
+fn insert_nested(nodes: &mut Vec<(String, NestedNode)>, path: &[String], value: String) {
+    let Some((head, rest)) = path.split_first() else {
+        return;
+    };
+    let slot = match nodes.iter_mut().find(|(k, _)| k == head) {
+        Some((_, node)) => node,
+        None => {
+            nodes.push((head.clone(), NestedNode::Section(Vec::new())));
+            &mut nodes.last_mut().expect("just pushed").1
+        }
+    };
+    if rest.is_empty() {
+        *slot = NestedNode::Value(value);
+        return;
+    }
+    match slot {
+        NestedNode::Section(children) => insert_nested(children, rest, value),
+        // A scalar already sits where a section wants to grow (a key that
+        // is both a value and a table prefix): the section wins, matching
+        // how repeated tables behave elsewhere here.
+        taken => {
+            let mut children = Vec::new();
+            insert_nested(&mut children, rest, value);
+            *taken = NestedNode::Section(children);
+        }
+    }
+}
+
+/// Escape one object key for JSON output.
+fn escape_json_key(key: &str) -> String {
+    let mut out = String::with_capacity(key.len() + 2);
+    out.push('"');
+    for c in key.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn write_nested(out: &mut String, nodes: &[(String, NestedNode)]) {
     let mut first = true;
-    for entry in &root_keys {
+    for (key, node) in nodes {
         if !first {
-            result.push(',');
+            out.push(',');
         }
-        result.push_str(entry);
         first = false;
-    }
-
-    for (section_key, fields) in &sections {
-        if !first {
-            result.push(',');
-        }
-        let mut nested_val = String::from("{");
-        for (i, field) in fields.iter().enumerate() {
-            if i > 0 {
-                nested_val.push(',');
+        out.push_str(&escape_json_key(key));
+        out.push(':');
+        match node {
+            NestedNode::Value(value) => out.push_str(value),
+            NestedNode::Section(children) => {
+                out.push('{');
+                write_nested(out, children);
+                out.push('}');
             }
-            nested_val.push_str(field);
         }
-        nested_val.push('}');
-        let full_key: Vec<String> = section_key.iter().map(|k| format!("\"{k}\"")).collect();
-        result.push_str(&format!("{}.{}", full_key.join("."), nested_val));
-        first = false;
     }
-
-    Ok(result)
 }
 
 fn find_json_key_colon(entry: &str) -> Option<usize> {
@@ -498,18 +684,45 @@ pub extern "C" fn ntsc_toml_stringify(s: i64) -> i64 {
         }
     }
     for (key, val) in &sections {
-        result.push_str(&format!("\n[{key}]\n"));
-        if let Ok(nested_entries) = split_json_entries(val) {
-            for entry in &nested_entries {
-                if let Some(colon_pos) = find_json_key_colon(entry) {
-                    let k = &entry[..colon_pos].trim().trim_matches('"');
-                    let v = entry[colon_pos + 1..].trim();
-                    result.push_str(&format!("{k} = {}\n", json_to_toml_value(v)));
-                }
-            }
-        }
+        write_toml_section(&mut result, std::slice::from_ref(key), val);
     }
     registry::put_string(result)
+}
+
+/// Emit one `[dotted.path]` section: scalar fields first, then recurse
+/// into sub-objects so arbitrarily nested JSON round-trips.
+fn write_toml_section(result: &mut String, path: &[String], val: &str) {
+    result.push_str(&format!("\n[{}]\n", path.join(".")));
+    // Strip the object's own braces first: with them present the depth
+    // tracker never splits and the whole section collapses into one
+    // malformed entry.
+    let inner_val = val
+        .trim()
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .unwrap_or(val)
+        .trim();
+    let Ok(nested_entries) = split_json_entries(inner_val) else {
+        return;
+    };
+    let mut subs = Vec::new();
+    for entry in &nested_entries {
+        let Some(colon_pos) = find_json_key_colon(entry) else {
+            continue;
+        };
+        let k = entry[..colon_pos].trim().trim_matches('"');
+        let v = entry[colon_pos + 1..].trim();
+        if v.starts_with('{') {
+            subs.push((k.to_string(), v.to_string()));
+        } else {
+            result.push_str(&format!("{k} = {}\n", json_to_toml_value(v)));
+        }
+    }
+    for (k, v) in subs {
+        let mut child = path.to_vec();
+        child.push(k);
+        write_toml_section(result, &child, &v);
+    }
 }
 
 fn json_to_toml_value(val: &str) -> String {
@@ -594,6 +807,28 @@ mod tests {
     }
 
     #[test]
+    fn test_stringify_nests_sections() {
+        let json = r#"{"name":"Alice","view":{"timestamp":true}}"#;
+        let r = ntsc_toml_stringify(put(json));
+        let s = read(r);
+        assert!(s.contains("name = \"Alice\""), "scalar: {s}");
+        assert!(s.contains("[view]"), "section: {s}");
+        assert!(s.contains("timestamp = true"), "nested: {s}");
+        assert!(!s.contains('{'), "no raw JSON braces: {s}");
+    }
+
+    #[test]
+    fn test_parse_stringify_roundtrip() {
+        let input = "[a]\nx = 1\n[a.b]\ny = 2";
+        let parsed = read(ntsc_toml_parse(put(input)));
+        let back = read(ntsc_toml_stringify(put(&parsed)));
+        assert!(back.contains("[a]"), "section a: {back}");
+        assert!(back.contains("x = 1"), "field: {back}");
+        let reparsed = read(ntsc_toml_parse(put(&back)));
+        assert!(reparsed.contains("\"y\":2"), "nested survives: {reparsed}");
+    }
+
+    #[test]
     fn test_stringify_empty() {
         let r = ntsc_toml_stringify(put("{}"));
         assert_eq!(read(r), "");
@@ -616,6 +851,59 @@ mod tests {
         assert!(s.contains("\"server\""));
         assert!(s.contains("\"host\":\"localhost\""));
         assert!(s.contains("\"port\":8080"));
+    }
+
+    #[test]
+    fn test_parse_nested_section_nests() {
+        let input = "[a]\nx = 1\n[a.b]\ny = 2";
+        let r = ntsc_toml_parse(put(input));
+        let s = read(r);
+        assert_eq!(s, "{\"a\":{\"x\":1,\"b\":{\"y\":2}}}");
+    }
+
+    #[test]
+    fn test_parse_dotted_keys_share_one_section() {
+        let input = "[a]\nx = 1\nz = 2";
+        let r = ntsc_toml_parse(put(input));
+        assert_eq!(read(r), "{\"a\":{\"x\":1,\"z\":2}}");
+    }
+
+    #[test]
+    fn test_parse_repeated_table_merges() {
+        let input = "[[p]]\na = 1\n[[p]]\nb = 2";
+        let r = ntsc_toml_parse(put(input));
+        // Array-of-tables collapse to one merged object, later keys winning.
+        assert_eq!(read(r), "{\"p\":{\"a\":1,\"b\":2}}");
+    }
+
+    #[test]
+    fn test_parse_radix_integers() {
+        let input = "a = 0x0900\nb = 0o17\nc = 0b101\nd = 1_000";
+        let r = ntsc_toml_parse(put(input));
+        let s = read(r);
+        assert!(s.contains("\"a\":2304"), "hex: {s}");
+        assert!(s.contains("\"b\":15"), "octal: {s}");
+        assert!(s.contains("\"c\":5"), "binary: {s}");
+        assert!(s.contains("\"d\":1000"), "underscores: {s}");
+    }
+
+    #[test]
+    fn test_parse_unicode_strings() {
+        let input = "greeting = \"Привет\"\n[\"日本語\"]\n\"한글\" = \"값\"";
+        let r = ntsc_toml_parse(put(input));
+        let s = read(r);
+        assert!(s.contains("\"greeting\":\"Привет\""), "value: {s}");
+        assert!(s.contains("\"日本語\""), "section: {s}");
+        assert!(s.contains("\"한글\":\"값\""), "key/value: {s}");
+    }
+
+    #[test]
+    fn test_parse_literal_keys() {
+        let input = "[sec]\n'plain' = 1\n'х' = 'h'";
+        let r = ntsc_toml_parse(put(input));
+        let s = read(r);
+        assert!(s.contains("\"plain\":1"), "literal key: {s}");
+        assert!(s.contains("\"х\":\"h\""), "unicode literal key: {s}");
     }
 
     #[test]

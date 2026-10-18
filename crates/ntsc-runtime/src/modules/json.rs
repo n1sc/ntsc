@@ -14,6 +14,10 @@ impl<'a> JsonParser<'a> {
         Self { input, pos: 0 }
     }
 
+    fn at(input: &'a str, pos: usize) -> Self {
+        Self { input, pos }
+    }
+
     fn skip_whitespace(&mut self) {
         while self.pos < self.input.len() && self.input.as_bytes()[self.pos].is_ascii_whitespace() {
             self.pos += 1;
@@ -30,6 +34,12 @@ impl<'a> JsonParser<'a> {
             self.pos += 1;
         }
         c
+    }
+
+    fn advance_char(&mut self) -> Option<char> {
+        let c = self.input[self.pos..].chars().next()?;
+        self.pos += c.len_utf8();
+        Some(c)
     }
 
     fn expect(&mut self, expected: u8) -> Result<(), String> {
@@ -58,31 +68,28 @@ impl<'a> JsonParser<'a> {
         self.expect(b'"')?;
         let mut result = String::new();
         loop {
-            match self.advance() {
-                Some(b'"') => return Ok(format!("\"{}\"", result)),
-                Some(b'\\') => match self.advance() {
-                    Some(b'"') => result.push('"'),
-                    Some(b'\\') => result.push('\\'),
-                    Some(b'/') => result.push('/'),
-                    Some(b'b') => result.push('\u{0008}'),
-                    Some(b'f') => result.push('\u{000C}'),
-                    Some(b'n') => result.push('\n'),
-                    Some(b'r') => result.push('\r'),
-                    Some(b't') => result.push('\t'),
-                    Some(b'u') => {
+            match self.advance_char() {
+                Some('"') => return Ok(format!("\"{}\"", result)),
+                Some('\\') => match self.advance_char() {
+                    Some('"') => result.push('"'),
+                    Some('\\') => result.push('\\'),
+                    Some('/') => result.push('/'),
+                    Some('b') => result.push('\u{0008}'),
+                    Some('f') => result.push('\u{000C}'),
+                    Some('n') => result.push('\n'),
+                    Some('r') => result.push('\r'),
+                    Some('t') => result.push('\t'),
+                    Some('u') => {
                         // \uXXXX escapes are not decoded; each is replaced with '?'.
-                        let mut hex = String::new();
                         for _ in 0..4 {
-                            if let Some(c) = self.advance() {
-                                hex.push(c as char);
-                            }
+                            let _ = self.advance_char();
                         }
                         result.push('?');
                     }
-                    Some(c) => result.push(c as char),
+                    Some(c) => result.push(c),
                     None => return Err("Unexpected end in string escape".to_string()),
                 },
-                Some(c) => result.push(c as char),
+                Some(c) => result.push(c),
                 None => return Err("Unterminated string".to_string()),
             }
         }
@@ -215,22 +222,159 @@ pub extern "C" fn ntsc_json_is_valid(s: i64) -> i8 {
 
 /// `json.get(json_str, key)` — the value for `key`, or the string "null"
 /// when the key is absent (a real JSON `null` is indistinguishable).
+/// Validate that `text` is one complete JSON value.
+///
+/// The only caller is the `http` module, which is feature-gated out of core
+/// runtime builds; without the gate those builds report dead code for this.
+#[cfg(feature = "http")]
+pub(crate) fn json_validate(text: &str) -> Result<(), String> {
+    let mut parser = JsonParser::new(text);
+    parser.parse_value().map(|_| ())
+}
+
+/// Read one key from a JSON object, returning the raw value text (a quoted
+/// string keeps its quotes, matching the `json` module's own values), or
+/// `None` when the key is absent or malformed. Other modules that need to
+/// read a nested value out of a JSON blob reuse this instead of going
+/// through the string registry.
+///
+/// Only the `http` module (feature-gated out of core runtime builds) calls
+/// this today.
+#[cfg(feature = "http")]
+pub(crate) fn json_get_str(json: &str, key: &str) -> Option<String> {
+    let search = format!("\"{key}\":");
+    let pos = json.find(&search)? + search.len();
+    let mut parser = JsonParser::new(&json[pos..]);
+    parser.parse_value().ok()
+}
+
+/// The value of an *immediate* member of a JSON object, or `None`.
+///
+/// Only top-level members are considered. Searching the raw text for
+/// `"key":` would let a nested object shadow its parent, so
+/// `{"artist":{"mbid":"a"},"mbid":"b"}` would answer `"a"` for `mbid`.
+fn immediate_member(json: &str, key: &str) -> Option<String> {
+    let bytes = json.as_bytes();
+    if bytes.first() != Some(&b'{') {
+        return None;
+    }
+    let mut i = 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            // A nested value belongs to another member: skip it whole.
+            b'{' | b'[' => i = skip_value(json, i),
+            b',' | b'}' | b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            b'"' => {
+                let mut parser = JsonParser::at(json, i);
+                let Ok(name) = parser.parse_string() else {
+                    return None;
+                };
+                let after = after_key_colon(json, parser.pos)?;
+                if unquote_key(&name) == key {
+                    let mut value_parser = JsonParser::at(json, after);
+                    return Some(value_parser.parse_value().unwrap_or_else(|_| "null".into()));
+                }
+                i = skip_value(json, after);
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The offset just past the `:` (and its whitespace) following a member key.
+fn after_key_colon(json: &str, pos: usize) -> Option<usize> {
+    let bytes = json.as_bytes();
+    let mut i = pos;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b':' {
+        return None;
+    }
+    i += 1;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    Some(i)
+}
+
+/// A parsed member key, which keeps its surrounding quotes.
+fn unquote_key(name: &str) -> &str {
+    let trimmed = name.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    }
+}
+
+/// Skip one JSON value starting at `pos`, returning the offset just past it.
+fn skip_value(json: &str, pos: usize) -> usize {
+    let bytes = json.as_bytes();
+    let mut i = pos;
+    if i >= bytes.len() {
+        return i;
+    }
+    match bytes[i] {
+        b'"' => {
+            let mut escape = false;
+            i += 1;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if escape {
+                    escape = false;
+                } else if c == b'\\' {
+                    escape = true;
+                } else if c == b'"' {
+                    return i + 1;
+                }
+                i += 1;
+            }
+            i
+        }
+        b'{' | b'[' => {
+            let mut depth = 0usize;
+            let mut in_str = false;
+            let mut escape = false;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if escape {
+                    escape = false;
+                } else if in_str && c == b'\\' {
+                    escape = true;
+                } else if c == b'"' {
+                    in_str = !in_str;
+                } else if !in_str && (c == b'{' || c == b'[') {
+                    depth += 1;
+                } else if !in_str && (c == b'}' || c == b']') {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                i += 1;
+            }
+            i
+        }
+        _ => {
+            while i < bytes.len() && bytes[i] != b',' && bytes[i] != b'}' {
+                i += 1;
+            }
+            i
+        }
+    }
+}
+
+/// `json.get(json_str, key)` — the value at `key`, or `null`.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_json_get(json_str: i64, key: i64) -> i64 {
     let json = registry::get_string(json_str).unwrap_or_default();
     let key = registry::get_string(key).unwrap_or_default();
-    let search = format!("\"{key}\":");
-    if let Some(pos) = json.find(&search) {
-        let value_start = pos + search.len();
-        let remaining = &json[value_start..];
-
-        let mut parser = JsonParser::new(remaining);
-        match parser.parse_value() {
-            Ok(val) => return registry::put_string(val),
-            Err(_) => return registry::put_string("null".to_string()),
-        }
+    match immediate_member(&json, &key) {
+        Some(value) => registry::put_string(value),
+        None => registry::put_string("null".to_string()),
     }
-    registry::put_string("null".to_string())
 }
 
 #[unsafe(no_mangle)]
@@ -239,6 +383,59 @@ pub extern "C" fn ntsc_json_has(json_str: i64, key: i64) -> i8 {
     let key = registry::get_string(key).unwrap_or_default();
     let search = format!("\"{key}\":");
     i8::from(json.contains(&search))
+}
+
+/// The elements of an immediate JSON array, in order.
+pub(crate) fn array_elements(json: &str) -> Vec<String> {
+    let bytes = json.as_bytes();
+    if bytes.first() != Some(&b'[') {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut i = 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b']' | b',' | b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            _ => {
+                let mut parser = JsonParser::at(json, i);
+                match parser.parse_value() {
+                    Ok(value) => {
+                        // The parser leaves `pos` just past the value.
+                        let end = parser.pos;
+                        out.push(value);
+                        i = end.max(i + 1);
+                    }
+                    Err(_) => i += 1,
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `json.length(arr)` — the number of elements in a JSON array; `0` for
+/// anything else.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_json_length(json_str: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
+    let json = registry::get_string(json_str).unwrap_or_default();
+    i64::try_from(array_elements(&json).len()).unwrap_or(i64::MAX)
+}
+
+/// `json.at(arr, i)` — element `i` of a JSON array as JSON text, or
+/// `"null"` when the index is out of range.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_json_at(json_str: i64, index: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
+    let json = registry::get_string(json_str).unwrap_or_default();
+    let elements = array_elements(&json);
+    let Ok(index) = usize::try_from(index) else {
+        return registry::put_string(String::from("null"));
+    };
+    match elements.get(index) {
+        Some(value) => registry::put_string(value.clone()),
+        None => registry::put_string(String::from("null")),
+    }
 }
 
 /// `json.keys(json_str)` — comma-separated list of keys.
@@ -376,12 +573,57 @@ mod tests {
         assert_eq!(read(r), "\"Alice\"");
     }
 
+    /// A nested object must not shadow a member of the same name in its
+    /// parent: the track's own `mbid` wins over the artist's.
+    #[test]
+    fn test_get_ignores_nested_members() {
+        let json = r##"{"artist":{"mbid":"artist-id","#text":"B"},"mbid":"track-id"}"##;
+        assert_eq!(read(ntsc_json_get(put(json), put("mbid"))), "\"track-id\"");
+        // `#text` lives inside the nested artist, so it is not a member here.
+        assert_eq!(read(ntsc_json_get(put(json), put("#text"))), "null");
+    }
+
+    /// Lookup reaches members that follow a nested value, and arrays are
+    /// skipped whole.
+    #[test]
+    fn test_get_walks_past_nested_values() {
+        let json = r#"{"artists":[{"id":"a"}],"name":"Song","tracks":[{"x":1}],"id":"t"}"#;
+        assert_eq!(read(ntsc_json_get(put(json), put("name"))), "\"Song\"");
+        assert_eq!(read(ntsc_json_get(put(json), put("id"))), "\"t\"");
+        assert_eq!(read(ntsc_json_get(put(json), put("missing"))), "null");
+    }
+
+    #[test]
+    fn test_get_on_non_object_is_null() {
+        assert_eq!(read(ntsc_json_get(put("[1,2,3]"), put("a"))), "null");
+        assert_eq!(read(ntsc_json_get(put("42"), put("a"))), "null");
+    }
+
+    #[test]
+    fn test_parse_unicode_strings() {
+        let r = ntsc_json_parse(put(r#"{"greeting":"Привет","日本語":"값"}"#));
+        let s = read(r);
+        assert!(s.contains("\"greeting\":\"Привет\""), "value: {s}");
+        assert!(s.contains("\"日本語\":\"값\""), "key: {s}");
+    }
+
     #[test]
     fn test_keys() {
         let r = ntsc_json_keys(put(r#"{"a":1,"b":2}"#));
         let s = read(r);
         assert!(s.contains("a"));
         assert!(s.contains("b"));
+    }
+
+    #[test]
+    fn pretty_printed_members_with_spaces_around_colons() {
+        let doc = "{\n  \"name\" : \"Moonride\",\n  \"count\" : 42,\n  \"tags\" : [\"a\"]\n}";
+        assert_eq!(
+            super::immediate_member(doc, "name").as_deref(),
+            Some("\"Moonride\"")
+        );
+        assert_eq!(super::immediate_member(doc, "count").as_deref(), Some("42"));
+        assert_eq!(super::immediate_member(doc, "missing"), None);
     }
 
     #[test]

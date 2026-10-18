@@ -33,6 +33,7 @@ pub mod slices;
 pub mod sort;
 pub mod strings;
 pub mod sys;
+pub mod term;
 pub mod testing;
 pub mod time;
 pub mod toml;

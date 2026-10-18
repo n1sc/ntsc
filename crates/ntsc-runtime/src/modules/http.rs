@@ -2,7 +2,7 @@
 //! Blocking HTTP/1.1 client; `https://` uses rustls anchored at Mozilla's
 //! bundled webpki roots. Responses are JSON: `{"status":N,"body":"..."}`.
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, TcpStream};
 use std::sync::{Arc, OnceLock};
 
@@ -25,11 +25,14 @@ fn default_tls_config() -> &'static Arc<ClientConfig> {
 }
 
 fn make_response(status: i64, body: &str) -> String {
-    format!(
-        "{{\"status\":{},\"body\":\"{}\"}}",
-        status,
-        body.replace('"', "\\\"").replace('\n', "\\n")
-    )
+    // Backslashes are escaped before quotes: a body holding `\` (a Windows
+    // path, a regex, an escaped lyric) would otherwise produce invalid JSON
+    // and `json.get(resp, "body")` would fail to read it back.
+    let escaped = body
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!("{{\"status\":{status},\"body\":\"{escaped}\"}}")
 }
 
 fn parse_url(url: &str) -> Result<(String, u16, String, bool), String> {
@@ -66,6 +69,103 @@ fn server_name_for(host: &str) -> Result<ServerName<'static>, String> {
     ServerName::try_from(host.to_string()).map_err(|_| format!("invalid host `{host}`"))
 }
 
+/// Per-request knobs: the header set, the user agent, and the timeouts.
+/// A plain `http.get` uses the defaults, so the options only carry what a
+/// caller actually needs (a `Referer` some APIs demand, a bearer token, a
+/// short timeout so a hung peer cannot wedge a UI thread).
+#[derive(Debug, Clone)]
+struct RequestOptions {
+    headers: Vec<(String, String)>,
+    user_agent: Option<String>,
+    timeout: Option<std::time::Duration>,
+    follow_redirects: bool,
+    max_redirects: usize,
+}
+
+impl Default for RequestOptions {
+    /// Redirects are followed, matching what a plain `http.get` is expected
+    /// to do; the budget keeps a redirect loop from spinning forever.
+    fn default() -> Self {
+        Self {
+            headers: Vec::new(),
+            user_agent: None,
+            timeout: None,
+            follow_redirects: true,
+            max_redirects: 5,
+        }
+    }
+}
+
+impl RequestOptions {
+    /// Read the options from the JSON blob a caller passes:
+    /// `{"headers": {...}, "user_agent": "...", "timeout_ms": 5000,
+    ///   "follow_redirects": true, "max_redirects": 5}`.
+    fn from_json(text: &str) -> Result<Self, String> {
+        let mut options = Self::default();
+        if text.trim().is_empty() {
+            return Ok(options);
+        }
+        super::json::json_validate(text).map_err(|e| format!("invalid options: {e}"))?;
+        if let Some(headers) = super::json::json_get_str(text, "headers")
+            && headers != "null"
+            && !headers.is_empty()
+        {
+            options.headers = header_pairs(&headers);
+        }
+        if let Some(agent) = super::json::json_get_str(text, "user_agent") {
+            let agent = unquote(&agent);
+            if !agent.is_empty() {
+                options.user_agent = Some(agent);
+            }
+        }
+        if let Some(timeout) = super::json::json_get_str(text, "timeout_ms")
+            && let Ok(ms) = timeout.parse::<u64>()
+            && ms > 0
+        {
+            options.timeout = Some(std::time::Duration::from_millis(ms));
+        }
+        if super::json::json_get_str(text, "follow_redirects").as_deref() == Some("false") {
+            options.follow_redirects = false;
+        }
+        if let Some(max) = super::json::json_get_str(text, "max_redirects")
+            && let Ok(n) = max.parse::<usize>()
+        {
+            options.max_redirects = n;
+        }
+        Ok(options)
+    }
+}
+
+/// Strip the quotes off a JSON string value; a bare value passes through.
+fn unquote(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Flatten a JSON object of string values into ordered header pairs.
+fn header_pairs(object: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = object.trim();
+    if let Some(stripped) = rest.strip_prefix('{') {
+        rest = stripped.trim_end_matches('}');
+    }
+    for entry in rest.split(',') {
+        let Some(colon) = entry.find(':') else {
+            continue;
+        };
+        let name = unquote(&entry[..colon]);
+        let value = unquote(&entry[colon + 1..]);
+        if !name.is_empty() {
+            out.push((name, value));
+        }
+    }
+    out
+}
+
 fn http_request_raw(method: &str, url: &str, body: Option<&str>) -> Result<(i64, String), String> {
     http_request_raw_impl(method, url, body, None)
 }
@@ -86,14 +186,95 @@ fn http_request_raw_impl(
     body: Option<&str>,
     roots: Option<&RootCertStore>,
 ) -> Result<(i64, String), String> {
+    http_request_with(method, url, body, &RequestOptions::default(), roots)
+}
+
+/// Issue one request, following redirects when the options ask for it.
+fn http_request_with(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    options: &RequestOptions,
+    roots: Option<&RootCertStore>,
+) -> Result<(i64, String), String> {
+    let mut method = method.to_string();
+    let mut url = url.to_string();
+    let mut body = body.map(str::to_string);
+    let hops = if options.follow_redirects {
+        options.max_redirects.max(1)
+    } else {
+        1
+    };
+    for _ in 0..hops {
+        let (status, response_body, location) =
+            http_request_once(&method, &url, body.as_deref(), options, roots)?;
+        if !options.follow_redirects || !is_redirect(status) {
+            return Ok((status, response_body));
+        }
+        let Some(target) = location else {
+            // A redirect without a usable target is the final answer.
+            return Ok((status, response_body));
+        };
+        url = resolve_redirect(&url, &target)?;
+        // 303, and 301/302 in practice, continue as GET without a body.
+        if status != 307 && status != 308 {
+            method = "GET".to_string();
+            body = None;
+        }
+    }
+    Err("too many redirects".to_string())
+}
+
+fn is_redirect(status: i64) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// Resolve a `Location` value against the URL it answered.
+fn resolve_redirect(base: &str, target: &str) -> Result<String, String> {
+    if target.starts_with("http://") || target.starts_with("https://") {
+        return Ok(target.to_string());
+    }
+    let (host, port, _, _) = parse_url(base)?;
+    let scheme_is_https = base.starts_with("https://");
+    let authority = if (scheme_is_https && port == 443) || (!scheme_is_https && port == 80) {
+        host.clone()
+    } else {
+        format!("{host}:{port}")
+    };
+    if let Some(absolute) = target.strip_prefix('/') {
+        Ok(format!(
+            "{}://{authority}/{absolute}",
+            if scheme_is_https { "https" } else { "http" }
+        ))
+    } else {
+        Ok(format!(
+            "{}://{authority}/{target}",
+            if scheme_is_https { "https" } else { "http" }
+        ))
+    }
+}
+
+/// Perform a single request without following redirects, returning the
+/// status, the body, and the `Location` header when the response redirects.
+fn http_request_once(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    options: &RequestOptions,
+    roots: Option<&RootCertStore>,
+) -> Result<(i64, String, Option<String>), String> {
     let (host, port, path, is_https) = parse_url(url)?;
 
     let addr = format!("{}:{}", host, port);
     let tcp = TcpStream::connect(&addr).map_err(|e| format!("Connection failed: {e}"))?;
+    if let Some(timeout) = options.timeout {
+        let _ = tcp.set_read_timeout(Some(timeout));
+        let _ = tcp.set_write_timeout(Some(timeout));
+    }
 
     if !is_https {
         let mut stream = tcp;
-        return send_request(&mut stream, method, &host, &path, body);
+        return send_request_with(&mut stream, method, &host, &path, body, options);
     }
 
     let config = match roots {
@@ -108,6 +289,10 @@ fn http_request_raw_impl(
     let tls =
         ClientConnection::new(config, server_name).map_err(|e| format!("TLS setup failed: {e}"))?;
     let mut stream = StreamOwned::new(tls, tcp);
+    if let Some(timeout) = options.timeout {
+        let _ = stream.sock.set_read_timeout(Some(timeout));
+        let _ = stream.sock.set_write_timeout(Some(timeout));
+    }
 
     // Drive the handshake before sending so certificate-validation failures
     // surface as a clean connection error.
@@ -115,20 +300,31 @@ fn http_request_raw_impl(
         .conn
         .complete_io(&mut stream.sock)
         .map_err(|e| format!("TLS handshake failed: {e}"))?;
-    send_request(&mut stream, method, &host, &path, body)
+    send_request_with(&mut stream, method, &host, &path, body, options)
 }
 
-fn send_request<S: Read + Write>(
+/// Build and send one request, then split the raw response into its status,
+/// its body, and the `Location` header. The location is returned separately
+/// so the redirect loop can follow it.
+fn send_request_with<S: Read + Write>(
     stream: &mut S,
     method: &str,
     host: &str,
     path: &str,
     body: Option<&str>,
-) -> Result<(i64, String), String> {
+    options: &RequestOptions,
+) -> Result<(i64, String, Option<String>), String> {
+    let agent = options
+        .user_agent
+        .clone()
+        .unwrap_or_else(|| "Neutron/1.0".to_string());
     let mut request = format!(
-        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Neutron/1.0\r\nConnection: close\r\n",
-        method, path, host
+        "{} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {agent}\r\nConnection: close\r\n",
+        method, path
     );
+    for (name, value) in &options.headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
 
     if let Some(data) = body {
         request.push_str("Content-Type: application/octet-stream\r\n");
@@ -147,34 +343,44 @@ fn send_request<S: Read + Write>(
     }
 
     let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|e| format!("Read failed: {e}"))?;
+    read_to_string_lenient(stream, &mut response).map_err(|e| format!("Read failed: {e}"))?;
 
-    let status = if let Some(line) = response.lines().next() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            parts[1].parse::<i64>().unwrap_or(0)
-        } else {
-            0
+    let mut lines = response.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<i64>().ok())
+        .unwrap_or(0);
+
+    // `Location` is only needed for a redirect, so it is picked up while the
+    // header block is still being walked.
+    let mut location = None;
+    for line in lines.by_ref() {
+        if line.is_empty() {
+            break;
         }
-    } else {
-        0
+        if let Some(value) = line
+            .split_once(':')
+            .filter(|(name, _)| name.trim().eq_ignore_ascii_case("location"))
+            .map(|(_, value)| value.trim().to_string())
+        {
+            location = Some(value);
+        }
+    }
+
+    let body = match response.find("\r\n\r\n") {
+        Some(pos) => response[pos + 4..].to_string(),
+        None => String::new(),
     };
 
-    let body = if let Some(pos) = response.find("\r\n\r\n") {
-        response[pos + 4..].to_string()
-    } else {
-        String::new()
-    };
-
-    Ok((status, body))
+    Ok((status, body, location))
 }
 
 /// `http.get(url)` — returns the response JSON; throws when the request
 /// cannot be completed.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_http_get(url: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let url = registry::get_string(url).unwrap_or_default();
     match http_request_raw("GET", &url, None) {
         Ok((status, body)) => registry::put_string(make_response(status, &body)),
@@ -184,6 +390,7 @@ pub extern "C" fn ntsc_http_get(url: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_http_post(url: i64, data: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let url = registry::get_string(url).unwrap_or_default();
     let data = registry::get_string(data).unwrap_or_default();
     match http_request_raw("POST", &url, Some(&data)) {
@@ -194,6 +401,7 @@ pub extern "C" fn ntsc_http_post(url: i64, data: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_http_put(url: i64, data: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let url = registry::get_string(url).unwrap_or_default();
     let data = registry::get_string(data).unwrap_or_default();
     match http_request_raw("PUT", &url, Some(&data)) {
@@ -204,6 +412,7 @@ pub extern "C" fn ntsc_http_put(url: i64, data: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_http_delete(url: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let url = registry::get_string(url).unwrap_or_default();
     match http_request_raw("DELETE", &url, None) {
         Ok((status, body)) => registry::put_string(make_response(status, &body)),
@@ -214,6 +423,7 @@ pub extern "C" fn ntsc_http_delete(url: i64) -> i64 {
 /// `http.head(url)` — like `get`, but the JSON carries only `status`.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_http_head(url: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let url = registry::get_string(url).unwrap_or_default();
     match http_request_raw("HEAD", &url, None) {
         Ok((status, _body)) => registry::put_string(format!("{{\"status\":{}}}", status)),
@@ -223,6 +433,7 @@ pub extern "C" fn ntsc_http_head(url: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_http_patch(url: i64, data: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let url = registry::get_string(url).unwrap_or_default();
     let data = registry::get_string(data).unwrap_or_default();
     match http_request_raw("PATCH", &url, Some(&data)) {
@@ -234,6 +445,7 @@ pub extern "C" fn ntsc_http_patch(url: i64, data: i64) -> i64 {
 /// `http.request(method, url, data)` — an empty `data` sends no body.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_http_request(method: i64, url: i64, data: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let method = registry::get_string(method).unwrap_or_default();
     let url = registry::get_string(url).unwrap_or_default();
     let data_str = registry::get_string(data).unwrap_or_default();
@@ -245,6 +457,31 @@ pub extern "C" fn ntsc_http_request(method: i64, url: i64, data: i64) -> i64 {
     match http_request_raw(&method, &url, body) {
         Ok((status, body)) => registry::put_string(make_response(status, &body)),
         Err(e) => super::throw_str(format!("http.request: {e}")),
+    }
+}
+
+/// `http.request_full(method, url, data, options)` — like
+/// `http.request`, with per-request headers, user agent, and timeouts read
+/// from a JSON options object.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_http_request_full(method: i64, url: i64, data: i64, options: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
+    let method = registry::get_string(method).unwrap_or_default();
+    let url = registry::get_string(url).unwrap_or_default();
+    let data_str = registry::get_string(data).unwrap_or_default();
+    let options_str = registry::get_string(options).unwrap_or_default();
+    let body = if data_str.is_empty() {
+        None
+    } else {
+        Some(data_str.as_str())
+    };
+    let options = match RequestOptions::from_json(&options_str) {
+        Ok(options) => options,
+        Err(e) => return super::throw_str(format!("http.request_full: {e}")),
+    };
+    match http_request_with(&method, &url, body, &options, None) {
+        Ok((status, body)) => registry::put_string(make_response(status, &body)),
+        Err(e) => super::throw_str(format!("http.request_full: {e}")),
     }
 }
 
@@ -370,6 +607,7 @@ pub extern "C" fn ntsc_http_status_code(response: i64) -> i64 {
 /// streaming downloads. Returns JSON `{"status":N,"body":"..."}`.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_http_get_range(url: i64, start: i64, end: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let url = registry::get_string(url).unwrap_or_default();
     let range_header = format!("bytes={start}-{end}");
     http_request_with_range("GET", &url, &range_header)
@@ -379,6 +617,7 @@ pub extern "C" fn ntsc_http_get_range(url: i64, start: i64, end: i64) -> i64 {
 /// `{"status":N,"bytes":N}` with the number of bytes written.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_http_get_file(url: i64, dest: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let url = registry::get_string(url).unwrap_or_default();
     let dest = registry::get_string(dest).unwrap_or_default();
 
@@ -400,6 +639,7 @@ pub extern "C" fn ntsc_http_get_file(url: i64, dest: i64) -> i64 {
 /// to a file in chunks. Returns JSON `{"status":N,"bytes":N,"chunks":N}`.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_http_download_with_progress(url: i64, dest: i64, chunk_size: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let url = registry::get_string(url).unwrap_or_default();
     let dest = registry::get_string(dest).unwrap_or_default();
     let chunk = chunk_size.max(1024) as usize;
@@ -427,6 +667,7 @@ pub extern "C" fn ntsc_http_download_with_progress(url: i64, dest: i64, chunk_si
 /// `{"url":"...","status":N,"bytes":N}` results.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_http_concurrent_download(urls: i64, dest_dir: i64, chunk_size: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     let urls_str = registry::get_string(urls).unwrap_or_default();
     let dest_dir = registry::get_string(dest_dir).unwrap_or_default();
     let _chunk = chunk_size.max(1024) as usize;
@@ -501,6 +742,43 @@ fn http_request_with_range(method: &str, url: &str, range: &str) -> i64 {
     send_range_request(&mut stream, method, &host, &path, range)
 }
 
+/// Read a stream to a string, treating a missing TLS `close_notify` as the
+/// end of the body.
+///
+/// rustls reports a peer that closes without `close_notify` as
+/// `UnexpectedEof` and refuses the response. Plenty of servers and proxies
+/// do exactly that, and the Rust original (through `ureq`) accepted them, so
+/// a strict reading here breaks requests that used to work — Spotify's API
+/// among them. A genuinely truncated response is still caught downstream:
+/// the status line, headers, and content length all have to check out.
+fn read_to_string_lenient(stream: &mut impl Read, out: &mut String) -> io::Result<()> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            // rustls reports the missing `close_notify` through its own
+            // error type, so the kind varies by version; match the message
+            // as well as the kind.
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) if e.to_string().contains("close_notify") => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    match String::from_utf8(buf) {
+        Ok(text) => {
+            out.push_str(&text);
+            Ok(())
+        }
+        Err(e) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("response is not UTF-8: {e}"),
+        )),
+    }
+}
+
 fn send_range_request<S: Read + Write>(
     stream: &mut S,
     method: &str,
@@ -515,7 +793,7 @@ fn send_range_request<S: Read + Write>(
         return super::throw_str("http.get_range: write failed".to_string());
     }
     let mut response = String::new();
-    if stream.read_to_string(&mut response).is_err() {
+    if read_to_string_lenient(stream, &mut response).is_err() {
         return super::throw_str("http.get_range: read failed".to_string());
     }
     let status = if let Some(line) = response.lines().next() {
@@ -714,9 +992,7 @@ fn get_content_length<S: Read + Write>(
         .map_err(|e| format!("Write failed: {e}"))?;
 
     let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|e| format!("Read failed: {e}"))?;
+    read_to_string_lenient(stream, &mut response).map_err(|e| format!("Read failed: {e}"))?;
 
     for line in response.lines() {
         let lower = line.to_ascii_lowercase();
@@ -783,6 +1059,93 @@ mod tests {
     use rustls::{ServerConfig, ServerConnection};
     use std::net::TcpListener;
     use std::thread;
+
+    /// A peer that closes without `close_notify` must read as end-of-body,
+    /// not as a failure: rustls reports that as `UnexpectedEof` and several
+    /// real endpoints do it.
+    #[test]
+    fn a_missing_close_notify_reads_as_end_of_body() {
+        struct EofAfter(&'static [u8]);
+        impl Read for EofAfter {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "peer closed connection without sending TLS close_notify",
+                    ));
+                }
+                let n = self.0.len().min(buf.len());
+                buf[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+                Ok(n)
+            }
+        }
+        let mut out = String::new();
+        read_to_string_lenient(&mut EofAfter(b"HTTP/1.1 200 OK\r\n\r\nbody"), &mut out)
+            .expect("a bare UnexpectedEof is the end of the body");
+        assert_eq!(out, "HTTP/1.1 200 OK\r\n\r\nbody");
+    }
+
+    /// rustls sometimes reports the same condition through its own error
+    /// type rather than `UnexpectedEof`; that must read as end-of-body too.
+    #[test]
+    fn a_close_notify_message_from_any_error_kind_reads_as_end() {
+        struct Wrapped {
+            sent: bool,
+        }
+        impl Read for Wrapped {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.sent {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "peer closed connection without sending TLS close_notify",
+                    ));
+                }
+                self.sent = true;
+                buf[..5].copy_from_slice(b"hello");
+                Ok(5)
+            }
+        }
+        let mut out = String::new();
+        read_to_string_lenient(&mut Wrapped { sent: false }, &mut out)
+            .expect("a close_notify error is the end of the body");
+        assert_eq!(out, "hello");
+    }
+
+    /// A real I/O error still propagates.
+    #[test]
+    fn other_read_errors_still_fail() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("connection reset"))
+            }
+        }
+        let mut out = String::new();
+        assert!(read_to_string_lenient(&mut Broken, &mut out).is_err());
+    }
+
+    /// The response wrapper is JSON, so a body holding a backslash must be
+    /// escaped or `json.get(resp, "body")` reads back a truncated string.
+    #[test]
+    fn response_escapes_backslashes_in_the_body() {
+        let json = make_response(200, "C:\\dir\\path");
+        assert!(
+            json.contains(r#"C:\\dir\\path"#),
+            "wrapper must hold escaped backslashes: {json}"
+        );
+        // Reading the body back yields the original text, quoted once.
+        let body = crate::modules::json::json_get_str(&json, "body").expect("body present");
+        assert_eq!(body, "\"C:\\dir\\path\"");
+    }
+
+    /// A quote and a newline in the body survive the round trip too.
+    #[test]
+    fn response_escapes_quotes_and_newlines() {
+        let json = make_response(200, "say \"hi\"\nbye");
+        let body = crate::modules::json::json_get_str(&json, "body").expect("body present");
+        assert_eq!(body, "\"say \"hi\"\nbye\"");
+    }
 
     fn read_http_request<S: Read>(stream: &mut S) -> (String, Vec<u8>) {
         let mut data = Vec::new();
@@ -979,6 +1342,30 @@ mod tests {
         let response = ntsc_async_http_result(fut);
         ntsc_async_http_drop(fut);
         assert_eq!(read(response), "{\"status\":200,\"body\":\"ok\"}");
+        let _ = registry::take_string(url_handle);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn async_http_drop_reclaims_unreaped_payload() {
+        let (url, server) = spawn_plain_server();
+        let url_handle = put(&url);
+        let fut = ntsc_async_http_get(url_handle);
+        let mut spins = 0;
+        while ntsc_async_http_poll(fut) == 0 {
+            spins += 1;
+            assert!(spins < 10_000, "offloaded http.get never completed");
+            std::thread::yield_now();
+        }
+        let payload = registry::borrow(fut, |handle| match handle {
+            registry::Handle::AsyncOp { result, .. } => *result,
+            _ => registry::NULL,
+        })
+        .unwrap_or(registry::NULL);
+        assert_ne!(payload, registry::NULL);
+
+        ntsc_async_http_drop(fut);
+        assert!(registry::borrow(payload, |_| ()).is_none());
         let _ = registry::take_string(url_handle);
         server.join().unwrap();
     }

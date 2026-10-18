@@ -330,6 +330,7 @@ pub extern "C" fn ntsc_collections_channel_sender(receiver: i64) -> i64 {
 // that needs the registry to register the message string.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_collections_channel_send(sender: i64, value: i64) -> i8 {
+    let _block = crate::BlockGuard::enter();
     let mut msg = registry::get_string(value).unwrap_or_default();
     loop {
         let action = registry::with_opaque(sender, |end: &ChannelEnd| match end {
@@ -367,6 +368,7 @@ pub extern "C" fn ntsc_collections_channel_send(sender: i64, value: i64) -> i8 {
 /// returns "" (not the null handle) once every sender end has been closed.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_collections_channel_recv(receiver: i64) -> i64 {
+    let _block = crate::BlockGuard::enter();
     loop {
         let action = registry::with_opaque(receiver, |end: &ChannelEnd| match end {
             ChannelEnd::Receiver(inner) => {
