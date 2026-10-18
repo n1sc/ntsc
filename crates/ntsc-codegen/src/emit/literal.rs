@@ -219,18 +219,20 @@ pub(crate) fn emit_variable<'ctx>(
         ));
     }
 
-    match fn_ctx.lookup_var(name_str) {
+    let stripped = name_str.trim_start_matches('@');
+    match fn_ctx.lookup_var(stripped) {
         Some((ptr, ty)) => {
             let llvm_ty = ty_to_llvm(ty, fn_ctx.context);
-            let loaded = fn_ctx.builder.build_load(llvm_ty, ptr, name_str)?;
+            let loaded = fn_ctx.builder.build_load(llvm_ty, ptr, stripped)?;
             Ok(TypedValue::new(loaded, ty.clone()))
         }
         None => {
             // Standard library modules are represented as opaque objects.
             // Only when no local variable shadows the module name.
-            match name_str {
+            match stripped {
                 "math" | "fmt" | "time" | "sys" | "strings" | "json" | "http" | "crypto"
-                | "collections" | "regex" | "arrays" | "process" | "csv" | "toml" | "yaml" => {
+                | "collections" | "regex" | "arrays" | "process" | "csv" | "toml" | "yaml"
+                | "term" => {
                     return Ok(TypedValue::new(
                         fn_ctx
                             .context
@@ -241,6 +243,16 @@ pub(crate) fn emit_variable<'ctx>(
                     ));
                 }
                 _ => {}
+            }
+            if super::RUST_CRATE_NAMESPACES.with(|m| m.borrow().contains_key(stripped)) {
+                return Ok(TypedValue::new(
+                    fn_ctx
+                        .context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                        .into(),
+                    Ty::Object,
+                ));
             }
 
             match emit_static_const_variable(fn_ctx, name_str)? {

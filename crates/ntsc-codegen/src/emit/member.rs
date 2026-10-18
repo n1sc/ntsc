@@ -79,14 +79,16 @@ pub(crate) fn store_into_field<'ctx>(
         val.clone()
     };
 
-    if matches!(field_ty, Ty::String | Ty::Array(_)) {
+    if matches!(field_ty, Ty::String | Ty::Array(_) | Ty::Class(_)) {
         // Reclaim what the field held before the store overwrites it: once
         // the field points elsewhere, nothing can reach the old value
         // again. A freshly-constructed instance zero-initializes its
         // fields, so the first assignment drops a null handle; the
         // identity guard skips self-assignment (`b.items = b.items`).
-        // Class fields are excluded: instances are reference-semantic and
-        // may still be aliased.
+        // Class instances are single-owner like arrays and strings: a plain
+        // read moves them (nulling the source), so a live field holds the
+        // only reference and its owned heap fields must be reclaimed here
+        // rather than orphaned when the field is repointed.
         emit_drop_replaced_value(fn_ctx, gep.ptr, &field_ty, &stored)?;
     }
     fn_ctx.builder.build_store(gep.ptr, stored.value)?;

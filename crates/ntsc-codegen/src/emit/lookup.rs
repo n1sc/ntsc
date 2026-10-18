@@ -48,6 +48,29 @@ pub(crate) fn type_annotation_to_ty(ann: &Option<ntsc_ast::types::TypeAnnotation
             Box::new(type_annotation_to_ty(&Some(*inner.clone()))),
             *mutable,
         ),
+        Some(TypeAnnotation::Named(token)) if token.lexeme() == "void" => Ty::Void,
+        Some(TypeAnnotation::Named(token))
+            if matches!(
+                token.lexeme(),
+                "byte"
+                    | "c_char"
+                    | "c_uchar"
+                    | "c_short"
+                    | "c_ushort"
+                    | "c_int"
+                    | "c_uint"
+                    | "c_long"
+                    | "c_ulong"
+                    | "c_longlong"
+                    | "c_ulonglong"
+                    | "c_size_t"
+            ) =>
+        {
+            Ty::Int
+        }
+        Some(TypeAnnotation::Named(token)) if matches!(token.lexeme(), "c_float" | "c_double") => {
+            Ty::Float
+        }
         Some(TypeAnnotation::Named(token)) => Ty::Class(token.lexeme().to_string()),
         Some(TypeAnnotation::Shared(inner)) => {
             Ty::Shared(Box::new(type_annotation_to_ty(&Some(*inner.clone()))))
@@ -71,6 +94,94 @@ pub(crate) fn function_return_ty(ret: &Option<ntsc_ast::types::ReturnType>) -> T
     ret.as_ref()
         .map(|r| type_annotation_to_ty(&Some(r.ty.clone())))
         .unwrap_or(Ty::Void)
+}
+
+/// Map an extern declaration to its platform C ABI type. Neutron's ordinary
+/// `int`/`float` types remain the 64-bit runtime values; C-style declarations
+/// use the widths required by the foreign ABI.
+pub(crate) fn ffi_type_to_llvm<'ctx>(
+    annotation: &ntsc_ast::types::TypeAnnotation,
+    c_style: bool,
+    context: &'ctx Context,
+) -> Option<inkwell::types::BasicTypeEnum<'ctx>> {
+    use ntsc_ast::types::TypeAnnotation;
+    if !c_style {
+        return match annotation {
+            TypeAnnotation::Int => Some(context.i32_type().as_basic_type_enum()),
+            TypeAnnotation::Float => Some(context.f64_type().as_basic_type_enum()),
+            TypeAnnotation::Bool => Some(context.i8_type().as_basic_type_enum()),
+            TypeAnnotation::RawPointer(..) => Some(
+                context
+                    .ptr_type(AddressSpace::default())
+                    .as_basic_type_enum(),
+            ),
+            TypeAnnotation::Named(token) if token.lexeme() == "void" => None,
+            _ => {
+                let ty = type_annotation_to_ty(&Some(annotation.clone()));
+                (ty != Ty::Void).then(|| ty_to_llvm(&ty, context))
+            }
+        };
+    }
+    if c_style {
+        if let TypeAnnotation::Named(token) = annotation {
+            let value = match token.lexeme() {
+                "void" => return None,
+                "c_char" | "c_uchar" => context.i8_type().as_basic_type_enum(),
+                "c_short" | "c_ushort" => context.i16_type().as_basic_type_enum(),
+                "c_int" | "c_uint" => context.i32_type().as_basic_type_enum(),
+                "c_long" | "c_ulong" | "c_longlong" | "c_ulonglong" | "c_size_t" => {
+                    context.i64_type().as_basic_type_enum()
+                }
+                "c_float" => context.f32_type().as_basic_type_enum(),
+                "c_double" => context.f64_type().as_basic_type_enum(),
+                _ => ty_to_llvm(&type_annotation_to_ty(&Some(annotation.clone())), context),
+            };
+            return Some(value);
+        }
+        if matches!(annotation, TypeAnnotation::RawPointer(..)) {
+            return Some(
+                context
+                    .ptr_type(AddressSpace::default())
+                    .as_basic_type_enum(),
+            );
+        }
+        return match annotation {
+            TypeAnnotation::Int => Some(context.i32_type().as_basic_type_enum()),
+            TypeAnnotation::Float => Some(context.f64_type().as_basic_type_enum()),
+            TypeAnnotation::Bool => Some(context.i8_type().as_basic_type_enum()),
+            _ => {
+                let ty = type_annotation_to_ty(&Some(annotation.clone()));
+                (ty != Ty::Void).then(|| ty_to_llvm(&ty, context))
+            }
+        };
+    }
+    let ty = type_annotation_to_ty(&Some(annotation.clone()));
+    (ty != Ty::Void).then(|| ty_to_llvm(&ty, context))
+}
+
+pub(crate) fn ffi_function_type<'ctx>(
+    context: &'ctx Context,
+    params: &[ntsc_ast::expr::FunctionParam],
+    return_type: &Option<ntsc_ast::types::ReturnType>,
+    c_style: bool,
+) -> inkwell::types::FunctionType<'ctx> {
+    let param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = params
+        .iter()
+        .filter_map(|param| {
+            param
+                .type_annotation
+                .as_ref()
+                .and_then(|annotation| ffi_type_to_llvm(annotation, c_style, context))
+                .map(Into::into)
+        })
+        .collect();
+    match return_type
+        .as_ref()
+        .and_then(|return_type| ffi_type_to_llvm(&return_type.ty, c_style, context))
+    {
+        Some(return_type) => return_type.fn_type(&param_types, false),
+        None => context.void_type().fn_type(&param_types, false),
+    }
 }
 
 /// Return the declared return type of a class method, if the class declares
@@ -113,6 +224,16 @@ pub(crate) fn class_method_declared_param_types(class_name: &str, method: &str) 
                 .cloned()
         })
         .unwrap_or_default()
+}
+
+/// Whether `name` is a user-declared class type. Mirrors
+/// `module.get_struct_type(name).is_some()` but consults the module-free
+/// `CLASS_FIELDS` registry, so escape analysis can recognize constructor
+/// calls without a module handle. `CLASS_FIELDS` is populated for every
+/// class (with an empty field list when it declares none) before any
+/// function is emitted, so a present class always has an entry.
+pub(crate) fn is_class_type(name: &str) -> bool {
+    CLASS_FIELDS.with(|map| map.borrow().contains_key(name))
 }
 
 /// The base class of a class, if it declares `extends`.

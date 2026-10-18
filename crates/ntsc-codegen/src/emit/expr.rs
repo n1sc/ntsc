@@ -43,8 +43,24 @@ pub(crate) fn emit_expression<'ctx>(
         Expr::Propagate { value, .. } => emit_propagate(fn_ctx, value),
         Expr::Member { object, property } => {
             let obj_val = emit_expression(fn_ctx, object)?;
+            let fresh_receiver = matches!(obj_val.ntsc_type, Ty::Class(_) | Ty::Own(_))
+                && expr_is_fresh(fn_ctx, object, &obj_val);
             let obj_val = deref_shared(fn_ctx, obj_val)?;
-            emit_member_access(fn_ctx, &obj_val, property)
+            let member = emit_member_access(fn_ctx, &obj_val, property)?;
+            if fresh_receiver {
+                // Move the selected field out before reclaiming its temporary
+                // owner; cloning a container could still alias its class elements.
+                if ty_is_owned_handle(&member.ntsc_type)
+                    && let Some(gep) = emit_member_gep(fn_ctx, &obj_val, property)?
+                {
+                    fn_ctx.builder.build_store(
+                        gep.ptr,
+                        default_llvm_value(&gep.field_ty, fn_ctx.context),
+                    )?;
+                }
+                emit_drop_value(fn_ctx, &obj_val)?;
+            }
+            Ok(member)
         }
         Expr::MemberSet {
             object,
@@ -918,6 +934,57 @@ pub(crate) fn emit_expression<'ctx>(
     }
 }
 
+/// Recover the receiver's static type for member freshness without emitting it
+/// again. In particular, a function returning a view is not an owned receiver.
+pub(crate) fn member_receiver_type(fn_ctx: &FunctionContext<'_, '_>, expr: &Expr) -> Option<Ty> {
+    match expr {
+        Expr::Variable { name } => fn_ctx.lookup_var(name.lexeme()).map(|(_, ty)| ty.clone()),
+        Expr::Grouping { expression, .. } => member_receiver_type(fn_ctx, expression),
+        Expr::Copy { expression, .. } => {
+            let ty = member_receiver_type(fn_ctx, expression)?;
+            Some(match ty {
+                Ty::View(inner, _) | Ty::Shared(inner) => *inner,
+                Ty::Slice(inner) => Ty::Array(inner),
+                other => other,
+            })
+        }
+        Expr::Call {
+            callee, arguments, ..
+        } => match callee.as_ref() {
+            Expr::Variable { name } if is_class_type(name.lexeme()) => {
+                Some(Ty::Class(name.lexeme().to_string()))
+            }
+            Expr::Variable { name } if name.lexeme() == "alloc" => {
+                member_receiver_type(fn_ctx, arguments.first()?).map(|ty| Ty::Own(Box::new(ty)))
+            }
+            Expr::Variable { name } => function_declared_ret_ty(name.lexeme()),
+            Expr::Member { object, property } => {
+                let ty = member_receiver_type(fn_ctx, object)?;
+                class_method_ret_ty(member_receiver_class(&ty)?, property.lexeme())
+            }
+            _ => None,
+        },
+        Expr::Member { object, property } => {
+            let ty = member_receiver_type(fn_ctx, object)?;
+            let class = member_receiver_class(&ty)?;
+            let index = class_field_index(class, property.lexeme())?;
+            class_all_field_types(class).get(index).cloned()
+        }
+        Expr::StructLiteral { class_name, .. } => Some(Ty::Class(class_name.lexeme().to_string())),
+        _ => None,
+    }
+}
+
+fn member_receiver_class(ty: &Ty) -> Option<&str> {
+    match ty {
+        Ty::Class(name) => Some(name),
+        Ty::Own(inner) | Ty::Shared(inner) | Ty::View(inner, _) | Ty::Ref(inner, _) => {
+            member_receiver_class(inner)
+        }
+        _ => None,
+    }
+}
+
 // ── Pointers and references ─────────────────────────────────────────────
 
 /// Lower `operand?`: branch on the result cell's tag. The Err path converts
@@ -1153,7 +1220,17 @@ pub(crate) fn emit_copy<'ctx>(
     expression: &Expr,
 ) -> Result<TypedValue<'ctx>, crate::CodegenError> {
     let tv = emit_expression(fn_ctx, expression)?;
-    emit_copy_value(fn_ctx, tv)
+    // `copy` clones into an independent owned value, so when the source is a
+    // fresh temporary (e.g. `copy(strip_v(v))`) nothing else references the
+    // original after the clone: drop it here or it leaks. A borrowed view or
+    // a value owned by a live slot is not fresh, so `expr_is_fresh` leaves it
+    // untouched and its real owner still reclaims it.
+    let fresh = expr_is_fresh(fn_ctx, expression, &tv);
+    let copied = emit_copy_value(fn_ctx, tv.clone())?;
+    if fresh {
+        emit_drop_value(fn_ctx, &tv)?;
+    }
+    Ok(copied)
 }
 
 /// Deep-copy an already-computed value to an owned copy.
@@ -1173,7 +1250,13 @@ pub(crate) fn emit_copy_value<'ctx>(
             Ty::Array(inner.clone()),
             vec![array_nesting_depth(inner)],
         ),
-        Ty::View(inner, _) => return Ok(TypedValue::new(tv.value, (**inner).clone())),
+        // A view borrows its value: materialize an independent owned copy
+        // from the inner type. Simply retyping the borrowed handle as owned
+        // aliases the source, so the copy's drop would reclaim the original
+        // out from under its owner (use-after-free on later reads).
+        Ty::View(inner, _) => {
+            return emit_copy_value(fn_ctx, TypedValue::new(tv.value, (**inner).clone()));
+        }
         Ty::Pointer => ("ntsc_memory_clone", Ty::Pointer, Vec::new()),
 
         // `copy` materializes an owned value, so copying a window produces an

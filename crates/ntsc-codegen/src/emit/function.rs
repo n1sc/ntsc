@@ -40,6 +40,7 @@ pub(crate) fn emit_exception_return<'ctx>(
         let resume_bb = fn_ctx.builder.get_insert_block();
         fn_ctx.builder.position_at_end(exc_bb);
         emit_drop_all_owned(fn_ctx)?;
+        drop_return_escape_class_locals(fn_ctx)?;
         match ret_ty {
             Ty::Void => {
                 fn_ctx.builder.build_return(None)?;
@@ -80,6 +81,29 @@ pub(crate) fn emit_exception_return<'ctx>(
         }
         if let Some(resume_bb) = resume_bb {
             fn_ctx.builder.position_at_end(resume_bb);
+        }
+    }
+    Ok(())
+}
+
+/// Drop the class instances whose only escape is a `return`. These are absent
+/// from `owned_slots` because the normal path moves them to the caller, so
+/// [`emit_drop_all_owned`] never touches them; on the exception-return path
+/// the function returns a default instead, so their owned fields would leak.
+/// Each slot is null-initialized and the class drop thunk is null-safe, so a
+/// candidate not yet constructed when the throw occurred is dropped as a
+/// no-op.
+fn drop_return_escape_class_locals<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+) -> Result<(), crate::CodegenError> {
+    if fn_ctx.future_base.is_some() {
+        return Ok(());
+    }
+    let mut names: Vec<String> = fn_ctx.exception_class_drops.iter().cloned().collect();
+    names.sort();
+    for name in names {
+        if let Some((ptr, ty)) = fn_ctx.variables.get(&name).map(|(p, t)| (*p, t.clone())) {
+            emit_drop_slot_value(fn_ctx, ptr, &ty)?;
         }
     }
     Ok(())
@@ -142,7 +166,8 @@ pub(crate) fn emit_function<'ctx>(
         context,
     );
     fn_ctx.stack_allocated = analyze_stack_allocatable(body, module);
-    fn_ctx.class_drops = analyze_class_drops(body, module);
+    fn_ctx.class_drops = analyze_class_drops(body, module, params);
+    fn_ctx.exception_class_drops = analyze_return_escape_class_drops(body, module, params);
 
     // Owned parameters (arrays/strings, not `view`) own the value passed
     // by the caller and must drop it at exit.
@@ -166,6 +191,7 @@ pub(crate) fn emit_function<'ctx>(
     let current_block = fn_ctx.builder.get_insert_block().unwrap();
     // Auto-insert the return if the body fell off the end.
     if current_block.get_terminator().is_none() {
+        drop_return_escape_class_locals(&mut fn_ctx)?;
         emit_drop_all_owned(&mut fn_ctx)?;
         match &ret_ty {
             Ty::Void => {

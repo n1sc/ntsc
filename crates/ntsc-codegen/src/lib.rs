@@ -245,18 +245,49 @@ pub fn link_binary(
     runtime_lib: &Path,
     output_path: &Path,
 ) -> Result<(), CodegenError> {
+    link_binary_with_extras(obj_path, runtime_lib, &[], &[], output_path)
+}
+
+/// Link an emitted object file with the runtime library plus additional
+/// static archives (e.g. compiled Rust-crate adaptors from `ntsc-cargo`)
+/// into an executable.
+pub fn link_binary_with_extras(
+    obj_path: &Path,
+    runtime_lib: &Path,
+    extra_archives: &[PathBuf],
+    native_link_args: &[String],
+    output_path: &Path,
+) -> Result<(), CodegenError> {
     #[cfg(target_os = "windows")]
     {
-        link_windows(obj_path, runtime_lib, output_path)
+        link_windows(
+            obj_path,
+            runtime_lib,
+            extra_archives,
+            native_link_args,
+            output_path,
+        )
     }
     #[cfg(not(target_os = "windows"))]
     {
-        link_unix(obj_path, runtime_lib, output_path)
+        link_unix(
+            obj_path,
+            runtime_lib,
+            extra_archives,
+            native_link_args,
+            output_path,
+        )
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn link_unix(obj_path: &Path, runtime_lib: &Path, output_path: &Path) -> Result<(), CodegenError> {
+fn link_unix(
+    obj_path: &Path,
+    runtime_lib: &Path,
+    extra_archives: &[PathBuf],
+    native_link_args: &[String],
+    output_path: &Path,
+) -> Result<(), CodegenError> {
     // Pick the fastest available linker. The runtime archive statically
     // bundles the whole stdlib (net/TLS, regex, archive, ...), so linking
     // against it is the dominant cost of building a program; a fast linker
@@ -273,7 +304,14 @@ fn link_unix(obj_path: &Path, runtime_lib: &Path, output_path: &Path) -> Result<
         .arg("-o")
         .arg(output_path)
         .arg(obj_path)
-        .arg(runtime_lib)
+        .arg(runtime_lib);
+    for archive in extra_archives {
+        command.arg(archive);
+    }
+    for arg in native_link_args {
+        command.arg(arg);
+    }
+    command
         .arg("-lm")
         // Strip the produced binary: the runtime archive carries the full
         // stdlib, so an unstripped executable balloons into tens of megabytes
@@ -347,10 +385,18 @@ fn command_available(program: &str) -> bool {
 fn link_windows(
     obj_path: &Path,
     runtime_lib: &Path,
+    extra_archives: &[PathBuf],
+    native_link_args: &[String],
     output_path: &Path,
 ) -> Result<(), CodegenError> {
     match windows_linker() {
-        Some(WindowsLinker::BundledLld) => link_with_lld(obj_path, runtime_lib, output_path),
+        Some(WindowsLinker::BundledLld) => link_with_lld(
+            obj_path,
+            runtime_lib,
+            extra_archives,
+            native_link_args,
+            output_path,
+        ),
         Some(WindowsLinker::Msvc) => {
             let mut command = std::process::Command::new("link.exe");
             command
@@ -360,6 +406,12 @@ fn link_windows(
                 .arg(format!("/OUT:{}", output_path.display()))
                 .arg(obj_path)
                 .arg(runtime_lib);
+            for archive in extra_archives {
+                command.arg(archive);
+            }
+            for arg in native_link_args {
+                command.arg(arg);
+            }
             const LIBS: &[&str] = &[
                 "advapi32",
                 "shell32",
@@ -402,8 +454,14 @@ fn link_windows(
                 .arg("-o")
                 .arg(output_path)
                 .arg(obj_path)
-                .arg(runtime_lib)
-                .arg("-lpthread");
+                .arg(runtime_lib);
+            for archive in extra_archives {
+                command.arg(archive);
+            }
+            for arg in native_link_args {
+                command.arg(arg);
+            }
+            command.arg("-lpthread");
             run_linker(&mut command)
         }
         None => Err(CodegenError::LinkError(
@@ -418,6 +476,8 @@ fn link_windows(
 fn link_with_lld(
     obj_path: &Path,
     runtime_lib: &Path,
+    extra_archives: &[PathBuf],
+    native_link_args: &[String],
     output_path: &Path,
 ) -> Result<(), CodegenError> {
     // `ld.lld`'s MinGW emulation does not add the CRT startup object or
@@ -439,7 +499,14 @@ fn link_with_lld(
         .arg(output_path)
         .arg(bin_dir.join("mingw").join("crt2.o"))
         .arg(obj_path)
-        .arg(runtime_lib)
+        .arg(runtime_lib);
+    for archive in extra_archives {
+        command.arg(archive);
+    }
+    for arg in native_link_args {
+        command.arg(arg);
+    }
+    command
         .arg("-L")
         .arg(bin_dir.join("mingw"))
         .arg("--start-group");

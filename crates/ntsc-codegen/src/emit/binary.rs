@@ -8,6 +8,12 @@ pub(crate) fn emit_binary<'ctx>(
     op: &ntsc_ast::token::Token,
     right: &Expr,
 ) -> Result<TypedValue<'ctx>, crate::CodegenError> {
+    // `&&` and `||` decide on the left operand alone, so the right one is
+    // emitted in a separate block instead of unconditionally.
+    if let Some(result) = emit_short_circuit(fn_ctx, op, left, right)? {
+        return Ok(result);
+    }
+
     let lhs = {
         let lhs_val = emit_expression(fn_ctx, left)?;
         peel_view(normalize_self(fn_ctx, lhs_val)?)
@@ -502,6 +508,90 @@ pub(crate) fn emit_binary<'ctx>(
             op.kind, op_ty
         ))),
     }
+}
+
+/// Emit `&&` and `||` with short-circuit evaluation.
+///
+/// The right operand is emitted in its own basic block, reached only when the
+/// left operand does not already decide the result, so a bounds check, a
+/// division, or a call guarded by the left operand never runs when it must
+/// not. Both operands use the same truthiness rule an `if` condition does.
+///
+/// Returns `None` for every other operator so the caller falls through to
+/// the ordinary two-operand path.
+fn emit_short_circuit<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    op: &ntsc_ast::token::Token,
+    left: &Expr,
+    right: &Expr,
+) -> Result<Option<TypedValue<'ctx>>, crate::CodegenError> {
+    let is_and = match op.kind {
+        TokenKind::AndSym => true,
+        TokenKind::OrSym => false,
+        _ => return Ok(None),
+    };
+
+    let lhs_raw = emit_expression(fn_ctx, left)?;
+    let lhs_norm = normalize_self(fn_ctx, lhs_raw)?;
+    let lhs = bool_to_i1(fn_ctx, peel_view(lhs_norm));
+
+    let current_fn = fn_ctx.function;
+    let ctx = fn_ctx.context;
+    let bool_ty = ctx.bool_type();
+    let entry_bb = fn_ctx
+        .builder
+        .get_insert_block()
+        .ok_or_else(|| crate::CodegenError::LLVMError("no insert block for && / ||".into()))?;
+    let rhs_bb = ctx.append_basic_block(current_fn, if is_and { "and.rhs" } else { "or.rhs" });
+    let merge_bb =
+        ctx.append_basic_block(current_fn, if is_and { "and.merge" } else { "or.merge" });
+
+    // `&&`: a false left operand decides the result, so the right one runs
+    // only on the true edge. `||` is the mirror image.
+    let decided_bb = if is_and {
+        None
+    } else {
+        let bb = ctx.append_basic_block(current_fn, "or.decided");
+        fn_ctx.builder.build_conditional_branch(lhs, bb, rhs_bb)?;
+        fn_ctx.builder.position_at_end(bb);
+        fn_ctx.builder.build_unconditional_branch(merge_bb)?;
+        Some(bb)
+    };
+    if is_and {
+        fn_ctx
+            .builder
+            .build_conditional_branch(lhs, rhs_bb, merge_bb)?;
+    }
+
+    fn_ctx.builder.position_at_end(rhs_bb);
+    let rhs_raw = emit_expression(fn_ctx, right)?;
+    let rhs_norm = normalize_self(fn_ctx, rhs_raw)?;
+    let rhs = bool_to_i1(fn_ctx, peel_view(rhs_norm));
+    // Emitting the operand can itself split blocks (an exception check, a
+    // temporary's teardown), so the edge into the merge leaves from wherever
+    // emission actually ended rather than from `rhs_bb`.
+    let rhs_end = fn_ctx.builder.get_insert_block().ok_or_else(|| {
+        crate::CodegenError::LLVMError("empty block after && / || operand".into())
+    })?;
+    if rhs_end.get_terminator().is_none() {
+        fn_ctx.builder.build_unconditional_branch(merge_bb)?;
+    }
+
+    fn_ctx.builder.position_at_end(merge_bb);
+    let result = fn_ctx
+        .builder
+        .build_phi(bool_ty, if is_and { "and_result" } else { "or_result" })?;
+    match decided_bb {
+        Some(decided) => {
+            let short_circuit = bool_ty.const_int(1, false);
+            result.add_incoming(&[(&short_circuit, decided), (&rhs, rhs_end)]);
+        }
+        None => {
+            let long_circuit = bool_ty.const_int(0, false);
+            result.add_incoming(&[(&long_circuit, entry_bb), (&rhs, rhs_end)]);
+        }
+    }
+    Ok(Some(TypedValue::new(result.as_basic_value(), Ty::Bool)))
 }
 
 /// Try to emit a binary operator as a method call on a class type.

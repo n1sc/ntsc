@@ -26,6 +26,11 @@ pub(crate) fn emit_say_call<'ctx>(
     if expr_is_fresh(fn_ctx, arg, &arg_val) {
         emit_drop_value(fn_ctx, &arg_val)?;
     }
+    // A converted scalar (`say(some_bool)`) produced a fresh string that
+    // nothing else owns.
+    if arg_val.ntsc_type != Ty::String {
+        emit_drop_value(fn_ctx, &string_val)?;
+    }
 
     Ok(())
 }
@@ -438,6 +443,8 @@ pub(crate) fn coerce_value_to_llvm<'ctx>(
                     "int_to_bool",
                 )?;
                 Ok(is_nonzero.into())
+            } else if dst_width < src_width {
+                Ok(builder.build_int_truncate(int, *t, "trunc")?.into())
             } else {
                 let widened = builder.build_int_z_extend(int, *t, "zext")?;
                 Ok(widened.into())
@@ -455,6 +462,25 @@ pub(crate) fn coerce_value_to_llvm<'ctx>(
             };
             let f = builder.build_signed_int_to_float(int_val, ctx.f64_type(), "int_to_float")?;
             Ok(f.into())
+        }
+        // A `float` reaching an integer slot is converted rather than
+        // emitted as-is: the type checker types a stdlib call like
+        // `time.now()` loosely enough that a float can reach an `int`
+        // parameter, and passing the raw double would produce a module that
+        // fails to verify. The value saturates and NaN becomes 0, matching
+        // the documented conversion rule.
+        BasicMetadataTypeEnum::IntType(t) if val.value.is_float_value() => {
+            let float = val.value.into_float_value();
+            let converted = builder.build_float_to_signed_int(float, *t, "float_to_int")?;
+            let unordered = builder.build_float_compare(
+                inkwell::FloatPredicate::UNO,
+                float,
+                float,
+                "float_is_nan",
+            )?;
+            let settled =
+                builder.build_select(unordered, t.const_zero(), converted, "float_to_int_nan")?;
+            Ok(settled.into())
         }
         _ => Ok(val.value.into()),
     }
@@ -479,27 +505,29 @@ pub(crate) fn bool_to_i1<'ctx>(
     match &val.ntsc_type {
         Ty::Bool => val.value.into_int_value(),
         _ => {
-            let zero = fn_ctx.context.bool_type().const_zero();
+            // The zero must match the *value's* width, not the Neutron type.
+            // A Rust bridge returns `option[T]` as a cell handle, which is an
+            // i64 like every other handle: comparing one against a `bool`
+            // zero emitted an icmp with mismatched operand types and the
+            // module failed to verify.
             if val.value.is_int_value() {
+                let int = val.value.into_int_value();
+                let zero = int.get_type().const_zero();
                 fn_ctx
                     .builder
-                    .build_int_compare(
-                        IntPredicate::NE,
-                        val.value.into_int_value(),
-                        zero,
-                        "bool_conv",
-                    )
+                    .build_int_compare(IntPredicate::NE, int, zero, "bool_conv")
                     .unwrap_or(zero)
             } else if val.value.is_pointer_value() {
                 let ptr = val.value.into_pointer_value();
+                let false_val = fn_ctx.context.bool_type().const_zero();
                 let is_null = fn_ctx
                     .builder
                     .build_is_null(ptr, "bool_conv")
-                    .unwrap_or(zero);
+                    .unwrap_or(false_val);
                 fn_ctx
                     .builder
                     .build_not(is_null, "bool_not_null")
-                    .unwrap_or(zero)
+                    .unwrap_or(false_val)
             } else if val.value.is_float_value() {
                 fn_ctx
                     .builder

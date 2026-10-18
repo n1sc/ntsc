@@ -2,6 +2,18 @@
 
 use super::*;
 
+fn extern_declarations(program: &Program) -> Vec<&Stmt> {
+    let mut declarations = Vec::new();
+    for statement in &program.statements {
+        match statement {
+            Stmt::ExternFunction { .. } => declarations.push(statement),
+            Stmt::ExternBlock { functions, .. } => declarations.extend(functions),
+            _ => {}
+        }
+    }
+    declarations
+}
+
 /// Emit LLVM IR for a parsed program and write it to an object file.
 ///
 /// `optimize` runs the IR optimization pipeline (mem2reg, instcombine, ...)
@@ -36,6 +48,7 @@ pub fn emit_module(
             if let ntsc_ast::stmt::Stmt::Use {
                 library,
                 is_file_path: false,
+                is_rust: false,
                 alias: Some(alias),
                 ..
             } = stmt
@@ -43,6 +56,64 @@ pub fn emit_module(
                 m.insert(alias.lexeme().to_string(), library.lexeme().to_string());
             }
         }
+    });
+
+    RUST_CRATE_NAMESPACES.with(|map| {
+        let mut m = map.borrow_mut();
+        m.clear();
+        // Rust crates bind only through the explicit `use @crate` form —
+        // the strict convention separating dependency namespaces from
+        // stdlib module imports.
+        for stmt in &program.statements {
+            if let ntsc_ast::stmt::Stmt::Use {
+                library,
+                is_file_path: false,
+                is_rust: true,
+                alias,
+                imported_symbols,
+                ..
+            } = stmt
+                && imported_symbols.is_empty()
+            {
+                let crate_name = library.lexeme().to_string();
+                let namespace = alias
+                    .as_ref()
+                    .map(|a| a.lexeme().to_string())
+                    .unwrap_or_else(|| crate_name.clone());
+                m.insert(namespace, crate_name);
+            }
+        }
+    });
+
+    RUST_SELECTIVE_IMPORTS.with(|map| {
+        let mut m = map.borrow_mut();
+        m.clear();
+        for stmt in &program.statements {
+            if let ntsc_ast::stmt::Stmt::Use {
+                library,
+                imported_symbols,
+                imported_is_rust,
+                ..
+            } = stmt
+                && !imported_symbols.is_empty()
+            {
+                for (symbol, is_rust) in imported_symbols.iter().zip(imported_is_rust.iter()) {
+                    if *is_rust {
+                        m.insert(symbol.lexeme().to_string(), library.lexeme().to_string());
+                    }
+                }
+            }
+        }
+    });
+
+    let externs = extern_declarations(program);
+    FFI_FUNCTIONS.with(|functions| {
+        let mut functions = functions.borrow_mut();
+        functions.clear();
+        functions.extend(externs.iter().filter_map(|statement| match statement {
+            Stmt::ExternFunction { name, .. } => Some(name.lexeme().to_string()),
+            _ => None,
+        }));
     });
 
     let module = context.create_module("ntsc_main");
@@ -221,6 +292,14 @@ pub fn emit_module(
                 m.insert(name.lexeme().to_string(), function_return_ty(return_type));
             }
         }
+        for stmt in &externs {
+            if let Stmt::ExternFunction {
+                name, return_type, ..
+            } = stmt
+            {
+                m.insert(name.lexeme().to_string(), function_return_ty(return_type));
+            }
+        }
     });
 
     FUNCTION_PARAM_TYPES.with(|map| {
@@ -235,7 +314,22 @@ pub fn emit_module(
                 m.insert(name.lexeme().to_string(), param_tys);
             }
         }
+        for stmt in &externs {
+            if let Stmt::ExternFunction { name, params, .. } = stmt {
+                let param_tys = params
+                    .iter()
+                    .map(|param| type_annotation_to_ty(&param.type_annotation))
+                    .collect();
+                m.insert(name.lexeme().to_string(), param_tys);
+            }
+        }
     });
+
+    // Which free functions hand a fresh Rust object back to their caller, so
+    // a call site tracks and releases the handle instead of leaking it (the
+    // manifest and crate namespaces above are already loaded, which this
+    // classification consults).
+    super::set_user_object_returns(super::call::compute_user_object_returns(program));
 
     // Declare runtime functions.
     declare_runtime_functions(&module);
@@ -266,6 +360,27 @@ pub fn emit_module(
             }
             let (fn_ty, _param_tys) = fn_type_from_params(context, params, return_type);
             module.add_function(fn_name, fn_ty, Some(inkwell::module::Linkage::External));
+        }
+    }
+
+    for statement in externs {
+        let Stmt::ExternFunction {
+            name,
+            params,
+            return_type,
+            c_style,
+            ..
+        } = statement
+        else {
+            continue;
+        };
+        if module.get_function(name.lexeme()).is_none() {
+            let fn_ty = ffi_function_type(context, params, return_type, *c_style);
+            module.add_function(
+                name.lexeme(),
+                fn_ty,
+                Some(inkwell::module::Linkage::External),
+            );
         }
     }
 
@@ -540,7 +655,7 @@ pub(crate) fn emit_test_function<'ctx>(
         context,
     );
     fn_ctx.stack_allocated = analyze_stack_allocatable(body, module);
-    fn_ctx.class_drops = analyze_class_drops(body, module);
+    fn_ctx.class_drops = analyze_class_drops(body, module, &[]);
 
     for stmt in body {
         emit_statement_in_function(&mut fn_ctx, stmt)?;

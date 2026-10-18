@@ -12,6 +12,16 @@ pub(crate) fn emit_statement_in_function<'ctx>(
     {
         return Ok(());
     }
+    if fn_ctx.async_layout.is_some() {
+        if super::async_sm::is_async_suspension_stmt(stmt) {
+            return super::async_sm::emit_async_suspend_statement(fn_ctx, stmt);
+        }
+        if matches!(stmt, Stmt::Return { .. })
+            && let Some(layout) = fn_ctx.async_layout
+        {
+            return super::async_sm::emit_async_return_statement(fn_ctx, layout, stmt);
+        }
+    }
     if let Stmt::Go { .. } = stmt {
         return super::async_sm::emit_go_program_spawn(fn_ctx, stmt);
     }
@@ -25,6 +35,12 @@ pub(crate) fn emit_statement_in_function<'ctx>(
             if expr_is_fresh(fn_ctx, expression, &val) {
                 emit_drop_value(fn_ctx, &val)?;
             }
+            // A fresh Rust object call in statement position has no owner
+            // either: release it (a no-op if a takes-bridge consumed it).
+            if let Some((crate_name, _)) = super::call::fresh_object_call(expression) {
+                let handle = super::call::coerce_to_i64(fn_ctx, val.value)?;
+                super::emit_object_release(fn_ctx, &crate_name, handle)?;
+            }
         }
         Stmt::Return { value } => {
             if fn_ctx.return_type == Ty::Void {
@@ -34,6 +50,11 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                     let val = emit_expression(fn_ctx, expr)?;
                     if expr_is_owned(fn_ctx, expr, &val) {
                         emit_drop_value(fn_ctx, &val)?;
+                    }
+                    // A discarded fresh object has no owner either.
+                    if let Some((crate_name, _)) = super::call::fresh_object_call(expr) {
+                        let handle = super::call::coerce_to_i64(fn_ctx, val.value)?;
+                        super::emit_object_release(fn_ctx, &crate_name, handle)?;
                     }
                 }
                 emit_drop_all_owned(fn_ctx)?;
@@ -123,13 +144,38 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                     converted
                 };
 
-                // The returned value is moved out of its slot: null it so
-                // the exit-time drop does not free it twice. Shared slots
+                // The returned value is moved out of its slot(s): null them so
+                // the exit-time drop does not free them twice. Shared slots
                 // are never nulled — their reference was handed to the
                 // caller by the retain above, and the slot still releases
-                // its own at exit.
-                if let Expr::Variable { name } = expr {
-                    fn_ctx.null_var_slot(name.lexeme());
+                // its own at exit. A bare variable is the common case, but a
+                // tuple or any expression that embeds locals moves each of
+                // them the same way; anything under `copy(...)` keeps its
+                // own reference and is left alone.
+                match expr {
+                    Expr::Variable { name } => {
+                        fn_ctx.null_var_slot(name.lexeme());
+                        // The handle moves to the caller, so the callee must not
+                        // release it at exit. When this function is one the
+                        // pre-pass recorded as object-returning, the caller
+                        // tracks and releases it (see `USER_OBJECT_RETURNS` and
+                        // `call::compute_user_object_returns`); otherwise the
+                        // handle leaks rather than dangling.
+                        super::set_rust_object_var(name.lexeme(), None);
+                        let returned = [name.lexeme().to_string()];
+                        super::drop::drop_unreturned_escape_class_locals(fn_ctx, &returned)?;
+                    }
+                    other => {
+                        let mut moved = Vec::new();
+                        super::drop::moved_locals_in(other, &mut moved);
+                        for name in &moved {
+                            if fn_ctx.owned_slots.contains(name.as_str()) {
+                                fn_ctx.null_var_slot(name);
+                            }
+                            super::set_rust_object_var(name, None);
+                        }
+                        super::drop::drop_unreturned_escape_class_locals(fn_ctx, &moved)?;
+                    }
                 }
                 emit_drop_all_owned(fn_ctx)?;
                 fn_ctx.builder.build_return(Some(&converted.value))?;
@@ -213,6 +259,7 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                     init_val.ntsc_type.clone()
                 };
                 let ptr = fn_ctx.alloca(name.lexeme(), &inferred)?;
+                super::adopt_object_assignment(fn_ctx, name.lexeme(), init_expr)?;
 
                 if matches!(&inferred, Ty::View(..)) {
                     // Views are non-owning borrows: store the raw value
@@ -242,8 +289,7 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                             | Ty::Shared(_)
                             | Ty::Option(_)
                             | Ty::Dyn(_)
-                    ) && fn_ctx.future_base.is_none()
-                    {
+                    ) {
                         emit_drop_replaced_value(fn_ctx, ptr, &inferred, &init_val)?;
                     }
 
@@ -255,7 +301,8 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                     // null pointer the slot starts out holding.
                     if matches!(inferred, Ty::Class(_))
                         && (fn_ctx.class_drops.contains(name.lexeme())
-                            || expr_is_fresh(fn_ctx, init_expr, &init_val))
+                            || (fn_ctx.future_base.is_some()
+                                && expr_is_fresh(fn_ctx, init_expr, &init_val)))
                     {
                         emit_drop_slot_value(fn_ctx, ptr, &inferred)?;
                     }
@@ -265,12 +312,24 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                     // Owned-store semantics: transfer owned values,
                     // heap-copy string literals, move bare-variable sources.
                     let owned = store_into_owned_slot(fn_ctx, ptr, &inferred, init_expr, &coerced)?;
+                    // Registry ids are the only values `ntsc_leak_mark` can
+                    // attribute: the leak report resolves sites by registry
+                    // handle. Malloc'd cells (own boxes, option/result/dyn
+                    // headers) are freed directly and never surface as
+                    // registry entries, so they must not be marked.
                     if owned
                         && matches!(
                             inferred,
-                            Ty::Array(_) | Ty::String | Ty::Object | Ty::Shared(_)
+                            Ty::Array(_)
+                                | Ty::String
+                                | Ty::Object
+                                | Ty::Shared(_)
+                                | Ty::Pointer
+                                | Ty::Slice(_)
                         )
                         && let Some(mark_fn) = fn_ctx.module.get_function("ntsc_leak_mark")
+                        && let Some(mark_value) =
+                            crate::emit::drop::int_like_leak_value(fn_ctx, &coerced)
                     {
                         let line = fn_ctx
                             .context
@@ -282,11 +341,7 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                             .const_int(u64::from(name.span.column), false);
                         fn_ctx.builder.build_call(
                             mark_fn,
-                            &[
-                                coerced.value.into_int_value().into(),
-                                line.into(),
-                                column.into(),
-                            ],
+                            &[mark_value.into(), line.into(), column.into()],
                             "leak_mark",
                         )?;
                     }
@@ -300,6 +355,24 @@ pub(crate) fn emit_statement_in_function<'ctx>(
             {
                 fn_ctx.mark_owned_if_heap(name.lexeme(), &ty);
             }
+            let tuple_owned = if view.is_none() && matches!(ty, Ty::Tuple(_)) {
+                match initializer {
+                    Some(Expr::Variable { name: source }) => fn_ctx
+                        .tuple_class_elements
+                        .remove(source.lexeme())
+                        .unwrap_or_default(),
+                    Some(expr) => owned_class_elements_in_tuple(expr, &ty),
+                    None => HashSet::new(),
+                }
+            } else {
+                HashSet::new()
+            };
+            fn_ctx.tuple_class_elements.remove(name.lexeme());
+            if !tuple_owned.is_empty() {
+                fn_ctx
+                    .tuple_class_elements
+                    .insert(name.lexeme().to_string(), tuple_owned);
+            }
             fn_ctx.define_var(name.lexeme(), ptr, ty);
         }
         Stmt::Block { statements, .. } => {
@@ -307,7 +380,8 @@ pub(crate) fn emit_statement_in_function<'ctx>(
             for s in statements {
                 emit_statement_in_function(fn_ctx, s)?;
             }
-            fn_ctx.end_block_scope(outer);
+            super::release_block_objects(fn_ctx, &outer)?;
+            fn_ctx.end_block_scope(outer)?;
         }
         Stmt::If {
             condition,
@@ -439,6 +513,8 @@ pub(crate) fn emit_statement_in_function<'ctx>(
         | Stmt::Use { .. }
         | Stmt::Function { .. }
         | Stmt::AsyncFunction { .. }
+        | Stmt::ExternFunction { .. }
+        | Stmt::ExternBlock { .. }
         | Stmt::Class { .. }
         | Stmt::Test { .. }
         | Stmt::Trait { .. }

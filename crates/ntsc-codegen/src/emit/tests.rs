@@ -336,3 +336,49 @@ fn escape_analysis_rejects_object_in_say() {
         parse_main_with_point("fun main() {\n    var p = Point();\n    say(p);\n}");
     assert!(!stack_allocated(&body, &module).contains("p"));
 }
+
+#[test]
+fn rust_array_labels_lower_to_typed_arrays() {
+    use ntsc_typeck::Ty;
+    let array_string = Ty::Array(Box::new(Ty::String));
+    assert_eq!(
+        super::rust_array_elem_ty("array[string]"),
+        Some(array_string.clone())
+    );
+    assert_eq!(
+        super::rust_array_elem_ty("option[array[int]]"),
+        Some(Ty::Array(Box::new(Ty::Int)))
+    );
+    assert_eq!(
+        super::rust_array_elem_ty("result[array[bool]]"),
+        Some(Ty::Array(Box::new(Ty::Bool)))
+    );
+    assert_eq!(
+        super::rust_array_elem_ty("array[float]"),
+        Some(Ty::Array(Box::new(Ty::Float)))
+    );
+    assert_eq!(super::rust_array_elem_ty("array[bytes]"), None);
+    assert_eq!(super::rust_array_elem_ty("string"), None);
+    assert_eq!(super::rust_array_elem_ty("object[Foo]"), None);
+}
+
+/// A package may be hyphenated (`mewsic-tui`) while the Neutron module that
+/// imports it is `use @mewsic_tui`. The manifest tables must key both
+/// spellings identically, or a lookup misses and the call silently falls
+/// back to the handle assumption.
+#[test]
+fn crate_names_normalize_hyphens_to_one_key() {
+    use crate::emit::{normalized_crate_name, table_key_for_test};
+
+    assert_eq!(normalized_crate_name("mewsic-tui"), "mewsic_tui");
+    assert_eq!(normalized_crate_name("mewsic_tui"), "mewsic_tui");
+    assert_eq!(normalized_crate_name("jptomew"), "jptomew");
+    assert_eq!(
+        table_key_for_test("mewsic-tui", "Tui_new"),
+        table_key_for_test("mewsic_tui", "Tui_new")
+    );
+    assert_eq!(
+        table_key_for_test("keyring", "Entry_new"),
+        ("keyring".to_string(), "Entry_new".to_string())
+    );
+}

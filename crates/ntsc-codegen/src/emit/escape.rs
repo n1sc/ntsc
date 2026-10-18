@@ -150,6 +150,8 @@ pub(crate) fn stmt_mentions_var(stmt: &Stmt, var: &str) -> bool {
         | Stmt::Continue { .. }
         | Stmt::Function { .. }
         | Stmt::AsyncFunction { .. }
+        | Stmt::ExternFunction { .. }
+        | Stmt::ExternBlock { .. }
         | Stmt::Class { .. }
         | Stmt::Use { .. }
         | Stmt::Enum { .. }
@@ -249,16 +251,182 @@ pub(crate) fn stmt_mentions_var(stmt: &Stmt, var: &str) -> bool {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EscapeKind {
+#[derive(Clone, Copy)]
+pub(crate) enum EscapeKind<'a> {
     StackSlot,
 
-    FieldDrop,
+    FieldDrop(&'a HashMap<String, String>),
+}
+
+/// Resolve only unambiguous local receiver types; shadowed names retain the
+/// conservative escape behavior instead of borrowing another class's signature.
+fn local_class_types(
+    body: &[Stmt],
+    params: &[ntsc_ast::expr::FunctionParam],
+) -> HashMap<String, String> {
+    let mut classes = HashMap::new();
+    let mut seen: HashSet<String> = params.iter().map(|p| p.name.lexeme().to_string()).collect();
+    let mut shadowed = HashSet::new();
+    super::call::walk_stmts(body, &mut |stmt| {
+        let mut record = |name: &ntsc_ast::token::Token| {
+            if !seen.insert(name.lexeme().to_string()) {
+                shadowed.insert(name.lexeme().to_string());
+            }
+        };
+        match stmt {
+            Stmt::Var { name, .. } => record(name),
+            Stmt::ForIn { variable, .. }
+            | Stmt::ForAwait { variable, .. }
+            | Stmt::ChanRecvFor { variable, .. } => record(variable),
+            Stmt::Destructure { names, .. } => names.iter().for_each(record),
+            Stmt::Try { catch_var, .. } | Stmt::Retry { catch_var, .. } => {
+                if let Some(name) = catch_var {
+                    record(name);
+                }
+            }
+            Stmt::Match { cases, .. } => {
+                for case in cases {
+                    if let Some(name) = case.pattern.as_ref().and_then(|p| p.binding.as_ref()) {
+                        record(name);
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+    for param in params {
+        if !shadowed.contains(param.name.lexeme())
+            && let Some(class) = class_name_from_type(type_annotation_to_ty(&param.type_annotation))
+        {
+            classes.insert(param.name.lexeme().to_string(), class);
+        }
+    }
+    super::call::walk_stmts(body, &mut |stmt| {
+        if let Stmt::Var {
+            name,
+            type_annotation,
+            initializer,
+            ..
+        } = stmt
+            && !shadowed.contains(name.lexeme())
+        {
+            let class =
+                class_name_from_type(type_annotation_to_ty(type_annotation)).or_else(|| {
+                    initializer
+                        .as_ref()
+                        .and_then(|expr| expression_class(expr, &classes))
+                });
+            if let Some(class) = class {
+                classes.insert(name.lexeme().to_string(), class);
+            }
+        }
+    });
+    classes
+}
+
+fn class_name_from_type(ty: Ty) -> Option<String> {
+    match ty {
+        Ty::Class(class) => Some(class),
+        Ty::View(inner, _) | Ty::Shared(inner) => class_name_from_type(*inner),
+        _ => None,
+    }
+}
+
+fn expression_class(expr: &Expr, classes: &HashMap<String, String>) -> Option<String> {
+    match expr {
+        Expr::Variable { name } => classes.get(name.lexeme()).cloned(),
+        Expr::Copy { expression, .. } | Expr::Grouping { expression, .. } => {
+            expression_class(expression, classes)
+        }
+        Expr::StructLiteral { class_name, .. } => Some(class_name.lexeme().to_string()),
+        Expr::Call { callee, .. } => {
+            let ty = match callee.as_ref() {
+                Expr::Variable { name } if is_class_type(name.lexeme()) => {
+                    return Some(name.lexeme().to_string());
+                }
+                Expr::Variable { name } => function_declared_ret_ty(name.lexeme()),
+                Expr::Member { object, property } => {
+                    let class = expression_class(object, classes)?;
+                    class_method_ret_ty(&class, property.lexeme())
+                }
+                _ => None,
+            };
+            match ty {
+                Some(Ty::Class(class)) => Some(class),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn callee_param_types(callee: &Expr, kind: EscapeKind<'_>) -> Vec<Ty> {
+    match callee {
+        Expr::Variable { name } => function_declared_param_types(name.lexeme()),
+        Expr::Member { object, property } => {
+            if let EscapeKind::FieldDrop(classes) = kind
+                && let Some(class) = expression_class(object, classes)
+            {
+                class_method_declared_param_types(&class, property.lexeme())
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Whether argument `arg` at position `index` passes `var` by value into a
+/// `view` parameter, i.e. a borrow. A borrow transfers no ownership, so the
+/// caller stays the sole owner and must still drop the instance's fields;
+/// treating it as an escape leaked them. Only applies to field-drop analysis:
+/// a stack slot still cannot hand its address to a callee.
+fn arg_is_view_borrow(
+    arg: &Expr,
+    var: &str,
+    index: usize,
+    param_types: &[Ty],
+    kind: EscapeKind<'_>,
+) -> bool {
+    matches!(kind, EscapeKind::FieldDrop(_))
+        && matches!(arg, Expr::Variable { name } if name.lexeme() == var)
+        && matches!(param_types.get(index), Some(Ty::View(..)))
+}
+
+/// Whether a reassignment's right-hand side produces a fresh, unaliased
+/// class instance — the only shape that keeps a reassigned class local a
+/// valid field-drop candidate. It mirrors the initializer shapes
+/// [`collect_class_drop_candidates`] admits at declaration: a constructor
+/// call `ClassName(...)`, a `copy(...)`, a struct literal, or a call to a
+/// free function whose declared return type is a class (the callee moves a
+/// freshly owned instance to us). Anything else (a bare variable, a field
+/// read, a method call) could alias another owner and is rejected, so the
+/// slot keeps its conservative no-drop treatment.
+fn reassign_rhs_is_fresh_class(value: &Expr) -> bool {
+    match value {
+        Expr::Grouping { expression, .. } => reassign_rhs_is_fresh_class(expression),
+        Expr::Member { object, .. } => reassign_rhs_is_fresh_class(object),
+        Expr::Copy { .. } => true,
+        Expr::StructLiteral { class_name, .. } => is_class_type(class_name.lexeme()),
+        Expr::Call { callee, .. } => match callee.as_ref() {
+            Expr::Variable { name } => {
+                is_class_type(name.lexeme())
+                    || matches!(function_declared_ret_ty(name.lexeme()), Some(Ty::Class(_)))
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Returns `false` if `expr` uses `var` in a position that could let the
 /// object's address escape the function or alias the instance.
-pub(crate) fn expr_uses_var_safely(expr: &Expr, var: &str, ctx: ExprCtx, kind: EscapeKind) -> bool {
+pub(crate) fn expr_uses_var_safely(
+    expr: &Expr,
+    var: &str,
+    ctx: ExprCtx,
+    kind: EscapeKind<'_>,
+) -> bool {
     // Expressions that never reference `var` cannot leak it; skip the
     // context-sensitive rules for unrelated subtrees.
     if !expr_mentions_var(expr, var) {
@@ -280,13 +448,13 @@ pub(crate) fn expr_uses_var_safely(expr: &Expr, var: &str, ctx: ExprCtx, kind: E
         // nothing else owns.
         Expr::Member { object, .. } | Expr::OptionalMember { object, .. } => {
             expr_uses_var_safely(object, var, ExprCtx::Base, kind)
-                && (ctx == ExprCtx::Data || kind == EscapeKind::FieldDrop)
+                && (ctx == ExprCtx::Data || matches!(kind, EscapeKind::FieldDrop(_)))
         }
         // `var[i]` — safe, unless chained further (see `Member`).
         Expr::IndexGet { object, index } => {
             expr_uses_var_safely(object, var, ExprCtx::Base, kind)
                 && expr_uses_var_safely(index, var, ExprCtx::Data, kind)
-                && (ctx == ExprCtx::Data || kind == EscapeKind::FieldDrop)
+                && (ctx == ExprCtx::Data || matches!(kind, EscapeKind::FieldDrop(_)))
         }
         // `var[i] = v` and `var.field = v` write a slot; they never leak
         // the address.
@@ -316,10 +484,15 @@ pub(crate) fn expr_uses_var_safely(expr: &Expr, var: &str, ctx: ExprCtx, kind: E
                     .iter()
                     .all(|a| expr_uses_var_safely(a, var, ExprCtx::Data, kind));
             }
+            let param_types = callee_param_types(callee, kind);
             expr_uses_var_safely(callee, var, ExprCtx::Base, kind)
-                && arguments
-                    .iter()
-                    .all(|a| expr_uses_var_safely(a, var, ExprCtx::Data, kind))
+                && arguments.iter().enumerate().all(|(i, a)| {
+                    if arg_is_view_borrow(a, var, i, &param_types, kind) {
+                        true
+                    } else {
+                        expr_uses_var_safely(a, var, ExprCtx::Data, kind)
+                    }
+                })
         }
         Expr::Await {
             callee, arguments, ..
@@ -331,8 +504,21 @@ pub(crate) fn expr_uses_var_safely(expr: &Expr, var: &str, ctx: ExprCtx, kind: E
         }
         Expr::AsyncBlock { body, .. } => body.iter().all(|s| stmt_uses_var_safely(s, var, kind)),
         Expr::Assign { name, value } => {
-            // Reassigning the object would drop its slot-allocated identity.
-            name.lexeme() != var && expr_uses_var_safely(value, var, ExprCtx::Data, kind)
+            if name.lexeme() == var {
+                // Reassigning the variable overwrites its slot, so a
+                // stack-allocated identity cannot survive — stack-slot
+                // analysis rejects it. Field-drop analysis can still reclaim
+                // the slot when the new value is a fresh, unaliased instance:
+                // the previous value is dropped at the assignment site and the
+                // final value at scope exit (or moved out on return). The
+                // right-hand side is still screened, so a fresh value that
+                // itself leaks `var` (e.g. `s = wrap(s)`) is rejected.
+                matches!(kind, EscapeKind::FieldDrop(_))
+                    && reassign_rhs_is_fresh_class(value)
+                    && expr_uses_var_safely(value, var, ExprCtx::Data, kind)
+            } else {
+                expr_uses_var_safely(value, var, ExprCtx::Data, kind)
+            }
         }
         Expr::Binary { left, right, .. } => {
             expr_uses_var_safely(left, var, ExprCtx::Data, kind)
@@ -367,7 +553,7 @@ pub(crate) fn expr_uses_var_safely(expr: &Expr, var: &str, ctx: ExprCtx, kind: E
             // that outlives its source is rejected by the type checker, so
             // this scope is still the only owner — refusing the drop would
             // just leak the fields.
-            EscapeKind::FieldDrop => view_borrows_place(target, var, kind),
+            EscapeKind::FieldDrop(_) => view_borrows_place(target, var, kind),
         },
         Expr::Copy { expression, .. } => expr_uses_var_safely(expression, var, ExprCtx::Base, kind),
         Expr::Propagate { value, .. } => expr_uses_var_safely(value, var, ExprCtx::Data, kind),
@@ -395,7 +581,7 @@ pub(crate) fn expr_uses_var_safely(expr: &Expr, var: &str, ctx: ExprCtx, kind: E
         }
         Expr::TupleLiteral { elements, .. } => elements
             .iter()
-            .any(|e| expr_uses_var_safely(e, var, ExprCtx::Data, kind)),
+            .all(|e| expr_uses_var_safely(e, var, ExprCtx::Data, kind)),
         Expr::TupleIndex { object, .. } => expr_uses_var_safely(object, var, ExprCtx::Base, kind),
         // Channel operations are not yet supported by codegen; conservatively
         // refuse to classify them as safe.
@@ -408,7 +594,7 @@ pub(crate) fn expr_uses_var_safely(expr: &Expr, var: &str, ctx: ExprCtx, kind: E
 /// no ownership, so it never rejects a field-drop candidate; parts of the
 /// target that are not the place itself (an index expression, a call) are
 /// still checked as data.
-pub(crate) fn view_borrows_place(expr: &Expr, var: &str, kind: EscapeKind) -> bool {
+pub(crate) fn view_borrows_place(expr: &Expr, var: &str, kind: EscapeKind<'_>) -> bool {
     match expr {
         Expr::Variable { .. } | Expr::This { .. } => true,
         Expr::Member { object, .. } | Expr::OptionalMember { object, .. } => {
@@ -423,7 +609,7 @@ pub(crate) fn view_borrows_place(expr: &Expr, var: &str, kind: EscapeKind) -> bo
     }
 }
 
-pub(crate) fn stmt_uses_var_safely(stmt: &Stmt, var: &str, kind: EscapeKind) -> bool {
+pub(crate) fn stmt_uses_var_safely(stmt: &Stmt, var: &str, kind: EscapeKind<'_>) -> bool {
     match stmt {
         Stmt::Expression { expression } | Stmt::Say { expression, .. } => {
             expr_uses_var_safely(expression, var, ExprCtx::Data, kind)
@@ -448,6 +634,8 @@ pub(crate) fn stmt_uses_var_safely(stmt: &Stmt, var: &str, kind: EscapeKind) -> 
         | Stmt::Continue { .. }
         | Stmt::Function { .. }
         | Stmt::AsyncFunction { .. }
+        | Stmt::ExternFunction { .. }
+        | Stmt::ExternBlock { .. }
         | Stmt::Class { .. }
         | Stmt::Use { .. }
         | Stmt::Enum { .. }
@@ -614,7 +802,12 @@ pub(crate) fn analyze_stack_allocatable(body: &[Stmt], module: &Module<'_>) -> H
 /// the instance. Escaping or aliased objects are leaked (never freed) rather
 /// than freed twice; only provably non-aliased instances get their fields
 /// dropped.
-pub(crate) fn analyze_class_drops(body: &[Stmt], module: &Module<'_>) -> HashSet<String> {
+pub(crate) fn analyze_class_drops(
+    body: &[Stmt],
+    module: &Module<'_>,
+    params: &[ntsc_ast::expr::FunctionParam],
+) -> HashSet<String> {
+    let classes = local_class_types(body, params);
     let mut candidates: HashSet<String> = HashSet::new();
     collect_class_drop_candidates(body, &mut candidates, module);
 
@@ -623,7 +816,7 @@ pub(crate) fn analyze_class_drops(body: &[Stmt], module: &Module<'_>) -> HashSet
         .filter(|var| {
             !body
                 .iter()
-                .all(|s| stmt_uses_var_safely(s, var, EscapeKind::FieldDrop))
+                .all(|s| stmt_uses_var_safely(s, var, EscapeKind::FieldDrop(&classes)))
         })
         .cloned()
         .collect();
@@ -642,10 +835,159 @@ pub(crate) fn analyze_class_drops(body: &[Stmt], module: &Module<'_>) -> HashSet
     candidates.difference(&rejected).cloned().collect()
 }
 
+/// Class-drop candidates whose *only* escaping use is a `return`. On the
+/// normal path such an instance is moved to the caller, so it is (correctly)
+/// excluded from [`analyze_class_drops`]; on the function's exception-return
+/// path nothing is handed to the caller, so those instances would leak unless
+/// dropped there. Candidates that alias another local or escape any other way
+/// are excluded, so dropping this set on the exception path cannot double
+/// free. The instance's stack slot is null-initialized, so dropping a
+/// candidate that was not yet constructed when the throw occurred is a no-op.
+pub(crate) fn analyze_return_escape_class_drops(
+    body: &[Stmt],
+    module: &Module<'_>,
+    params: &[ntsc_ast::expr::FunctionParam],
+) -> HashSet<String> {
+    let mut candidates: HashSet<String> = HashSet::new();
+    collect_class_drop_candidates(body, &mut candidates, module);
+
+    let normal = analyze_class_drops(body, module, params);
+    let classes = local_class_types(body, params);
+
+    let mut copy_aliased: HashSet<String> = HashSet::new();
+    let mut copy_edges: Vec<(String, String)> = Vec::new();
+    collect_copy_edges(body, &mut copy_edges);
+    for (src, dst) in &copy_edges {
+        copy_aliased.insert(src.clone());
+        copy_aliased.insert(dst.clone());
+    }
+
+    candidates
+        .into_iter()
+        .filter(|var| !normal.contains(var) && !copy_aliased.contains(var))
+        .filter(|var| {
+            body.iter().all(|stmt| {
+                stmt_field_drop_safe_ignoring_return(stmt, var, EscapeKind::FieldDrop(&classes))
+            })
+        })
+        .collect()
+}
+
+/// Like [`stmt_uses_var_safely`] under [`EscapeKind::FieldDrop`], but a
+/// top-level `return` of `var` is treated as safe. This isolates the locals
+/// whose sole escape is being returned; every other escape or alias still
+/// rejects the candidate. Returns inside an async block return from that
+/// block's closure rather than this function, so async blocks keep the
+/// standard rule.
+fn stmt_field_drop_safe_ignoring_return(stmt: &Stmt, var: &str, kind: EscapeKind<'_>) -> bool {
+    match stmt {
+        Stmt::Return { .. } => true,
+        Stmt::Block { statements, .. } => statements
+            .iter()
+            .all(|s| stmt_field_drop_safe_ignoring_return(s, var, kind)),
+        Stmt::If {
+            condition,
+            then_branch,
+            elif_branches,
+            else_branch,
+        } => {
+            expr_uses_var_safely(condition, var, ExprCtx::Data, kind)
+                && stmt_field_drop_safe_ignoring_return(then_branch, var, kind)
+                && elif_branches.iter().all(|e| {
+                    expr_uses_var_safely(&e.condition, var, ExprCtx::Data, kind)
+                        && stmt_field_drop_safe_ignoring_return(&e.body, var, kind)
+                })
+                && else_branch
+                    .as_deref()
+                    .is_none_or(|s| stmt_field_drop_safe_ignoring_return(s, var, kind))
+        }
+        Stmt::While { condition, body } => {
+            expr_uses_var_safely(condition, var, ExprCtx::Data, kind)
+                && stmt_field_drop_safe_ignoring_return(body, var, kind)
+        }
+        Stmt::DoWhile { body, condition } => {
+            stmt_field_drop_safe_ignoring_return(body, var, kind)
+                && expr_uses_var_safely(condition, var, ExprCtx::Data, kind)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+        } => {
+            init.as_deref()
+                .is_none_or(|s| stmt_field_drop_safe_ignoring_return(s, var, kind))
+                && condition
+                    .as_ref()
+                    .is_none_or(|e| expr_uses_var_safely(e, var, ExprCtx::Data, kind))
+                && update
+                    .as_ref()
+                    .is_none_or(|e| expr_uses_var_safely(e, var, ExprCtx::Data, kind))
+                && stmt_field_drop_safe_ignoring_return(body, var, kind)
+        }
+        Stmt::ForIn { iterable, body, .. } => {
+            expr_uses_var_safely(iterable, var, ExprCtx::Data, kind)
+                && stmt_field_drop_safe_ignoring_return(body, var, kind)
+        }
+        Stmt::ForAwait { producer, body, .. } => {
+            expr_uses_var_safely(producer, var, ExprCtx::Data, kind)
+                && stmt_field_drop_safe_ignoring_return(body, var, kind)
+        }
+        Stmt::Match {
+            expression,
+            cases,
+            default_case,
+        } => {
+            expr_uses_var_safely(expression, var, ExprCtx::Data, kind)
+                && cases.iter().all(|c| {
+                    expr_uses_var_safely(&c.value, var, ExprCtx::Data, kind)
+                        && c.guard
+                            .as_ref()
+                            .is_none_or(|g| expr_uses_var_safely(g, var, ExprCtx::Data, kind))
+                        && stmt_field_drop_safe_ignoring_return(&c.body, var, kind)
+                })
+                && default_case
+                    .as_deref()
+                    .is_none_or(|s| stmt_field_drop_safe_ignoring_return(s, var, kind))
+        }
+        Stmt::Try {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            stmt_field_drop_safe_ignoring_return(try_block, var, kind)
+                && catch_block
+                    .as_deref()
+                    .is_none_or(|s| stmt_field_drop_safe_ignoring_return(s, var, kind))
+                && finally_block
+                    .as_deref()
+                    .is_none_or(|s| stmt_field_drop_safe_ignoring_return(s, var, kind))
+        }
+        Stmt::Retry {
+            count,
+            body,
+            catch_block,
+            ..
+        } => {
+            expr_uses_var_safely(count, var, ExprCtx::Data, kind)
+                && stmt_field_drop_safe_ignoring_return(body, var, kind)
+                && catch_block
+                    .as_deref()
+                    .is_none_or(|s| stmt_field_drop_safe_ignoring_return(s, var, kind))
+        }
+        Stmt::Unsafe { body } => stmt_field_drop_safe_ignoring_return(body, var, kind),
+        Stmt::Quiet { body, .. } => stmt_field_drop_safe_ignoring_return(body, var, kind),
+        other => stmt_uses_var_safely(other, var, kind),
+    }
+}
+
 /// Collect every `var x = ClassName(...)` construction (any constructor
-/// arity) and `var x = copy(...)`, including declarations nested in blocks,
-/// branches, loops, and handlers: an instance built inside a `try` or a loop
-/// body owns its fields exactly like one built at the top level, and
+/// arity), `var x = copy(...)`, and `var x = f(...)` where `f` is a
+/// user function declared to return a class instance (its owned return is
+/// moved into `x`, so the caller must drop it). Includes declarations nested
+/// in blocks, branches, loops, and handlers: an instance built inside a `try`
+/// or a loop body owns its fields exactly like one built at the top level, and
 /// skipping those leaked them. The rejection pass walks the whole body, so a
 /// nested candidate is screened for escapes and aliasing on the same terms.
 pub(crate) fn collect_class_drop_candidates(
@@ -676,8 +1018,25 @@ pub(crate) fn collect_class_drop_candidates(
             ) || matches!(initializer, Some(Expr::Copy { .. }))
                 || matches!(
                     initializer,
+                    Some(expr @ Expr::Member { .. }) if reassign_rhs_is_fresh_class(expr)
+                )
+                || matches!(
+                    initializer,
                     Some(Expr::StructLiteral { class_name, .. })
                         if module.get_struct_type(class_name.lexeme()).is_some()
+                )
+                || matches!(
+                    initializer,
+                    Some(Expr::Call { callee, .. })
+                        if matches!(
+                            callee.as_ref(),
+                            Expr::Variable { name: callee_name }
+                                if module.get_struct_type(callee_name.lexeme()).is_none()
+                                    && matches!(
+                                        function_declared_ret_ty(callee_name.lexeme()),
+                                        Some(Ty::Class(_))
+                                    )
+                        )
                 );
             if eligible {
                 candidates.insert(name.lexeme().to_string());
