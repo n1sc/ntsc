@@ -67,7 +67,6 @@ sum of squares: 30
 
 * [Rust](https://www.rust-lang.org) — the compiler, runtime, and tooling
 * [LLVM](https://llvm.org) — codegen backend, linked through [inkwell](https://github.com/TheDan64/inkwell)
-* [Best-README-Template](https://github.com/othneildrew/Best-README-Template) — this README's structure
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
