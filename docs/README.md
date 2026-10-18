@@ -1,64 +1,108 @@
 # NTSC Documentation
 
-NTSC (the Neutron Type-Safe Compiler) is a compiled, statically typed
-programming language with a Rust implementation that lowers directly to native
-code through LLVM. It combines the ergonomics of a managed language with
-deterministic memory management: values are owned and moved by default, views
-provide borrowing, and a `shared` escape hatch covers the cases where aliasing
-is genuinely needed.
+Neutron is a programming language; **NTSC** (the Neutron Type-Safe Compiler)
+is the tool that builds and runs it. Source files end in `.nt`, and projects
+use a `neutron.toml` manifest. The compiler checks types and ownership before
+producing a native executable through LLVM.
 
-This directory is the complete reference for the language, its standard
-library, and the `ntsc` toolchain. It is split into a user guide and a
-reference section.
+**New here? Start with [Getting started](guide/getting-started.md), then follow
+the chapters below in order.** You do not need to know Rust, LLVM, or memory
+management to read the language guide. Rust and LLVM are needed when building
+the compiler itself; the setup chapter explains that step.
 
-## Guide
+## How to use this guide
 
-The guide walks through the language feature by feature, with runnable
-examples. Read it in order if you are new to NTSC.
+The first eleven chapters take you from an empty project to a small program
+with functions, data, imports, error handling, and tests. Each chapter names
+what you will learn and finishes with a small exercise and a next step.
+Advanced topics come after that foundation.
 
-| Document | Contents |
+- Run terminal commands in your project directory unless a step says otherwise.
+- A complete example with `fun main()` can replace `src/main.nt`.
+- Short statement examples belong inside `main`; function, class, enum, and
+  `test` declarations belong outside it. Imports go at the top of the file.
+- When a snippet calls a library module such as `arrays` or `fmt`, add
+  `use arrays` or `use fmt` at the top of the file. The
+  [Modules and imports](guide/modules.md) chapter explains this in detail.
+- A comment such as `// 5` shows expected output. Examples marked **compile
+  error** demonstrate a mistake deliberately; do not add them to a working
+  program.
+- Use the reference pages when you need an exact signature or rule. They are
+  lookup material, rather than the next chapter of the tutorial.
+
+## Start here
+
+Get the tools working, then understand the program you just ran.
+
+| Chapter | What you will learn |
 | --- | --- |
-| [Getting started](guide/getting-started.md) | Requirements, installation, the first program, the build/test/run workflow. |
-| [Syntax and control flow](guide/syntax-and-control-flow.md) | Lexical structure, variables, operators, and all control-flow statements. |
-| [Functions](guide/functions.md) | Function declarations, parameters, return values, and lambdas. |
-| [Classes and enums](guide/classes.md) | Classes, constructors, methods, inheritance, enums, and `match`. |
-| [Ownership](guide/ownership.md) | The Own - Move - View model: moves, views, `view mut`, `copy`, and escape analysis. |
-| [Shared values](guide/shared-values.md) | The `shared T` escape hatch for explicit aliasing. |
-| [Arrays and iterators](guide/arrays-and-iterators.md) | Arrays, indexing, `for-in`, the iterator protocol, and the `arrays` module. |
-| [Tuples](guide/tuples.md) | Tuple literals, indexing, destructuring, and multiple return values. |
-| [Error handling](guide/error-handling.md) | Exceptions, `try`/`catch`/`finally`, `retry`, results with `?` propagation, and the standard library error convention. |
-| [Unsafe and raw pointers](guide/unsafe-and-pointers.md) | `unsafe` blocks, raw pointers, `memory.raw_address`, and safety rules. |
-| [Modules and imports](guide/modules.md) | Multi-file projects and the file-import system. |
-| [Concurrency](guide/concurrency.md) | Threads, channels, and `async`/`await`. |
-| [Testing](guide/testing.md) | `test` blocks and the `ntsc test` runner. |
+| [Getting started](guide/getting-started.md) | Set up the compiler, create a project, and run Hello, World. |
+| [Your first program](guide/your-first-program.md) | Read a complete program, change its output, and use a variable. |
+
+## Language basics
+
+Learn how to express calculations, decisions, repeated work, and small pieces
+of reusable code.
+
+| Chapter | What you will learn |
+| --- | --- |
+| [Syntax and control flow](guide/syntax-and-control-flow.md) | Name values, use basic types, and make decisions and loops. |
+| [Functions](guide/functions.md) | Reuse code with parameters and return values, then meet lambdas. |
+| [Arrays and iterators](guide/arrays-and-iterators.md) | Store a list of values, index it, and process it with a loop. |
+| [Tuples](guide/tuples.md) | Group a few related values and return more than one result. |
+
+## Building programs
+
+Now that you can work with values and functions, learn how those values stay
+alive and how to organize, recover from errors in, and test a larger program.
+
+| Chapter | What you will learn |
+| --- | --- |
+| [Ownership](guide/ownership.md) | Keep one owner, transfer values with moves, and borrow with views. |
+| [Classes and enums](guide/classes.md) | Model your own data with fields, methods, constructors, and named cases. |
+| [Modules and imports](guide/modules.md) | Use the standard library and split a project into source files. |
+| [Error handling](guide/error-handling.md) | Recover with try/catch, return results, and clean up after failures. |
+| [Testing](guide/testing.md) | Write assertions and run repeatable checks with ntsc test. |
+
+## Advanced topics
+
+You can already write and test small programs. Continue in this order when
+you need shared data, concurrent work, external resources, or interop.
+These chapters assume the foundations above.
+
+| Chapter | What you will learn |
+| --- | --- |
+| [Shared values](guide/shared-values.md) | Share a value explicitly when moves and short-lived views are not enough. |
+| [Concurrency](guide/concurrency.md) | Coordinate async functions and goroutines with typed channels. |
+| [Leak-free conventions](guide/conventions.md) | Review ownership, close resources, and check cleanup across error paths. |
+| [Unsafe and raw pointers](guide/unsafe-and-pointers.md) | Understand raw-pointer boundaries and call external C functions. |
+| [Rust adaptors](guide/rust-adaptors.md) | Add a Rust dependency and inspect its generated Neutron API. |
 
 ## Reference
 
-The reference is exhaustive and aimed at lookup rather than learning.
+Keep these pages nearby while coding. Look up the part you need; there is no
+required reading order.
 
 | Document | Contents |
 | --- | --- |
-| [Language reference](reference/language.md) | Every type, statement, expression, and grammar rule. |
-| [Standard library](reference/stdlib.md) | Every module and function exposed to NTSC source. |
-| [CLI reference](reference/cli.md) | The `ntsc` command, the `neutron.toml` manifest, and environment variables. |
-| [Internals](reference/internals.md) | ABI, memory model, LLVM pipeline, leak detection, and platform support. |
-| [Contributing](reference/contributing.md) | Building, testing, layout, conventions, and end-to-end change workflows. |
+| [Language reference](reference/language.md) | Look up types, statements, expressions, and grammar rules. |
+| [Standard library](reference/stdlib.md) | Find a module, function signature, and its behavior. |
+| [CLI reference](reference/cli.md) | Look up commands, manifest settings, flags, and environment variables. |
+| [Experimental features](reference/experimental.md) | Review the `[experimental]` manifest table and what each unstable feature does. |
 
-## Compiler layout
+## Compiler development
 
-The compiler lives in the workspace root as a set of crates:
+Read these when working on NTSC itself or investigating how it is implemented.
 
-| Crate | Responsibility |
+| Document | What it covers |
 | --- | --- |
-| `ntsc-lexer` | Tokenizer with automatic semicolon insertion. |
-| `ntsc-parser` | Recursive-descent parser producing the AST. |
-| `ntsc-ast` | AST types and spans. |
-| `ntsc-typeck` | Name resolution, type checking, ownership checking, and linting. |
-| `ntsc-codegen` | LLVM IR generation, optimization, and linking. |
-| `ntsc-runtime` | The runtime static library linked into every binary. |
-| `ntsc-build` | `neutron.toml` parsing and multi-file module loading. |
-| `ntsc-diag` | Diagnostic rendering and JSON error output. |
-| `ntsc-cli` | The `ntsc` command-line binary. |
+| [Contributing](reference/contributing.md) | Build the compiler, find the relevant crate, and run the checks. |
+| [Internals](reference/internals.md) | Understand the compilation pipeline, ABI, and memory model. |
+| [Rust autogen standard](reference/rust-autogen.md) | Maintain the contract for generated Rust adaptors and export manifests. |
+
+The chapter tables in this README also define the website's navigation and
+reading order. When adding or moving a page, update its entry here. Keep
+release snapshots separate so each version retains its own guide.
 
 ## Feature summary
 

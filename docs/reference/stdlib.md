@@ -1,7 +1,9 @@
 # Standard library reference
 
-The standard library is exposed as modules callable directly from NTSC source;
-every module name is predeclared. Functions follow the `module.func` naming
+The standard library is exposed as modules callable from Neutron source.
+Import a module with `use module` (for example, `use arrays`) before calling
+its functions. The `async` and `chan` namespaces are always in scope.
+Functions follow the `module.func` naming
 convention. Return types below are as seen by NTSC source; runtime `bool`
 results are normalized to `bool` and scalar results to `int`/`float`.
 
@@ -24,11 +26,11 @@ array[T]` argument is borrowed for the operation.
 | `arrays.get(a, i)` / `arrays.at(a, i)` | `T` | Element at index; bounds-checked. |
 | `arrays.push(a, v)` | `void` | Appends `v` in place. |
 | `arrays.pop(a)` | `T` | Removes and returns the last element. |
-| `arrays.remove_at(a, i)` | `void` | Removes the element at `i`. |
-| `arrays.remove(a, v)` | `void` | Removes the first element equal to `v`. |
+| `arrays.remove_at(a, i)` | `array[T]` | New array without the element at `i`; `a` is unchanged, so assign the result (`a = arrays.remove_at(a, i)`). |
+| `arrays.remove(a, v)` | `array[T]` | New array without the first element equal to `v`; `a` is unchanged, so assign the result. |
 | `arrays.clear(a)` | `void` | Removes all elements. |
-| `arrays.reverse(a)` | `void` | Reverses in place. |
-| `arrays.sort(a)` | `void` | Sorts in place. |
+| `arrays.reverse(a)` | `array[T]` | New array with elements reversed; `a` is unchanged, so assign the result. |
+| `arrays.sort(a, dir)` | `array[T]` | New array sorted in direction `dir`; `a` is unchanged, so assign the result. |
 | `arrays.shuffle(a)` | `void` | Randomizes in place. |
 | `arrays.contains(a, v)` | `bool` | Whether `v` is present. |
 | `arrays.index_of(a, v)` | `int` | First index of `v`, or `-1`. |
@@ -38,6 +40,12 @@ array[T]` argument is borrowed for the operation.
 | `arrays.range(start, end)` | `array[int]` | `[start, start+1, ..., end-1]`. |
 | `arrays.fill(v, count)` | `array[T]` | `count` copies of `v`. |
 
+`arrays.new()` and `arrays.fill(v, 0)` both produce an `array[any]`, and an
+`any` element carries no static type: reading one as a number or a `bool`
+does not do arithmetic, it reinterprets the value. Declare the element type
+and seed the array with a typed empty — `var array[int] xs = arrays.fill(0, 0)`
+— and reserve the untyped form for values that are genuinely mixed.
+
 ## Strings
 
 Strings are owned UTF-8 values. String indexing is byte-based.
@@ -46,25 +54,26 @@ Strings are owned UTF-8 values. String indexing is byte-based.
 | --- | --- | --- |
 | `strings.length(s)` | `int` | Length in bytes. |
 | `strings.is_empty(s)` | `bool` | Whether the string is empty. |
-| `strings.substring(s, start, end)` | `string` | Bytes `start..end`. |
-| `strings.index_of(s, sub)` | `int` | First byte offset of `sub`, or `-1`. |
+| `strings.substring(s, start, end)` | `string` | Bytes `start..end`, snapped to UTF-8 boundaries. A negative `start` clamps to `0`; a negative `end` means the rest of the string; empty when `start >= end`. |
+| `strings.index_of(s, sub, start)` | `int` | First byte offset of `sub` at or after byte `start` (negative clamps to `0`), or `-1`. An empty `sub` returns `-1`. |
 | `strings.last_index_of(s, sub)` | `int` | Last byte offset of `sub`, or `-1`. |
 | `strings.contains(s, sub)` | `bool` | Whether `s` contains `sub`. |
 | `strings.starts_with(s, prefix)` | `bool` | Prefix test. |
 | `strings.ends_with(s, suffix)` | `bool` | Suffix test. |
-| `strings.count(s, sub)` | `int` | Number of non-overlapping occurrences. |
+| `strings.count(s, sub)` | `int` | Number of non-overlapping occurrences; `0` for an empty `sub`. |
 | `strings.replace(s, from, to)` | `string` | Replace all occurrences. |
 | `strings.replace_first(s, from, to)` | `string` | Replace the first occurrence. |
-| `strings.trim(s)` / `trim_left` / `trim_right` | `string` | Strip whitespace. |
-| `strings.upper(s)` / `strings.lower(s)` | `string` | Case conversion. |
-| `strings.reverse(s)` | `string` | Reversed string. |
-| `strings.repeat(s, n)` | `string` | `s` repeated `n` times. |
-| `strings.split(s, delim)` | `string` | Split by `delim` (or per character when empty), joined by newlines. |
+| `strings.trim(s)` / `trim_left` / `trim_right` | `string` | Strip Unicode whitespace. |
+| `strings.upper(s)` / `strings.lower(s)` | `string` | Full Unicode case conversion. |
+| `strings.reverse(s)` | `string` | Reversed by Unicode character. |
+| `strings.repeat(s, n)` | `string` | `s` repeated `n` times; empty when `n <= 0`. |
+| `strings.split(s, delim)` | `string` | Split by `delim` (or per Unicode character when empty), joined by newlines. |
 | `strings.join(a, b, delim)` | `string` | `a` + `delim` + `b`. |
-| `strings.char_at(s, i)` | `string` | Single-character string at byte `i`. |
-| `strings.char_code(s, i)` | `int` | Code point at byte `i`. |
-| `strings.from_char_code(code)` | `string` | String for a code point. |
-| `strings.is_alpha(s)` / `is_digit` / `is_alnum` | `bool` | Character class tests (first character). |
+| `strings.join_all(arr, sep)` | `string` | The elements of a string array joined by `sep`; the inverse of `strings.split`. |
+| `strings.char_at(s, i)` | `string` | The whole character starting at byte `i` (snapped to a UTF-8 boundary); empty past the end. |
+| `strings.char_code(s, i)` | `int` | Raw byte value at byte `i`; `-1` past the end. |
+| `strings.from_char_code(code)` | `string` | String for an ASCII code (`0`–`127`); empty for anything else. |
+| `strings.is_alpha(s)` / `is_digit` / `is_alnum` | `bool` | Whether **every** character is ASCII alphabetic / ASCII digit / ASCII alphanumeric; `false` for empty strings. |
 
 ## Formatting
 
@@ -79,8 +88,8 @@ Strings are owned UTF-8 values. String indexing is byte-based.
 | `fmt.is_int(s)` | `bool` | Whether `s` parses as an integer. |
 | `fmt.is_float(s)` | `bool` | Whether `s` parses as a float. |
 | `fmt.type_name(tag)` | `string` | Name of the type for a runtime type tag. |
-| `fmt.pad_left(s, width)` | `string` | Left-pad to `width`. |
-| `fmt.pad_right(s, width)` | `string` | Right-pad to `width`. |
+| `fmt.pad_left(s, width, pad)` | `string` | Left-pad to `width` with the character code `pad` (e.g. `48` for `0`). |
+| `fmt.pad_right(s, width, pad)` | `string` | Right-pad to `width` with the character code `pad`. |
 
 ## Math
 
@@ -103,13 +112,13 @@ negative argument.
 | `sys.write(path, content)` | `bool` | Writes a file; throws on failure. |
 | `sys.append(path, content)` | `bool` | Appends to a file. |
 | `sys.exists(path)` | `bool` | Whether the path exists. |
-| `sys.mkdir(path)` | `bool` | Creates a directory. |
+| `sys.mkdir(path)` | `bool` | Creates a directory, including missing parents. |
 | `sys.listdir(path)` | `string` | Directory entries. |
 | `sys.cwd()` | `string` | Current working directory. |
 | `sys.env(name)` | `string` | Environment variable value. |
-| `sys.args()` | `string` | Command-line arguments. |
+| `sys.args()` | `array[string]` | Command-line arguments; element `0` is the program name (like Go's `os.Args`). |
 | `sys.exit(code)` | `void` | Terminates the process. |
-| `sys.sleep(ms)` | `void` | Sleeps for `ms` milliseconds. |
+| `sys.sleep(ms)` | `void` | Sleeps for `ms` milliseconds (`ms` may be fractional; negatives sleep `0`). |
 | `sys.exec(command)` | `int` | Runs a command; returns its exit status. |
 | `sys.cp(src, dst)` | `bool` | Copies a file. |
 | `sys.rm(path)` | `bool` | Removes a file. |
@@ -118,12 +127,28 @@ negative argument.
 | `sys.readlink(path)` | `string` | Returns the target of a symbolic link. Throws if not a symlink. |
 | `sys.is_symlink(path)` | `bool` | Whether the path is a symbolic link. |
 
+## Terminal
+
+The `term` module provides the platform-sensitive terminal primitives needed
+by interactive Neutron applications. Rendering is application-owned: use
+`io.write` with ANSI sequences or another output format around these calls.
+
+| Function | Returns | Behavior |
+| --- | --- | --- |
+| `term.is_tty()` | `bool` | Whether stdout is an interactive terminal. |
+| `term.open()` | `int` | Enables raw input and the alternate screen; returns a session handle. |
+| `term.restore(handle)` | `bool` | Restores cooked input and the normal screen; safe to repeat. |
+| `term.poll_key(handle, timeout_ms)` | `bool` | Waits up to `timeout_ms` for a key press and stores it as the last key. |
+| `term.key_code()` | `string` | Stable code for the last key (`character`, `enter`, `up`, `ctrl_c`, and so on). |
+| `term.key_character()` | `string` | Character for the last character key. |
+| `term.key_ctrl()` | `bool` | Whether the last key had the Control modifier. |
+
 ## Time
 
 | Function | Returns | Behavior |
 | --- | --- | --- |
 | `time.now()` | `float` | Milliseconds since the Unix epoch. |
-| `time.sleep(ms)` | `void` | Sleeps for `ms` milliseconds. |
+| `time.sleep(ms)` | `void` | Sleeps for `ms` milliseconds (`ms` may be fractional; negatives sleep `0`). |
 | `time.format(timestamp_ms, fmt)` | `string` | Formats a timestamp. |
 
 ## JSON
@@ -132,14 +157,27 @@ negative argument.
 
 | Function | Returns | Behavior |
 | --- | --- | --- |
-| `json.parse(s)` | `string` | Validates and normalizes; throws on invalid input. |
+| `json.parse(s)` | `string` | Validates and normalizes; throws on invalid input. Non-ASCII text is preserved. |
 | `json.stringify(v)` | `string` | Serializes a value. |
 | `json.is_valid(s)` | `bool` | Whether the text is valid JSON. |
-| `json.get(json, key)` | `string` | Extracts a key's value. |
+| `json.get(json, key)` | `string` | Value of an *immediate* member, or `"null"`. |
 | `json.has(json, key)` | `bool` | Whether a key exists. |
 | `json.keys(json)` | `string` | Key list. |
+| `json.length(array)` | `int` | Element count of a JSON array; `0` for anything else. |
+| `json.at(array, i)` | `string` | Element `i` of a JSON array as JSON text; `"null"` when out of range. |
 | `json.stringify_pretty(json)` | `string` | Pretty-prints. |
-| `json.escape_string(s)` | `string` | Escapes a string for embedding in JSON. |
+| `json.escape_string(s)` | `string` | Escapes a string for embedding in JSON, surrounding quotes included. |
+
+`json.get` only looks at the members of the object it is given: a nested
+object never shadows a member of the same name in its parent, so
+`json.get(json, "mbid")` on `{"artist":{"mbid":"a"},"mbid":"b"}` answers
+`"b"`. The result is *JSON text*, so a string value keeps its quotes — compare
+against `json.escape_string(want)` or strip them, and remember that
+`json.get(doc, "error")` is the text `10`, not the number 10.
+
+There is no pointer syntax: reach a nested value by taking the object out
+first (`json.get(json.get(doc, "lrc"), "lyric")`) or by splitting an array
+into its elements and indexing those.
 
 ## CSV
 
@@ -172,14 +210,27 @@ var text = csv.stringify(data)
 | `toml.parse(s)` | `string` | Parses TOML text into a JSON object. Throws on malformed input. |
 | `toml.stringify(v)` | `string` | Serializes a JSON object into TOML text. Throws when `v` is not an object. |
 
-An empty input produces `{}`.
+Keys may be bare (`name`), double-quoted (`"name"`), or single-quoted
+(`'name'`, the TOML literal form, which never expands escapes). Text is
+handled as UTF-8 throughout, so non-ASCII values and keys survive a parse
+unchanged. An empty input produces `{}`. Sections nest properly (`[a.b]`
+merges into `[a]`); repeated `[[table]]` blocks merge into one object with
+later keys winning. Integers accept `0x`/`0o`/`0b` radix prefixes and `_` separators,
+emitted decimal.
 
 ```ntsc
-var data = toml.parse("name = \"Alice\"\nage = 30\nactive = true")
-// {"name":"Alice","age":30,"active":true}
+var data = toml.parse("name = 'Alice'
+age = 30
+[view]
+timestamp = true")
+// {"name":"Alice","age":30,"view":{"timestamp":true}}
 
 var text = toml.stringify(data)
-// name = "Alice"\nage = 30\nactive = true
+// name = "Alice"
+// age = 30
+//
+// [view]
+// timestamp = true
 ```
 
 ## YAML
@@ -208,7 +259,11 @@ var text = yaml.stringify(data)
 `http` performs blocking requests. On network or HTTP failure the request
 functions throw. `http://` URLs are sent over a plain TCP connection;
 `https://` URLs are encrypted with TLS (rustls) and verified against Mozilla's
-bundled CA root certificates.
+bundled CA root certificates. A `3xx` response is followed (up to five hops,
+resolving a relative `Location` against the URL that answered), and a `301`,
+`302`, or `303` hop continues as a `GET` without a body. `http.request_full`
+can turn that off. Without `timeout_ms` a request waits on the peer
+indefinitely.
 
 | Function | Returns | Behavior |
 | --- | --- | --- |
@@ -219,11 +274,23 @@ bundled CA root certificates.
 | `http.head(url)` | `string` | HEAD request. |
 | `http.patch(url, data)` | `string` | PATCH request. |
 | `http.request(method, url, data)` | `string` | Arbitrary method. |
+| `http.request_full(method, url, data, options)` | `string` | Arbitrary method with per-request options; `options` is a JSON object and may be empty. |
 | `http.status_code(response)` | `int` | Status code of a response string. |
 | `http.get_range(url, start, len)` | `string` | Fetches a byte range from a URL. Throws on failure. |
 | `http.get_file(url, dest)` | `string` | Downloads a URL to a file. Returns JSON with status and byte count. Throws on failure. |
 | `http.download_with_progress(url, dest, chunk_size)` | `string` | Downloads in chunks. Returns JSON with status, bytes, and chunk count. Throws on failure. |
 | `http.concurrent_download(urls, dest, max_parallel)` | `string` | Downloads multiple URLs in parallel. Returns JSON with per-URL results. Throws on failure. |
+
+`http.request_full` options (all optional, an empty object behaves like
+`http.request`):
+
+| Option | Type | Behavior |
+| --- | --- | --- |
+| `headers` | object | Extra request headers, e.g. a `Referer` or `Authorization`. |
+| `user_agent` | string | Replaces the default `Neutron/1.0` user agent. |
+| `timeout_ms` | int | Read and write timeout in milliseconds; `0` or absent means no timeout. |
+| `follow_redirects` | bool | Defaults to `true`; a redirect is followed at most `max_redirects` times. |
+| `max_redirects` | int | Redirect budget, `5` by default. |
 
 The `_async` variants run the blocking request on a worker-thread pool and
 hand back a future: `await` parks the calling goroutine without tying up a
@@ -286,14 +353,19 @@ See [Concurrency](../guide/concurrency.md) for usage.
 
 ## Regular expressions
 
+Patterns follow Rust `regex` syntax, including Unicode classes such as
+`\p{L}`. Since `\p` stays as the two characters it is written as (it is not
+a recognized escape), a pattern only needs a single backslash in source:
+`"[^\p{L}]"`. Every function throws on an invalid pattern.
+
 | Function | Returns | Behavior |
 | --- | --- | --- |
 | `regex.test(text, pattern)` | `bool` | Whether the pattern matches. |
 | `regex.search(text, pattern)` | `bool` | Whether the pattern appears. |
-| `regex.find(text, pattern)` | `string` | First match; throws on an invalid pattern. |
-| `regex.find_all(text, pattern)` | `string` | All matches. |
+| `regex.find(text, pattern)` | `string` | JSON object with `matched`, `position`, and `length`; `"null"` when nothing matches. |
+| `regex.find_all(text, pattern)` | `string` | JSON array of match objects. |
 | `regex.replace(text, pattern, rep)` | `string` | Replace matches. |
-| `regex.split(text, pattern)` | `string` | Split on matches. |
+| `regex.split(text, pattern)` | `string` | Split on matches, joined by newlines. |
 | `regex.is_valid(pattern)` | `bool` | Pattern validity. |
 | `regex.escape(text)` | `string` | Escapes literal text. |
 
@@ -388,6 +460,7 @@ small response is not delayed waiting for an ACK.
 | `net.tcp_listen(port)` | `int` | Listens; port `0` picks an ephemeral port. |
 | `net.local_port(handle)` | `int` | Bound port of a listener. |
 | `net.tcp_accept(listener)` | `int` | Accepts a connection (blocks the calling thread). |
+| `net.accept_poll(listener, timeout_ms)` | `int` | Accepts a connection, giving up after `timeout_ms` with the null handle. The listener is flipped to non-blocking for the wait and restored, so `net.tcp_accept` still works on it. |
 | `net.send(handle, data)` | `int` | Sends bytes. |
 | `net.send_line(handle, data)` | `int` | Sends a line. |
 | `net.recv(handle, count)` | `string` | Receives up to `count` bytes. |
@@ -429,6 +502,8 @@ rate of connections, and slow clients never pin a scheduler thread.
 | `os.temp_file(prefix)` | `string` | Creates and returns a temp file path. |
 | `os.file_lock(path)` | `int` | Acquires an advisory file lock; returns a handle > 0. Throws on failure. |
 | `os.file_unlock(path)` | `bool` | Releases a file lock. |
+| `os.rename(from, to)` | `bool` | Moves a file or directory; `false` when the move is not possible, leaving the target alone. |
+| `os.executable_path()` | `string` | The running program's own path, or `""` when the platform cannot report it. |
 
 ## Crypto
 
@@ -574,6 +649,11 @@ ready, so a slow request never pins a scheduler thread. `process.exec` and
 `process.exec_output` have no awaitable variant yet — they block the calling
 thread; the runtime's offload machinery exists but the `await` front-end does
 not lower process calls.
+
+Rust dependency adaptors also expose an offloaded `<function>_async` alias for
+each synchronous bridge. For example, `await @ureq.get_async(url)` runs the
+blocking `ureq::get` call on the runtime's bounded offload pool; the original
+`@ureq.get(url)` API remains synchronous.
 
 `process.spawn_thread` takes a lambda with one `int` parameter. Its payload
 must be a scalar or a stdlib handle: owned heap values, `shared` values, and

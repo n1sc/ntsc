@@ -20,8 +20,13 @@ Flags may appear before or after the command.
 | `ntsc test` | Compile in test mode and run every `test` block. |
 | `ntsc run` | Build, then execute the resulting binary. |
 | `ntsc clean` | Remove the `build/` directory. |
+| `ntsc clean --cache [--dry-run] [--max-age <days>]` | Prune stale global Rust adaptor caches. |
+| `ntsc clean --tmp [--dry-run]` | Remove stale `/tmp/ntsc_*` compiler scratch trees. |
 | `ntsc watch` | Rebuild whenever a source file or `neutron.toml` changes. |
 | `ntsc graph` | Print the module dependency graph as DOT. |
+| `ntsc cargo doc <crate> [--no-open]` | Generate Neutron-facing HTML docs for a Rust adaptor; print a terminal summary and open the page unless `--no-open` is given. Hyphenated package names use underscore namespaces in Neutron. |
+| `ntsc cargo coverage [<crate>]` | Report export-manifest coverage for all direct Rust adaptors, or for one named crate. |
+| `ntsc cargo …` | Manage Rust crate dependencies; the generated adaptors follow [the autogen standard](rust-autogen.md). |
 | `ntsc version` / `--version` / `-V` | Print detailed version info (version, LLVM revision, host triple, build profile, git commit) and exit. |
 | `ntsc --help` / `-h` | Print usage. |
 
@@ -29,7 +34,7 @@ Flags may appear before or after the command.
 
 ```
 name/
-  neutron.toml      target/entry/output for the host platform
+   neutron.toml      entry/output; target defaults to the host platform
   src/main.nt     fun main() { say("Hello, World!") }
 ```
 
@@ -56,21 +61,38 @@ Build complete (Debug): /path/to/build/debug/hello
 
 ## The build manifest
 
-`neutron.toml` is a TOML file with a `[package]` section containing three keys:
-once:
+`neutron.toml` is a TOML file with a `[package]` section. `entry` and `output`
+are required; `target` is optional and defaults to the host platform:
 
-```
-target "x86_64-unknown-linux-gnu"
-entry "src/main.nt"
-output "hello"
+```toml
+[package]
+target = "x86_64-unknown-linux-gnu"
+entry = "src/main.nt"
+output = "hello"
 ```
 
-- `target` is an LLVM target triple.
+- `target`, when present, is an LLVM target triple.
 - `entry` is the entry source file, relative to the project root.
 - `output` is the output binary name (without extension; the platform
   extension is added automatically).
 
 Missing or duplicate keys are reported as `neutron.toml errors`.
+
+### Experimental features
+
+An `[experimental]` section opts the project into unstable language
+features; the [experimental features page](experimental.md) tracks them in
+detail. `rust_modules` enables Rust crate imports (`use @crate`, see the
+[Rust adaptors guide](../guide/rust-adaptors.md)); it defaults to `false`:
+
+```toml
+[experimental]
+rust_modules = true
+```
+
+Building a program that uses `use @crate` without the toggle fails before
+resolution or codegen with an error explaining how to opt in. Experimental
+features may change or be removed in any release.
 
 ## Diagnostics
 

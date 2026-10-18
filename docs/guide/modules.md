@@ -1,38 +1,50 @@
 # Modules and imports
 
+You can now write functions and [Classes and enums](classes.md). This chapter
+shows where library functions come from and how to split your own code into
+files without changing how you call it.
+
 A program is made of one or more `.nt` source files. The entry file is named
 in `neutron.toml`; every other file is pulled in explicitly.
 
 ## The standard library
 
-The standard library is exposed as a set of builtin modules. Every module name
-is predeclared, so modules can be called without an import:
+The standard library is exposed as a set of builtin modules. Bring a module
+name into scope with `use`, then call its functions with `module.function`:
 
 ```ntsc
-var n = strings.length("hello")
-var sorted = sort.stable_sort([3, 1, 2])
-say(fmt.i64_to_str(n))
+use strings
+use sort
+use fmt
+
+fun main() {
+    var n = strings.length("hello")
+    var sorted = sort.stable_sort([3, 1, 2])
+    say(fmt.i64_to_str(n))
+}
 ```
 
 The available modules are:
 
 ```
-arrays    async     collections  crypto  csv
-encoding  fmt       hash         http    io
-json      math      net          os      process
-random    regex     sort         strings sys
-testing   time      toml         yaml
+archive   arrays    async        collections  crypto
+csv       encoding  fmt          glob         hash
+http      io        json         math         memory
+net       os        paths        process      random
+regex     slices    sort         strings      sys
+term      testing   time         toml         yaml
 ```
 
-`use module` is still accepted and can serve as documentation of intent:
+An alias lets you choose a local module name:
 
 ```ntsc
 use strings
 use sort as sorter
 ```
 
-The `testing` module is routed through codegen helpers and is also available
-without an import; the test runner examples use `use testing` for clarity.
+Use `use testing` in files that call its assertions. The `async` and `chan`
+namespaces are always in scope; the concurrency chapter uses them without an
+import.
 
 See the [standard library reference](../reference/stdlib.md) for the full
 function list.
@@ -43,6 +55,29 @@ Symbols can be imported selectively from a module with
 `use (a, b) = from module`. The same form works with file paths.
 
 ## Loading other source files
+
+Here is a complete two-file example. In your existing project, make
+`src/main.nt` contain:
+
+```ntsc
+use "arithmetic.nt"
+
+fun main() {
+    say("total: ${add(3, 2)}")
+}
+```
+
+Create `src/arithmetic.nt` alongside it:
+
+```ntsc
+fun add(int a, int b) -> int {
+    return a + b
+}
+```
+
+Run `ntsc run` from the directory containing `neutron.toml`. It prints
+`total: 5`. Only the entry file needs `main`; the imported file supplies the
+function declaration.
 
 `use` pulls another `.nt` file into the program when its argument is a
 quoted path; an identifier after `use` (like `use strings`) refers to a
@@ -91,18 +126,31 @@ Each node is a source file; each edge is a file import.
 
 ## Build manifest
 
-The project manifest `neutron.toml` declares three keys:
+The project manifest `neutron.toml` has a `[package]` section:
 
-```
-target "x86_64-unknown-linux-gnu"
-entry "src/main.nt"
-output "my-project"
+```toml
+[package]
+entry = "src/main.nt"
+output = "my-project"
 ```
 
-- `target`: the LLVM target triple.
 - `entry`: the entry source file, relative to the project root.
 - `output`: the name of the produced binary.
+- `target` (optional): an LLVM target triple; when omitted, it defaults to
+  the host platform.
 
-All three keys are required and each may appear only once. `ntsc init`
-generates a correct manifest for the host platform automatically. See the
+`entry` and `output` are required. `ntsc init` generates a correct manifest
+automatically. See the
 [CLI reference](../reference/cli.md).
+
+Use the generated manifest for these examples; you do not need to choose a
+target manually.
+
+## Try it
+
+Move the `Counter` class from the previous chapter into `src/counter.nt`.
+Import it from `src/main.nt` with `use "counter.nt"` and run the same program.
+The output should be unchanged.
+
+Next: [Error handling](error-handling.md) handles operations that cannot
+always succeed, such as reading a file or parsing a number.

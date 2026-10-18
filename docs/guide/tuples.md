@@ -1,7 +1,9 @@
 # Tuples
 
-A tuple is a fixed-size, heterogeneous collection of values. Unlike arrays,
-each element can have a different type, and the length is part of the type.
+After [Arrays and iterators](arrays-and-iterators.md), you know how to store a
+list. A **tuple** groups a fixed number of related values, and each can have a
+different type. Use an array for a list of similar items; use a tuple for a
+small group such as a width and height, or a value and its label.
 
 ## Literal syntax
 
@@ -60,6 +62,54 @@ fun main() {
 }
 ```
 
+A tuple that carries heap values *moves* them: returning a local inside a
+tuple hands it to the caller, and the callee no longer drops it.
+
+The following examples look ahead to [Ownership](ownership.md) and
+[Classes and enums](classes.md). The integer-only `bounds` program above is
+enough for a first pass through this chapter.
+
+```ntsc
+fun pair() -> (array[int], string) {
+    var nums = [1, 2]
+    var label = "two"
+    return (nums, label)   // both move to the caller
+}
+```
+
+Wrap an element in `copy(...)` to hand over an independent value and keep the
+original; reading an element or a field inside the tuple borrows and does not
+move it.
+
+Class instances follow the same ownership rule. A class returned in an owning
+tuple transfers the instance and its owned fields to the destructured binding,
+including when the tuple is stored first:
+
+```ntsc
+class Record {
+    var string label
+
+    fun init(string label) {
+        this.label = label
+    }
+}
+
+fun record_pair() -> (Record, string) {
+    var record = Record("left")
+    return (record, "tag")
+}
+
+fun main() {
+    var values = record_pair()
+    var (record, tag) = values
+    say(record.label + ":" + tag)
+}
+```
+
+A class field read remains a borrow of the containing instance's field. It does
+not create a second owner when placed in a tuple; use `copy(...)` when an
+independent class value is required.
+
 The returned tuple can also be stored and indexed later:
 
 ```ntsc
@@ -92,3 +142,11 @@ fun main() {
   wrapping them in a class.
 - **Swap**: `(a, b) = (b, a)` swaps two variables.
 - **Grouping**: Pair related values that don't warrant a class definition.
+
+## Try it
+
+Change `bounds()` to return `(3, 4)`, destructure it into `width` and `height`,
+and print `width * height` from `main`. You should see `12`.
+
+Next: [Ownership](ownership.md) explains what happens when strings, arrays,
+and other values are assigned or passed to a function.

@@ -1,5 +1,18 @@
 # Ownership
 
+You have used functions, arrays, and [Tuples](tuples.md). Now learn how the
+compiler decides who keeps a value alive. Start with moves, views, and copies;
+the cleanup and escape-analysis details are useful when you later work with
+classes and error handling.
+
+For examples that call `arrays.*`, add `use arrays` at the top of your file.
+
+An **owner** is the variable or container responsible for a value. A **scope**
+is a block enclosed in braces. Owned strings, arrays, and class instances use
+heap storage: storage whose lifetime follows the owner rather than just one
+expression. Leaving the owner's scope releases the value unless ownership was
+transferred elsewhere.
+
 NTSC uses an Own - Move - View model: every heap value has exactly one owner
 at a time. The compiler enforces this statically, so programs cannot
 double-free or use a value after it has been freed. Runtime leak detection in
@@ -51,10 +64,11 @@ fun make() -> array[int] {
 Reassigning a moved-from variable makes it usable again:
 
 ```ntsc
-var b = [9]
-b = a              // a moved into b
+var a = [9]
+var b = a           // a moved into b
+a = [10]            // a owns a new value now
 say("" + b[0])     // 9
-say("" + a[0])     // compile error: a moved
+say("" + a[0])     // 10
 ```
 
 ### Moves and control flow
@@ -263,6 +277,26 @@ var b = Bag()
 var taken = b.items     // error: `b` owns the array
 ```
 
+A field read from a temporary class instance is different: the temporary has
+no other owner that can keep the field alive, so the field's ownership is
+transferred to the expression result. This makes it safe to retain a field
+from a factory result or to pass it to a function:
+
+```ntsc
+fun make_bag() -> Bag {
+    var b = Bag()
+    b.items = [1, 2, 3]
+    return b
+}
+
+var items = make_bag().items   // moves the field out of the temporary bag
+say("" + items[0])
+```
+
+The compiler drops the temporary receiver after the field is extracted. A
+field read from a live variable remains a borrow and still requires `copy(...)`
+or an explicit `view`, as shown above.
+
 ## Copies
 
 `copy(expr)` deep-copies a heap value, producing an independent owned value:
@@ -286,6 +320,15 @@ say("" + arrays.length(s))   // 2, unchanged
 
 Copying is explicit; NTSC never copies heap values implicitly.
 
+`copy` also materializes a borrow, so copying out of a container is safe:
+
+```ntsc
+var names = ["ada", "grace"]
+var first = copy(names[0])   // an owned string; `names` still owns its own
+say(first)                   // ada
+say(names[0])                // ada, not a released handle
+```
+
 ## Cleanup and exceptions
 
 Every initialized owned value is reclaimed exactly once, on whichever path
@@ -303,7 +346,8 @@ for (var i = 0; i < 5; i = i + 1) {
 
 Temporaries are reclaimed too — an array literal passed to a constructor, a
 concatenated string compared with `==`, the object a `{...}` literal builds and
-the pieces it was built from, and the value a destructuring statement unpacked.
+the pieces it was built from, a field extracted from a temporary class
+instance, and the value a destructuring statement unpacked.
 
 A constructor that throws part-way is cleaned up as well. Its `init` has already
 moved some arguments into fields, and the instance never reaches the caller's
@@ -360,3 +404,16 @@ In debug builds, the runtime tracks owned heap allocations. When a program
 exits, any value that was never dropped is reported as a `NTSC WARNING`
 message on stderr. Clean programs produce no warnings. Leak detection is
 disabled in release builds.
+
+For a practical review checklist, return to
+[Leak-free conventions](conventions.md) after the concurrency chapter.
+
+## Try it
+
+Write a `total(view array[int] values) -> int` function using a `for-in` loop.
+Call it from `main`, then print `arrays.length(values)` there to confirm the
+caller still owns its array. Make a `copy(values)`, append to the copy, and
+check that the original length did not change.
+
+Next: [Classes and enums](classes.md) uses these ownership rules with types
+you define yourself.

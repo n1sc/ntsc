@@ -55,9 +55,13 @@ statement is syntactically complete.
 | boolean | `true`, `false` |
 | nil | `nil` |
 
-String escapes are not processed: `"\n"` is the two characters `\` and `n`.
+String escapes are processed in single- and double-quoted literals:
+`\n`, `\t`, `\r`, `\0`, `\\`, `\"`, `\'`, and `\$`. `\$` writes a literal
+dollar without starting an interpolation; any other escape stays as the two
+characters it is written as. String literals may span multiple lines, so a
+literal newline can also be written by breaking the line inside the quotes.
 Interpolation `${expr}` is available inside double-quoted strings. `r"..."`
-strings are stored verbatim.
+strings are stored verbatim: no escapes and no interpolation.
 
 Integers are decimal only. There are no hex, octal, or binary literals.
 
@@ -333,12 +337,13 @@ declaration to the end of the block.
 ### Declarations
 
 ```
-fun name(param, ...) [-> return-type] { ... }
-fun name(param, ...) [-> return-type] => expression
+fun name(type param, ...) [-> return-type] { ... }
+fun name(type param, ...) [-> return-type] => expression
 ```
 
-Parameters are typed. The return type follows `->`; when it is omitted the
-function returns nothing (`void`). Functions can reference later declarations
+Parameters are written type-first (`fun add(int a, int b)`) and always carry
+a type. The return type follows `->`; when it is omitted the function
+returns nothing (`void`). Functions can reference later declarations
 and declarations in imported files.
 
 ### Async functions
@@ -347,8 +352,11 @@ and declarations in imported files.
 async fun name(param, ...) [-> return-type] { ... }
 ```
 
-An async function can suspend at `await` expressions. `try`, `throw`, and
-`retry` are rejected inside an async body.
+An async function can suspend at `await` expressions, including `await`
+inside control flow (`if`, loops, `try`/`catch`) and nested `return`
+statements, which complete the future through its result slot. `await`
+is only legal as a statement-level call, a variable initializer, an
+assignment right-hand side, or a return value.
 
 ### Lambdas
 
@@ -422,9 +430,9 @@ constructor results are consumed, stored values are deep-copied.
 
 ```
 class Name [extends Parent] {
-    var [type] field
+    var type field
     ...
-    fun name(params) [-> ret] { ... }
+    fun name(type param, ...) [-> ret] { ... }
     ...
 }
 ```
@@ -528,8 +536,13 @@ Each part is optional. `init` is typically `var i = 0`; `step` is typically
 for (var name in iterable) { ... }
 ```
 
-The loop variable must be declared with `var`; its type is inferred from
-`get`'s return type (the iterator protocol).
+`iterable` must be an array or a class implementing the iterator protocol.
+Arrays iterate through the runtime's element accessors; a class iterates
+through its `length`/`get` methods. Other kinds of values (strings, slices,
+tuples, objects) are rejected at compile time; split a string with
+`strings.split(s, "")` to loop over its characters. The loop variable must be
+declared with `var`; its type comes from the array's element type or the
+class's `get` return type.
 
 ### For-await
 
@@ -725,8 +738,11 @@ the enclosing instance.
 ### Binary
 
 Arithmetic, comparison, bitwise, and logical operators per the precedence
-table in the guide. `+` also concatenates strings and arrays. `&&` and `||`
-short-circuit. Heap equality `==` compares identity, not contents.
+table in the guide. `+` also concatenates strings and arrays. Heap equality
+`==` compares identity, not contents. `&&` and `||` short-circuit: the right
+operand is evaluated only when the left one does not already decide the
+result, so a bounds-checked read on that side cannot trap behind a false (or
+true, for `||`) guard.
 
 ### Numeric faults
 
@@ -828,8 +844,10 @@ and parameter types.
 
 ### Copy
 
-`copy(expr)` deep-copies a heap value (owned or shared) to a new owned value.
-Scalar and class copies are handled by the type checker.
+`copy(expr)` deep-copies a heap value (owned, shared, or borrowed) to a new
+owned value. Copying a borrow (such as an array element) materializes an
+independent copy; the source stays alive. Scalar and class copies are
+handled by the type checker.
 
 ## Ownership
 
@@ -854,6 +872,23 @@ that ends in `return`, `throw`, `break`, or `continue` never reaches the join,
 so a move inside it does not invalidate the value afterwards. A loop body is
 analysed as running more than once, so a value moved in the body must be
 reassigned before the next iteration.
+
+A returned expression moves every local it hands over, not just a bare
+variable: `return (arr, text)` transfers both, so the callee's exit-time drop
+does not release what the caller now owns. A local that only appears inside a
+borrowed read (an element or field access), under `copy(...)`, or as an operand
+of a concatenation is *not* moved — that value stays owned here.
+
+Moves are only diagnosed for values whose type is statically known to own heap
+memory — a declared `string`/`array`/class, or a parameter of that type. A
+variable initialized from a call whose return type the checker cannot pin down
+is treated as non-owning, so moving it and then reading it again is accepted
+silently. Write `copy(x)` when the intent is to keep using the source; that is
+a move-free operation regardless of how the type was inferred.
+
+A class instance is reached through its handle, so passing one to a `view` or
+`view mut` parameter borrows it: the caller keeps using the same instance
+afterwards, and a `view mut` parameter's writes are visible to the caller.
 
 A view may borrow the pointee of a `shared` value. The borrow refers to the
 value inside the handle, not the handle, and the exclusivity rules apply to it
@@ -920,6 +955,30 @@ unused-variable lint can be suppressed with `quiet [unused_variable]`.
 
 With `--json`, diagnostics are emitted as structured JSON on stdout.
 
+## Rust bridge typing
+
+A call into a Rust adaptor is typed `Any` by the checker, so the checker
+cannot catch a mistake in how its result is used; codegen re-reads the
+adaptor's export manifest and types the value for real. Codegen's answer is
+the one that reaches LLVM, and the two can disagree:
+
+- A `bool` result is an i1, not a handle. Returning one from a function
+  declared `-> int` fails module verification rather than type checking.
+- An `option[T]` result is a cell handle, so `if (result)` is a *nullness*
+  test on the cell and its payload still needs an unwrap. Compare against
+  `nil` first when the value matters.
+
+Declare classes before the functions that read their fields: a class's
+struct type is created when its first use is emitted, so a function emitted
+earlier that reads a field of a later-declared class fails with
+`struct type ... not found`.
+
+Do not return a class instance with string fields inside a tuple. The
+strings read back empty (integers survive), in both destructured and
+indexed reads, while the same class returned directly is fine. Prefer an
+out-parameter: the caller creates the value and the callee fills it through
+a `view mut` parameter.
+
 ## Known limitations
 
 - Raw pointers cannot be cast between pointee types, constructed as null, or
@@ -930,9 +989,15 @@ With `--json`, diagnostics are emitted as structured JSON on stdout.
   operations at type-check time.
 - `super` is lexed but cannot be used in expressions.
 - Integer literals are decimal only.
-- String escapes are not processed; use the `strings` module or raw strings.
+- String escapes (`\n`, `\t`, `\r`, `\0`, `\\`, `\"`, `\'`, `\$`) are processed
+  in quoted literals; `r"..."` strings are stored verbatim.
 - Only scalars and stdlib handles cross a thread boundary; views, `shared`
   values, and owned heap payloads are rejected. See
   [Threading rules](../guide/concurrency.md#threading-rules).
 - `try`/`throw`/`retry` are allowed inside async functions. A `throw`
   propagates to the caller after `wait_any`/`wait_all` returns.
+- A `chan[T]` parameter whose element is a class breaks that one function: the
+  class name stops resolving inside it, so `T()` reports an undefined function
+  and a field read on a value received from the channel miscompiles. Carry
+  `string` or `int` messages and encode structured ones, or move the work into a
+  synchronous function that takes the channel as a local.

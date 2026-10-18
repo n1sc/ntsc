@@ -1,5 +1,29 @@
 # Functions
 
+After [Syntax and control flow](syntax-and-control-flow.md), you can write
+statements and loops. A **function** gives a group of statements a name so
+you can call it more than once. In this chapter, you will pass inputs as
+parameters and send an answer back with `return`.
+
+## A complete example
+
+Replace `src/main.nt` with this program and run `ntsc run`:
+
+```ntsc
+fun add(int a, int b) -> int {
+    return a + b
+}
+
+fun main() {
+    var int total = add(3, 2)
+    say("total: ${total}")
+}
+```
+
+The output is `total: 5`. `a` and `b` are the function's **parameters**;
+`3` and `2` are the **arguments** supplied by this call. `-> int` tells the
+compiler what kind of result the function returns.
+
 ## Declarations
 
 A function is declared with `fun`, a parameter list, an optional return type,
@@ -118,6 +142,9 @@ calling an undefined name is a compile error. Undefined-name errors carry the
 
 ## Views and moves across calls
 
+This is a preview of [Ownership](ownership.md). You can continue to arrays
+now and return to this section after learning moves and views.
+
 Parameters are passed by move for owned heap values, and by borrow for `view`
 parameters:
 
@@ -135,3 +162,12 @@ fun read(view array[int] xs) {
 
 `total` takes ownership of the caller's array; `read` borrows it and the
 caller keeps ownership. See [Ownership](ownership.md).
+
+## Try it
+
+Add `fun square(int n) -> int` to the complete example. Call it twice from
+`main`, with different arguments, and print the two results. The function
+declaration belongs outside `main`; the calls belong inside it.
+
+Next: [Arrays and iterators](arrays-and-iterators.md) gives you a list of
+values to process with your functions.

@@ -142,12 +142,22 @@ The generated code decides at compile time who owns each value:
 - A field's declared initializer is stored at construction under the same
   ownership rules as `this.field = value`, so the instance owns it and the
   class drop thunk reclaims it.
-- `copy(expr)` emits a deep copy and the result is a fresh owned value.
+- `copy(expr)` emits a deep copy and the result is a fresh owned value. A
+  borrow (`view`) is materialized from its inner type first, so the copy never
+  aliases the value it was copied from.
 - "Fresh" results (literals, `copy`, string concatenation, `arrays.*` calls)
   are dropped by the statement that produced them; owned values stored into a
   variable are dropped when the variable's scope exits.
 - `emit_drop_all_owned` runs the drop thunk for every owned slot at function
   exit (on the normal path and on the exception path).
+- A block that ends inside a loop body releases the owned values it bound
+  immediately instead of deferring them to function exit: the block
+  re-executes every iteration, so deferring would free only the last
+  iteration's values and leak the rest. The slots are nulled, so a later
+  `break`/`continue` through `drop_loop_locals` and the exit-time drop are
+  safe no-ops. The same rule applies on each loop back edge, restricted to
+  names the loop itself declared: a name visible before the loop keeps its
+  final value for the code after the loop and is never touched there.
 
 ### Exceptions
 
@@ -159,7 +169,8 @@ for everything live on that path on the way out. A `catch` handler takes the
 message with `ntsc_exception_take_message`, which clears the flag;
 `ntsc_rethrow` re-arms it (used after a `finally` that ran with a clean flag).
 An exception still pending when `main` returns is reported by
-`ntsc_runtime_shutdown` and aborts.
+`ntsc_runtime_shutdown` through the same `ntsc_uncaught_exception` path,
+which prints the message to stderr and exits with a failure code.
 
 Standard library functions report failures by calling `throw_str`, which
 constructs a `module.func: detail` message and calls `ntsc_throw`.
@@ -384,6 +395,39 @@ NTSC WARNING: Memory leak detected! N registry object(s) leaked.
 String literals and other compile-time constants are registered as permanent
 and excluded from the count. Release builds pass `report = 0` and stay silent.
 Runtime assertions and panics write `NTSC PANIC: message` to stderr and abort.
+
+## Every heap allocation and its free
+
+Every heap allocation site is statically paired with exactly one owning drop
+path. A leak can only happen when the runtime machinery frees an object it
+borrowed instead of owned (a codegen bug, guarded against by regression
+tests), or when the program design accepts the leak itself (the last rows).
+
+| Allocation (site) | Freed by |
+| --- | --- |
+| Option cells — codegen `box_option_value`, adaptor `_ntsc_option_cell` for returns | `option_free` on every owned option-slot drop; `0` is the `none` handle and allocates nothing |
+| Result cells — codegen `allocate_result_cell` | `free_result_cell` after payload extraction |
+| `own` boxes (`alloc(value)`) — codegen `emit_box_value` | the `Ty::Own` drop arm (thunk + `free`) |
+| Class instances — codegen `class_alloc`, escape analysis stack-allocates non-escaping ones | class drop thunks for provably non-escaping instances; **escaping or aliased instances are never freed by design** (freed-twice is worse than leaked) |
+| Class field copies — codegen `class_copy` | the standard class drop; recursive copies are rejected statically |
+| `dyn` headers — codegen `dyn_header_alloc` | the vtable slot-0 wrapper frees header + object |
+| `go` futures — codegen `go_future_alloc` | the trampoline at completion; the scheduler cleanup thunk at shutdown for abandoned goroutines |
+| Registry regions (`memory.alloc`, 16 MiB cap) | explicit `memory.drop`, or the owning pointer's scope drop |
+| Bridge option cells for Rust→Neutron callback params | the Neutron callback slot's option drop is the single free (see [rust-autogen](rust-autogen.md)) |
+
+Accepted process-lifetime allocations (never freed, excluded from leak
+reporting):
+
+- string literals and other compile-time constants (registered permanent);
+- the scheduler's per-process run-queue statics (reused across restarts);
+- the leak-site map itself (bounded by executed var stores).
+
+Leak marks (`ntsc_leak_mark`) fire at owned variable stores, so the report
+can print `--> <source>:line:col`. Only int-like registry ids are marked:
+string/array/object/shared handles, registered memory regions, and slices.
+Malloc'd pointer cells (own boxes, option/result cells, `dyn` headers) are
+deliberately unmarked — they have no registry id, and their drops are
+direct frees.
 
 ## Deterministic IR
 

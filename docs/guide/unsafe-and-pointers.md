@@ -1,5 +1,14 @@
 # Unsafe and raw pointers
 
+This is an advanced, optional chapter. Read
+[Leak-free conventions](conventions.md) first and be comfortable with owners,
+views, and resource cleanup. You will learn how safe references differ from
+raw pointers and how to call a C function. Most application code can stay
+with ordinary ownership and views.
+
+For examples that call `memory.raw_address`, add `use memory` at the top of
+your source file, outside `main`.
+
 Neutron keeps checked ownership separate from raw addresses. The `unsafe`
 block is the boundary where the compiler stops enforcing safety guarantees
 and hands control to the programmer.
@@ -66,11 +75,20 @@ Raw pointers are created from references with `memory.raw_address()`:
 
 ```ntsc
 var int value = 10
-var &int shared_ref = &value
-var *const int raw = memory.raw_address(shared_ref)
-
-var &mut int mut_ref = &mut value
-var *mut int raw_mut = memory.raw_address(mut_ref)
+{
+    var &int shared_ref = &value
+    unsafe {
+        var *const int raw = memory.raw_address(shared_ref)
+        say("" + *raw)
+    }
+}
+{
+    var &mut int mut_ref = &mut value
+    unsafe {
+        var *mut int raw_mut = memory.raw_address(mut_ref)
+        *raw_mut = 20
+    }
+}
 ```
 
 `memory.raw_address` preserves the pointee type and mutability:
@@ -162,3 +180,56 @@ Most Neutron code never needs `unsafe`. Use it when:
 - Working with hardware or memory-mapped I/O.
 
 In all other cases, prefer safe references, views, and `shared` handles.
+
+## C FFI declarations
+
+External C functions are declared at module scope and may only be called from
+an `unsafe` block. The Neutron spelling keeps the normal function syntax:
+
+```ntsc
+extern "C" fun abs(int value) -> int
+
+fun main() -> int {
+    unsafe {
+        say("" + abs(-7))
+    }
+    return 0
+}
+```
+
+C-style declarations are also accepted in an extern block. These use C ABI
+widths for primitive types:
+
+```ntsc
+extern "C" {
+    int abs(int value)
+    size_t strlen(*const char)
+}
+```
+
+Declare the native libraries in `neutron.toml`:
+
+```toml
+[ffi]
+search_paths = ["native"]
+libraries = ["m"]
+```
+
+Search paths are resolved relative to the project directory unless they are
+absolute. `libraries = ["geometry"]` searches those directories for the
+platform library (`libgeometry.a`, `libgeometry.so`, or the corresponding
+platform form) and passes it to the linker. Each library is linked as part of
+the project build.
+FFI declarations do not provide ownership or validity guarantees; pointer
+preconditions and the foreign function's error conventions remain the
+responsibility of the `unsafe` call site.
+
+## Try it
+
+Put the first pointer example inside `fun main()` and run it. It prints `100`.
+Move the raw-pointer write outside the `unsafe` block and read the compiler's
+diagnostic, then restore the block. Compare the example with a `view mut`
+version that needs no raw pointer.
+
+Next: [Rust adaptors](rust-adaptors.md) uses generated bridges to call a Rust
+dependency from Neutron.

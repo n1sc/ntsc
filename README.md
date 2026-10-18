@@ -73,10 +73,15 @@ macOS and Windows installers bundle the LLVM libraries they need. See
 ### Build the compiler
 
 ```console
-$ cd rewrite
-$ cargo build --release -p ntsc-cli
-$ export PATH="$PWD/target/release:$PATH"
+$ arq install
 ```
+
+This builds the release compiler (`ntsc`, `ntsc-lsp`, and the runtime
+archive) and installs it to `/usr/local/bin` for local testing. Set
+`PREFIX` to choose a different destination (e.g.
+`PREFIX=$HOME/.local/bin arq install`). If the installer prints a PATH
+hint, add that directory to your shell's PATH. Run `arq list` to see
+every available task.
 
 ### Create and run a project
 
@@ -106,6 +111,8 @@ output = "hello"
 | `ntsc test [--release]` | Discover and run `test` blocks |
 | `ntsc run [--release]` | Build and execute |
 | `ntsc clean` | Remove the `build/` directory |
+| `ntsc clean --cache [--dry-run] [--max-age <days>]` | Prune stale global Rust adaptor caches |
+| `ntsc clean --tmp [--dry-run]` | Remove stale `/tmp/ntsc_*` compiler scratch trees |
 | `ntsc watch [--release]` | Rebuild when sources change |
 | `ntsc pkg [args]` | Run the package manager |
 | `ntsc graph` | Print the module dependency graph as DOT |
@@ -126,6 +133,7 @@ output = "hello"
 | [Modules](docs/guide/modules.md) | |
 | [Concurrency](docs/guide/concurrency.md) | |
 | [Testing](docs/guide/testing.md) | |
+| [Rust adaptors](docs/guide/rust-adaptors.md) | [Rust autogen standard](docs/reference/rust-autogen.md) |
 
 ## Project layout
 
@@ -157,7 +165,7 @@ $ cargo fmt --check
 
 ## Versioning
 
-NTSC versions follow a year-based scheme, `<year>.<release>.<patch><stage>`, where `a` is an alpha, `b` a beta, and stable releases drop the suffix.
+NTSC versions follow Semantic Versioning (`MAJOR.MINOR.PATCH`). The project remains at `0.0.0` until its first public release.
 
 ## License
 

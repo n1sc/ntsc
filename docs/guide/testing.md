@@ -1,9 +1,17 @@
 # Testing
 
+You have practiced the success and failure paths in
+[Error handling](error-handling.md). A **test** is a repeatable check, and an
+**assertion** describes the answer you expect. In this chapter, you will put
+checks beside your functions and run them with one command.
+
 Tests are declared with `test` blocks inside source files. `ntsc test`
 discovers them, compiles a harness in place of `main`, and runs each block.
 
 ## Writing tests
+
+This is a complete source file. Replace `src/main.nt` with it, then run the
+command in the next section from your project directory:
 
 ```ntsc
 use testing
@@ -81,3 +89,18 @@ try {
 
 `ntsc test --release` runs the test harness against the optimized build. The
 `--json` flag applies to test output as it does to builds.
+
+## Try it
+
+Add a `square(int n) -> int` function and a `test square_works` block that
+checks `square(3) == 9` with `testing.assert_eq`. Run `ntsc test`, deliberately
+change the expected answer to `8`, and run it again to see a failure. Restore
+`9` before continuing.
+
+You have finished the foundations: a project, values, functions, data types,
+ownership, imports, errors, and tests. Use the
+[standard library reference](../reference/stdlib.md) when building your own
+program.
+
+Next: [Shared values](shared-values.md) begins the advanced chapters. Continue
+when your program needs several places to retain the same value.

@@ -1,5 +1,12 @@
 # Shared values
 
+This is the first advanced chapter. Finish the foundations through
+[Testing](testing.md) and be comfortable with
+[Ownership](ownership.md) before continuing. Here you will distinguish an
+independent copy from two handles that deliberately refer to the same value.
+
+The examples using `arrays.*` need `use arrays` at the top of the source file.
+
 `shared T` is the escape hatch for explicit aliasing. Where moves transfer
 ownership and views borrow within a scope, a shared value keeps a heap value
 alive as long as any handle to it exists. The cost is reference-counted
@@ -60,10 +67,10 @@ fun make() -> shared array[int] {
 fun main() {
     shared array[int] x = [0]
     bump(x)
-    say("" + arrays.length(x))   // 1
+    say("" + arrays.length(x))   // 2
     var fresh = make()
     bump(fresh)
-    say("" + arrays.length(fresh))   // 2
+    say("" + arrays.length(fresh))   // 3
 }
 ```
 
@@ -116,3 +123,14 @@ synchronized, so passing one to `process.spawn_thread` or
 `collections.channel_send` is a compile error. To hand data to another thread,
 send it through a channel — see
 [Threading rules](concurrency.md#threading-rules).
+
+## Try it
+
+Inside `main`, declare a shared array and a second shared handle to it. Push
+a value through the second handle and print the length through the first.
+Then create `copy(...)`, push another value into the copy, and check that the
+shared array's length did not change.
+
+Next: [Concurrency](concurrency.md) coordinates independently running work.
+Shared values and thread-safe channels are different tools; the next chapter
+explains that distinction.

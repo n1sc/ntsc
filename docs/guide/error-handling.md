@@ -1,8 +1,34 @@
 # Error handling
 
+After [Modules and imports](modules.md), your program can call library code
+and your own helpers. Some operations can fail: an input may not be a number,
+or a file may not exist. Here you will recover with `try`/`catch`, return
+expected failures as results, and use `finally` for external-resource cleanup.
+
 NTSC uses exceptions. Any value can be thrown; a matching `catch` recovers
-control. Uncaught exceptions terminate the program with a non-zero exit code
-and a message on stderr.
+control. Uncaught exceptions exit the program with code 1 and print
+`uncaught exception: <message>` to stderr.
+
+## A complete example
+
+```ntsc
+use fmt
+
+fun main() {
+    try {
+        var int number = fmt.to_int("oops")
+        say("number: ${number}")
+    } catch (err) {
+        say("Could not parse the input: " + err)
+    }
+    say("The program can continue.")
+}
+```
+
+`fmt.to_int` tries to convert text to an integer. `"oops"` is not an integer,
+so it throws. Execution jumps into `catch`, where `err` contains the error
+message. Change the input to `"42"` to see the successful path.
+
 
 ## Throw
 
@@ -18,6 +44,8 @@ throw "something went wrong"
 `finally` runs whether or not an exception was thrown:
 
 ```ntsc
+var int a = 3037000500
+var int b = 3037000500
 try {
     var n = fmt.to_int("oops")
     say("unreached")
@@ -158,3 +186,11 @@ quiet [unused_variable] {
 
 With an empty list, `quiet { ... }` suppresses all suppresable lints in the
 block.
+
+## Try it
+
+Run the complete example once with `"oops"` and once with `"42"`. Add a
+`finally` block that prints `"Parse attempt finished."` and check that it
+runs on both paths. Keep the final message after the entire `try` statement.
+
+Next: [Testing](testing.md) turns those manual checks into repeatable tests.

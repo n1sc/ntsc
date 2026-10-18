@@ -1,22 +1,65 @@
 # Concurrency
 
-NTSC has one concurrency model: cheap stackless goroutines multiplexed onto a
-multi-threaded work-stealing scheduler with a reactor for all I/O. `go` spawns
-a goroutine, `chan[T]` carries typed messages between them, and `await` (on
-`async fun` or the async stdlib) suspends a goroutine at an I/O point. OS
-threads (`process.spawn_thread`) remain as the escape hatch for genuinely
-blocking native work; the older `collections.channel` functions keep working.
+Before continuing, finish [Shared values](shared-values.md) and be comfortable
+with functions, ownership, and error handling. **Concurrency** lets multiple
+pieces of work make progress without waiting for each one to finish before
+starting the next.
 
+There are three everyday tools:
+
+- `async fun` declares work that can pause; `await` waits for its result.
+- `go` starts an async function as a **goroutine**, independently of its caller.
+- `chan[T]` carries typed messages between those pieces of work.
+
+Start with the complete examples below. Scheduler details, OS threads, and
+awaitable network I/O are later sections.
+
+## Start with async and await
+
+Replace `src/main.nt` with this program and run `ntsc run`:
+
+```ntsc
+async fun answer() -> int {
+    await async.sleep(10)
+    return 42
+}
+
+async fun main() -> int {
+    var int value = await answer()
+    say("answer: ${value}") // answer: 42
+    return 0
+}
 ```
-  Goroutines (go / async)   ── thousands, cheap, stackless
-                 │
-        ┌────────┴─────────┐
-        ▼                  ▼
-  Work-stealing        Reactor (non-blocking I/O)
-  scheduler            sockets / timers / channels
-  OS-thread pool       readiness loop; never blocks a thread
-  (= CPU count)
+
+`await` pauses the current coroutine until the operation finishes. Its result
+becomes `value`. The two functions are marked `async` because they can pause.
+This example waits for one result; it does not spawn independent work yet.
+
+## Coordinate a worker with a channel
+
+Use a channel to wait for a worker's result, rather than guessing how long the
+worker will take:
+
+```ntsc
+async fun worker(chan[int] results) {
+    await async.sleep(10)
+    42 |> results
+    close(results)
+}
+
+async fun main() -> int {
+    var chan[int] results = chan.new(1)
+    go worker(results)
+    value <| results
+    say("worker result: ${value}") // worker result: 42
+    return 0
+}
 ```
+
+`go worker(results)` starts the worker. `42 |> results` sends its answer;
+`value <| results` receives it and waits when needed. The worker closes the
+channel after its last send. The root coroutine has received the answer before
+it returns, so the example does not depend on a sleep in `main` for completion.
 
 A blocked channel operation or an `await` parks the goroutine, not the thread:
 the scheduler thread picks up other work, so tens of thousands of in-flight
@@ -28,7 +71,8 @@ CPU-bound goroutines spread across the whole pool.
 `go worker(args)` runs an async function on the scheduler; `go { ... }` runs an
 inline block. Spawn is fire-and-forget: `go` returns nothing and never blocks
 the caller. When `main` returns, outstanding goroutines are abandoned (as in
-Go) — hand work a channel or sleep if it must finish first. Abandonment is
+Go). Coordinate completion with a channel when the work must finish first;
+a fixed sleep is not a reliable completion protocol. Abandonment is
 leak-free: the runtime reclaims an abandoned goroutine's future at shutdown,
 releasing every registry value it still owned (strings, arrays, armed sleep
 deadlines, channel handles), so the debug leak report stays clean. There is
@@ -37,25 +81,8 @@ channels; the runtime's join machinery exists for embedders, and it is what
 keeps a goroutine's result and uncaught exception readable until its handle
 is dropped.
 
-```ntsc
-async fun drain(chan[string] jobs) {
-    for j in jobs {
-        handle(j)
-    }
-}
-
-async fun main() -> int {
-    var chan[string] jobs = chan.new(4)
-    go drain(jobs)
-    "render" |> jobs
-    "package" |> jobs
-    close(jobs)
-    await async.sleep(50)   // give the worker time to drain
-    return 0
-}
-```
-
-Fan-out is just a loop:
+Fan-out means starting one worker for each item. This snippet assumes an
+existing `urls` array and an `async fun download(...)` declaration:
 
 ```ntsc
 for url in urls {
@@ -97,36 +124,49 @@ Rules:
   `for v in ch` exits.
 - A channel handle may be passed to `go` (and moved through channels) freely:
   the handle is shared and the channel state lives behind the runtime's lock.
+- A `chan[T]` whose element is a **class** is currently limited: naming it in an
+  `async fun` parameter breaks that function (the class name stops resolving
+  inside it), and a class value received by `for v in ch` miscompiles a field
+  read. Carry `string` or `int` messages and encode anything structured — for
+  example a JSON object built with `json.escape_string` — or keep the class work
+  in a synchronous function that receives the channel as a local.
 
 ## Memory safety across goroutines
 
-There is no `unsafe`, no interior aliasing, no manual memory anywhere. The
-ownership checker classifies every value that crosses into a goroutine —
-arguments to `go fn(...)` and free variables captured by `go { ... }` — with
-the same total rules used for `process.spawn_thread`:
+The ownership checker classifies every value that crosses into a goroutine:
+arguments to `go fn(...)` and free variables captured by `go { ... }`.
+The table below describes `go`; the OS-thread API has an additional heap
+payload restriction, described after the table.
 
 | Value crossing into a goroutine | What happens | Why it is safe |
 | --- | --- | --- |
 | Scalars (`int`, `float`, `bool`) | Copied | The goroutine shares nothing with the spawner. |
 | Safe handles (channels, files, sockets, threads) | Shared | The resource lives in the mutex-guarded runtime registry; the handle itself is an `int`. The spawner keeps ownership and stays free to use the channel. |
 | Function references | Copied | Code is immutable; a lambda captures nothing. |
-| Owned heap values (`string`, `array`, `object`, class instances) | **Moved** | The value's owning slot is transferred into the goroutine's future; the caller cannot use it afterwards (`NTSC-E0501`), so there is exactly one owner while the goroutine runs and it is freed once at the end. |
+| Owned heap values (`string`, `array`, `object`, class instances) | **Moved if bare, copied if borrowed, transferred if fresh** | A bare variable argument is moved with its owning slot (`NTSC-E0501` afterwards, so exactly one owner runs the goroutine). A borrowed read (`names[0]`) is not the spawner's owner, so the goroutine gets an independent copy — its future's drop can never reclaim the source container's entry. A fresh construction has no other owner and moves as-is. |
 | `view` / `view mut` | **Rejected** (`NTSC-E0501`) | A borrow may outlive the spawner's frame; a goroutine cannot hold one. Move or copy the value instead. |
 | `shared` | **Rejected** (`NTSC-E0501`) | The reference count is not synchronized across threads; copies would race on both the value and its count. Send the data through a channel instead. |
 
-For `ch <| v` the value moves into the channel; for `v |> ch` it moves out to
-the receiver — at every instant a value crossing a channel has exactly one
-owner.
+For `value |> ch`, the value moves into the channel; for `value <| ch`, it
+moves out to the receiver. A heap value crossing a typed channel has exactly
+one owner at every instant.
+
+Unlike `go`, `process.spawn_thread` rejects owned heap payloads: it does not
+transfer ownership into a goroutine future. Passing `copy(value)` does not
+change that restriction. Give the OS thread a channel handle and send string
+data through `collections.channel_send`, which copies messages synchronously.
+Both APIs reject views and unsynchronized `shared` values.
 
 ## OS threads
 
 `process.spawn_thread(body, arg)` starts a real OS thread — the escape hatch
 for long-running native work, FFI, or tight loops that should not be
 preempted. The body is a lambda with a single parameter; the argument crosses
-the thread boundary under the same classification table as above, and the
-handle that `process.thread_join` waits on:
+the thread boundary under the rules below. The returned handle is what
+`process.thread_join` waits on:
 
 ```ntsc
+var rx = collections.channel(4)
 var tx = collections.channel_sender(rx)
 var producer = process.spawn_thread(fun(int tx) {
     collections.channel_send(tx, "ping")
@@ -163,8 +203,9 @@ value handed to another thread, and the classification is total — there is
 nothing to opt into and no escape hatch. A value crosses a thread boundary
 when it is an argument to `go`, a capture of a `go { ... }` block, an argument
 to `process.spawn_thread` (the payload), or the message of
-`collections.channel_send`. The table above is that classification;
-violations are ownership errors (`NTSC-E0501`) reported at compile time:
+`collections.channel_send`. `go` transfers owned payloads; `spawn_thread`
+rejects them; the legacy channel API copies string messages. Violations are
+ownership errors (`NTSC-E0501`) reported at compile time:
 
 ```ntsc
 fun main() {
@@ -226,6 +267,13 @@ async fun main() -> int {
 `async.sleep(ms)` pauses the coroutine for approximately `ms` milliseconds:
 the future reports "pending" until the deadline passes, and the scheduler
 re-polls it on a millisecond quantum.
+
+Never call the blocking `time.sleep(ms)` (or `sys.sleep(ms)`) inside an
+`async fun`: it holds the driving worker thread for the whole duration
+instead of parking the goroutine, and a `while (true)` poll loop around it
+wedges that worker inside a single endless poll. Always
+`await async.sleep(ms)` from async code; the goroutine parks on a timer and
+the worker is free until the reactor fires the deadline.
 
 ### Awaitable I/O
 
@@ -311,3 +359,33 @@ async fun main() -> int {
     return 0
 }
 ```
+
+## How it runs
+
+NTSC multiplexes cheap stackless goroutines onto a multi-threaded,
+work-stealing scheduler. A reactor handles readiness for supported I/O.
+The thread pool can keep doing other work while a goroutine is parked:
+
+```text
+  Goroutines (go / async)   ── thousands, cheap, stackless
+                 │
+        ┌────────┴─────────┐
+        ▼                  ▼
+  Work-stealing        Reactor (non-blocking I/O)
+  scheduler            sockets / timers / channels
+  OS-thread pool       readiness loop; never blocks a thread
+  (= CPU count)
+```
+
+OS threads remain an escape hatch for blocking native work. The older
+`collections.channel` functions support that model; new goroutine code should
+use typed `chan[T]` channels.
+
+## Try it
+
+Change the worker's result from `42` to another integer and run the complete
+channel program. Then make the worker's delay longer. The receive in `main`
+should still wait for the correct result without an extra sleep.
+
+Next: [Leak-free conventions](conventions.md) reviews ownership and cleanup
+across these features, including cancellation and external resources.

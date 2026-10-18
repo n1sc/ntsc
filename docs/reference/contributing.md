@@ -12,7 +12,12 @@ the [guide](../guide/getting-started.md) and the [CLI reference](cli.md).
   stable; nightly features are never used.
 - **LLVM development libraries**, version 22. `ntsc-codegen` uses inkwell
   (`features = ["llvm22-1"]`) and links only the x86-64 and aarch64
-  targets.
+  targets. `LLVM_SYS_221_PREFIX` must point at an LLVM 22 prefix
+  (e.g. `LLVM_SYS_221_PREFIX=/usr/lib/llvm22` on Arch with the `llvm22`
+  package). This must be *LLVM 22 exactly*: a newer system LLVM silently
+  links its `libLLVM.so` anyway, and the version-skew corrupts memory
+  inside the optimization pass pipeline (SIGSEGV in LLVM-heavy code, in
+  and out of tests).
 - A **C compiler** on `PATH` (for linking). `link_binary` uses `cc` on
   Unix, `ld.lld`/`link.exe`/`gcc` on Windows.
 
@@ -58,17 +63,19 @@ crates can be tested with `cargo test -p ntsc-<crate>`.
 
 ```
 crates/
-  ntsc-lexer     tokenizer with automatic semicolon insertion
-    ntsc-parser    recursive-descent parser producing the AST
-    ntsc-ast       AST types and spans
-    ntsc-typeck    name resolution, type checking, ownership, linting
-    ntsc-codegen   LLVM IR generation, optimization, linking
-    ntsc-runtime   the runtime static library linked into every binary
-    ntsc-build     neutron.toml parsing, multi-file module loading
-    ntsc-diag      diagnostic rendering and JSON output
-    ntsc-cli       the `ntsc` binary (commands, install/runtime lookup)
-  docs/            guide + reference, including internals.md
-  examples/        small NTSC programs (bank, builtins, modules, ...)
+  ntsc-lexer      tokenizer with automatic semicolon insertion
+  ntsc-parser     recursive-descent parser producing the AST
+  ntsc-ast        AST types and spans
+  ntsc-typeck     name resolution, type checking, ownership, linting
+  ntsc-codegen    LLVM IR generation, optimization, linking
+  ntsc-runtime    the runtime static library linked into every binary
+  ntsc-build      neutron.toml parsing, multi-file module loading
+  ntsc-diag       diagnostic rendering and JSON output
+  ntsc-cli        the ntsc binary (commands, install/runtime lookup)
+  ntsc-cargo      Rust dependency resolution and adaptor generation
+  ntsc-lsp        language-server support for editors
+docs/            guide + reference
+examples/        small Neutron programs (bank, builtins, modules, ...)
 ```
 
 The pipeline is: `ntsc-lexer` → `ntsc-parser` → `ntsc-typeck` (resolve,
@@ -77,6 +84,24 @@ then link against `libntsc_runtime.a`. `ntsc-build` runs before typeck
 for projects: it resolves the file-import closure, parses modules in
 parallel, merges the ASTs, and records per-statement span provenance so
 diagnostics can be attributed to the right file.
+
+### Maintaining documentation
+
+The [documentation overview](../README.md) defines the learning sequence.
+Its chapter tables supply the website's sidebar groups, descriptions, and
+previous/next order. Add each new page to exactly one table, in prerequisite
+order, and keep existing file paths stable when changing its place in the
+guide.
+
+Guide chapters should explain their goal, name prerequisites, distinguish
+complete programs from snippets, and finish with an exercise and a next step.
+Put exhaustive signatures in the reference and compiler implementation details
+in this development section.
+
+From the `neutron-rs-web` project, run `pnpm docs:sync` to update the development
+snapshot. For a release, use `pnpm docs:sync --version <version> --ref <tag>
+--source <path-to-release-docs>` with the docs checked out at that release.
+Navigation is generated separately for each snapshot.
 
 ## Where things live
 

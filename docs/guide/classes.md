@@ -1,5 +1,10 @@
 # Classes and enums
 
+Build on [Ownership](ownership.md) to define your own types. A **class**
+groups data (fields) with operations on that data (methods). An **enum** names
+a fixed set of possibilities. Start with a counter; inheritance, custom
+iterators, and operator overloading are optional extensions later in the page.
+
 ## Classes
 
 A class bundles fields and methods:
@@ -16,7 +21,16 @@ class Counter {
         this.n = this.n + 1
     }
 }
+
+fun main() {
+    var counter = Counter(40)
+    counter.bump()
+    say("counter: ${counter.n}") // counter: 41
+}
 ```
+
+This is a complete program. `Counter(40)` creates an instance and calls
+`init`; `counter.bump()` calls a method on that instance.
 
 Field declarations use the same `var` syntax as local variables and may carry a
 type annotation. Methods use `fun`. A method named `init` is the constructor;
@@ -80,16 +94,26 @@ fun init(int start) {
 
 ### Reference semantics
 
-Class instances have reference semantics: assigning one instance variable to
-another aliases the same object rather than copying it. Mutations through
-either name are visible through the other:
+Class instances refer to an object, rather than embedding an independent copy
+in each variable. For temporary access, make the borrow explicit. For an
+independent object, use `copy`:
 
 ```ntsc
 var p = Point()
-var q = p
-q.x = 10
+{
+    view mut var q = p
+    q.x = 10
+}
 say("" + p.x)   // 10
+
+var independent = copy(p)
+independent.x = 20
+say("" + p.x)   // still 10
 ```
+
+Avoid creating multiple owned names for the same instance. Aliasing that the
+compiler cannot prove safe can prevent field cleanup and produce debug leak
+warnings. See [Leak-free conventions](conventions.md#6-design-classes-with-one-owner-for-each-field).
 
 Escape analysis stack-allocates instances that neither escape the function nor
 declare an `init`; classes with a constructor are always heap-allocated. The
@@ -131,6 +155,12 @@ fun make() -> Counter {
     return c
 }
 ```
+
+A class instance can also be one element of an owning tuple. Returning and
+then destructuring that tuple transfers the class instance and its owned
+fields to the new binding; the class fields are reclaimed with that binding.
+A class field read is still a borrow of the containing instance, even when it
+is placed in a tuple.
 
 ## Enums
 
@@ -321,3 +351,12 @@ Operators can be chained:
 ```ntsc
 var c = a + b * 2.0   // calls * then +
 ```
+
+## Try it
+
+Add a `reset()` method to the complete `Counter` program that sets `this.n`
+to `0`. Call `bump()` twice, print the value, call `reset()`, and print it
+again. You should see `42` followed by `0`.
+
+Next: [Modules and imports](modules.md) moves your reusable code into another
+source file.

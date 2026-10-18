@@ -1,5 +1,34 @@
 # Arrays and iterators
 
+With [Functions](functions.md), you can calculate an answer for one input.
+An **array** stores a list of values of the same type. Here you will index a
+list, change it, and visit each value with a loop. Custom iterators and the
+detailed ownership rules at the end can wait until after classes and ownership.
+
+For snippets using `arrays.*`, put `use arrays` at the top of your source
+file, outside `main`.
+
+## A complete example
+
+```ntsc
+fun square(int n) -> int {
+    return n * n
+}
+
+fun main() {
+    var array[int] values = [1, 2, 3, 4]
+    var int total = 0
+    for (var value in values) {
+        total = total + square(value)
+    }
+    say("sum of squares: ${total}") // sum of squares: 30
+}
+```
+
+The `for-in` loop binds one element to `value` on each iteration. The scalar
+elements (`int` here) are copied into the loop variable. The array remains the
+owner of its stored values.
+
 ## Array types and literals
 
 Arrays are heap values with a fixed element type. The type is written
@@ -17,7 +46,11 @@ The empty literal `[]` has no element type and must be annotated:
 var array[int] empty = []
 ```
 
-Untyped arrays can also be created with `arrays.new()`.
+Untyped arrays can also be created with `arrays.new()`, and so can a typed one
+by seeding it with a value: `var array[int] xs = arrays.fill(0, 0)`. Prefer the
+typed form whenever the elements have a type — an untyped (`array[any]`)
+element carries no static type, so reading one as a number or a `bool`
+reinterprets the value instead of using it.
 
 ## Indexing
 
@@ -36,8 +69,8 @@ or shrink.
 
 ## The `arrays` module
 
-The `arrays` module provides the standard array operations. It is available
-without an explicit `use`. Mutating operations take the array in place and
+The `arrays` module provides the standard array operations. Import it with
+`use arrays`. Mutating operations take the array in place and
 return `void`; functional operations take a view, leave the input untouched,
 and return a new owned array.
 
@@ -47,11 +80,7 @@ and return a new owned array.
 var a = [1]
 arrays.push(a, 2)          // append; a is now [1, 2]
 var last = arrays.pop(a)   // remove and return the last element
-arrays.remove_at(a, 0)     // remove the element at an index
 arrays.clear(a)            // remove all elements
-arrays.shuffle(a)          // randomize in place
-arrays.reverse(a)          // reverse in place
-arrays.sort(a)             // sort in place
 ```
 
 `arrays.push` returns `void`, so the call site does not reassign `a`; the array
@@ -68,9 +97,15 @@ ownership of the removed string to the caller.
 ```ntsc
 var nums = [3, 1, 2]
 var sorted = arrays.sort(nums)   // [1, 2, 3]; nums is untouched
+var reversed = arrays.reverse(nums) // [2, 1, 3]; nums is untouched
+var shorter = arrays.remove_at(nums, 0) // [1, 2]; nums is untouched
 var s = arrays.slice(nums, 1, 3) // elements 1..3
 var cl = arrays.clone(nums)      // copy; string elements are deep-copied
 ```
+
+Use the returned array. Calling `arrays.sort(nums)` without storing its
+result does not sort `nums` in place. To replace the original, write
+`nums = arrays.sort(nums)`.
 
 ### Query and element operations
 
@@ -89,12 +124,19 @@ array with `count` copies of `value`.
 
 ## The iterator protocol
 
+Read this section after [Classes and enums](classes.md). For the examples
+above, arrays already provide everything the `for-in` loop needs.
+
 `for-in` iterates any value that provides two methods:
 
 - `length() -> int`
 - `get(int) -> T`
 
-Arrays implement these natively. Custom classes implement them to participate:
+Arrays implement these natively, so arrays always iterate. Custom classes
+implement them to participate; values of any other kind (a `string`, a
+`slice`, a tuple, an instance of a class without the two methods) are
+rejected at compile time with a `for-in is not supported` error, rather
+than running a loop that never executes:
 
 ```ntsc
 class Range {
@@ -128,10 +170,11 @@ may be a function call, a field, or any expression.
 
 ## Ownership of loop variables
 
-The loop variable is bound from `get`'s result. For heap element types the
-element is moved or copied out according to the usual ownership rules; scalar
-element types are copied. An owned container iterated by value is moved, so it
-cannot be used after the loop unless it was borrowed:
+This section builds on [Ownership](ownership.md). The loop variable is bound
+from `get`'s result. Scalar elements are copied; reading heap elements from an
+existing container borrows from that container. Iterating a stored array keeps
+the array as the owner. An owned function parameter still consumes the caller's
+array when the function is called:
 
 ```ntsc
 fun total(array[int] xs) -> int {
@@ -142,4 +185,32 @@ fun total(array[int] xs) -> int {
 ```
 
 Iterating an array through a `view` parameter leaves the caller's array
-owned and untouched.
+owned and untouched. A fresh iterable expression is temporary-owned by the
+loop and is reclaimed when the loop finishes or when control leaves an
+iteration, including `return`, `throw`, `break`, and `continue`; an iterable
+stored in a variable remains owned by that variable:
+
+```ntsc
+fun words() -> array[string] {
+    return ["first", "second"]
+}
+
+fun find_second() -> bool {
+    for (var word in words()) {
+        if (word == "second") { return true }
+    }
+    return false
+}
+
+var source = words()
+for (var word in source) { say(word) }  // source remains the owner
+```
+
+## Try it
+
+Change the complete example to use `[2, 4, 6]`. Predict the sum of squares,
+then run it. Next, use `arrays.length(values)` to print how many inputs were
+processed.
+
+Next: [Tuples](tuples.md) groups a few values that do not all need the same
+type.
