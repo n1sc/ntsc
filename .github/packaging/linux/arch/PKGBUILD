@@ -18,7 +18,7 @@ build() {
   cd "$srcdir/neutron-rs-$pkgver"
   # ntsc-cli does not depend on ntsc-runtime, so the static archive `ntsc
   # build` links against is not produced as a side effect — build it too.
-  cargo build --release -p ntsc-cli -p ntsc-runtime
+  cargo build --release -p ntsc-cli -p ntsc-lsp -p ntsc-runtime
   (cd crates/ntsc-pkg && ../../target/release/ntsc build --release)
 }
 
@@ -26,6 +26,7 @@ package() {
   cd "$srcdir/neutron-rs-$pkgver"
   install -Dm755 target/release/ntsc "$pkgdir/usr/bin/ntsc"
   install -Dm755 crates/ntsc-pkg/build/release/ntsc-pkg "$pkgdir/usr/bin/ntsc-pkg"
+  install -Dm755 target/release/ntsc-lsp "$pkgdir/usr/bin/ntsc-lsp"
   # The runtime archive an installed `ntsc build` links every NTSC program
   # against. Resolved at runtime via the executable-relative <prefix>/lib/ntsc.
   install -Dm644 target/release/libntsc_runtime.a "$pkgdir/usr/lib/ntsc/libntsc_runtime.a"

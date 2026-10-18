@@ -158,6 +158,7 @@ $ ntsc test              # run the test blocks
 | `ntsc watch [--release]` | Rebuild when sources change |
 | `ntsc pkg [args]` | Run the package manager |
 | `ntsc graph` | Print the module dependency graph as DOT |
+| `ntsc lsp` | Start the language server (LSP over stdio) |
 | `ntsc --version` | Print the compiler version |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

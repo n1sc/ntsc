@@ -11,6 +11,7 @@
 # Layout:
 #   ntsc-<version>-linux-<arch>/
 #     bin/ntsc
+#     bin/ntsc-lsp
 #     lib/ntsc/libntsc_runtime.a
 #     lib/ntsc/libLLVM.so.22.1 + the rest of the shared-library closure
 #     share/man/man1/ntsc.1.gz
@@ -29,14 +30,15 @@ set -euo pipefail
 VERSION="${1:?usage: make-tarball.sh <version> [binary]}"
 BIN="${2:-target/release/ntsc}"
 PKG="crates/ntsc-pkg/build/release/ntsc-pkg"
+LSP="target/release/ntsc-lsp"
 RUNTIME="target/release/libntsc_runtime.a"
 ARCH="$(uname -m)"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 MAN="$ROOT/../ntsc.1"
 
-for f in "$BIN" "$PKG" "$RUNTIME"; do
+for f in "$BIN" "$PKG" "$LSP" "$RUNTIME"; do
   if [ ! -f "$f" ]; then
-    echo "error: $f not found - build it with: cargo build --release -p ntsc-cli -p ntsc-runtime" >&2
+    echo "error: $f not found - build it with: cargo build --release -p ntsc-cli -p ntsc-lsp -p ntsc-runtime" >&2
     exit 1
   fi
 done
@@ -52,6 +54,7 @@ mkdir -p "$STAGE/bin" "$STAGE/lib/ntsc" "$STAGE/share/man/man1"
 
 install -m 755 "$BIN" "$STAGE/bin/ntsc"
 install -m 755 "$PKG" "$STAGE/bin/ntsc-pkg"
+install -m 755 "$LSP" "$STAGE/bin/ntsc-lsp"
 install -m 644 "$RUNTIME" "$STAGE/lib/ntsc/libntsc_runtime.a"
 gzip -9 -c "$MAN" > "$STAGE/share/man/man1/ntsc.1.gz"
 install -m 644 LICENSE "$STAGE/LICENSE"
@@ -85,12 +88,14 @@ bundle_elf() {
 
 bundle_elf "$STAGE/bin/ntsc"
 bundle_elf "$STAGE/bin/ntsc-pkg"
+bundle_elf "$STAGE/bin/ntsc-lsp"
 
 # ── Make it relocatable ────────────────────────────────────────────────────
 # $ORIGIN is a literal token the loader expands at run time; single-quote it so
 # the shell does not touch it.
 patchelf --set-rpath '$ORIGIN/../lib/ntsc' "$STAGE/bin/ntsc"
 patchelf --set-rpath '$ORIGIN/../lib/ntsc' "$STAGE/bin/ntsc-pkg"
+patchelf --set-rpath '$ORIGIN/../lib/ntsc' "$STAGE/bin/ntsc-lsp"
 for so in "$STAGE"/lib/ntsc/*.so*; do
   [ -f "$so" ] || continue
   chmod u+w "$so"

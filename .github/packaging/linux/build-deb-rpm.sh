@@ -18,11 +18,12 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 PACKAGING="$ROOT/.."
 BIN="target/release/ntsc"
 PKG="crates/ntsc-pkg/build/release/ntsc-pkg"
+LSP="target/release/ntsc-lsp"
 RUNTIME="target/release/libntsc_runtime.a"
 
-for f in "$BIN" "$PKG" "$RUNTIME"; do
+for f in "$BIN" "$PKG" "$LSP" "$RUNTIME"; do
   if [ ! -f "$f" ]; then
-    echo "error: $f not found - build the release compiler, package manager, and runtime first" >&2
+    echo "error: $f not found - build the release compiler, package manager, language server, and runtime first" >&2
     exit 1
   fi
 done
@@ -33,6 +34,7 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE"
 install -m 755 "$BIN" "$STAGE/ntsc"
 install -m 755 "$PKG" "$STAGE/ntsc-pkg"
+install -m 755 "$LSP" "$STAGE/ntsc-lsp"
 install -m 644 "$RUNTIME" "$STAGE/libntsc_runtime.a"
 gzip -9 -c "$ROOT/../ntsc.1" > "$STAGE/ntsc.1.gz"
 
@@ -43,6 +45,7 @@ if command -v dpkg-deb >/dev/null 2>&1; then
     "$DEBROOT/usr/share/man/man1"
   install -m 755 "$STAGE/ntsc" "$DEBROOT/usr/bin/ntsc"
   install -m 755 "$STAGE/ntsc-pkg" "$DEBROOT/usr/bin/ntsc-pkg"
+  install -m 755 "$STAGE/ntsc-lsp" "$DEBROOT/usr/bin/ntsc-lsp"
   install -m 644 "$STAGE/libntsc_runtime.a" "$DEBROOT/usr/lib/ntsc/libntsc_runtime.a"
   install -m 644 "$STAGE/ntsc.1.gz" "$DEBROOT/usr/share/man/man1/ntsc.1.gz"
   sed "s/@VERSION@/$VERSION/g" "$ROOT/debian/control" > "$DEBROOT/DEBIAN/control"

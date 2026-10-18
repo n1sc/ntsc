@@ -35,6 +35,7 @@ param(
   # mode.
   [string]$GnuRuntimeLib = "target\x86_64-pc-windows-gnu\release\libntsc_runtime.a",
   [string]$PackageManager = "crates\ntsc-pkg\build\release\ntsc-pkg.exe",
+  [string]$LanguageServer = "target\release\ntsc-lsp.exe",
 
   # Where the MinGW import libraries live. Defaults to the rustc toolchain's
   # x86_64-pc-windows-gnu lib dir (created by `rustup target add
@@ -50,6 +51,9 @@ if (-not (Test-Path (Join-Path $SourceDir "ntsc.exe"))) {
 }
 if (-not (Test-Path $PackageManager)) {
   throw "ntsc-pkg.exe not found at $PackageManager - build the package manager first"
+}
+if (-not (Test-Path $LanguageServer)) {
+  throw "ntsc-lsp.exe not found at $LanguageServer - build the language server first"
 }
 if (-not (Get-Command dumpbin -ErrorAction SilentlyContinue)) {
   throw "dumpbin not found - run inside the MSVC developer environment"
@@ -111,6 +115,7 @@ $deps | ForEach-Object { Write-Host "  $_" }
 # ── Stage files ─────────────────────────────────────────────────────────────
 Copy-Item (Join-Path $SourceDir "ntsc.exe") $Dist
 Copy-Item $PackageManager (Join-Path $Dist "ntsc-pkg.exe")
+Copy-Item $LanguageServer (Join-Path $Dist "ntsc-lsp.exe")
 foreach ($name in $deps) {
   $full = Join-Path $LlvmBin $name
   if (Test-Path $full) {
@@ -168,15 +173,15 @@ $lines += @(
 $lines | Set-Content -Path (Join-Path $ScriptDir "dlls.wxs") -Encoding UTF8
 
 # ── Generate tools.wxs ───────────────────────────────────────────────────────
-# The bundled linker files go next to ntsc.exe (INSTALLBIN); the MinGW import
-# libraries go into a mingw subdirectory (INSTALLMINGW).
+# The bundled binaries and linker files go next to ntsc.exe (INSTALLBIN); the
+# MinGW import libraries go into a mingw subdirectory (INSTALLMINGW).
 $lines = @(
   '<?xml version="1.0" encoding="UTF-8"?>',
   '<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">',
   '  <Fragment>',
   '    <ComponentGroup Id="Tools" Directory="INSTALLBIN">'
 )
-foreach ($name in @("ld.lld.exe", "libntsc_runtime.a")) {
+foreach ($name in @("ntsc-lsp.exe", "ld.lld.exe", "libntsc_runtime.a")) {
   $id = "tool." + [System.IO.Path]::GetFileNameWithoutExtension($name)
   $lines += "      <Component Id=`"$id`" Guid=`"*`">"
   $lines += "        <File Id=`"$id.file`" Source=`"`$(var.SourceDir)\$name`" KeyPath=`"yes`" />"

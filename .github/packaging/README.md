@@ -19,7 +19,10 @@ the LLVM libraries **and** the ntsc runtime, so they run with no LLVM install
 and no toolchain.
 
 Every package — native or tarball — ships `libntsc_runtime.a`, the static
-archive `ntsc build` links each NTSC program against. An installed `ntsc`
+archive `ntsc build` links each NTSC program against. Beside `ntsc` itself,
+each package installs `ntsc-pkg` (the package manager) and `ntsc-lsp` (the
+language server editors launch for `*.nt` files), so both are on `PATH`
+without a separate install. An installed `ntsc`
 locates it relative to its own executable (beside the binary on Windows and in
 the macOS bundle; in the sibling `lib/ntsc` or, on Fedora, `lib64/ntsc`
 directory on Unix prefixes), so no workspace checkout or `cargo` is needed at
@@ -189,12 +192,12 @@ relocatable so the bundled libraries resolve wherever the tree is extracted:
 ## Building locally
 
 Each recipe takes the version as its first argument. The native packages and
-tarballs expect the release compiler, the package-manager binary at
-`crates/ntsc-pkg/build/release/ntsc-pkg` (or `.exe`), and the runtime at
-`target/release/libntsc_runtime.a`:
+tarballs expect the release compiler and language server, the package-manager
+binary at `crates/ntsc-pkg/build/release/ntsc-pkg` (or `.exe`), and the
+runtime at `target/release/libntsc_runtime.a`:
 
 ```bash
-cargo build --release -p ntsc-cli -p ntsc-runtime
+cargo build --release -p ntsc-cli -p ntsc-lsp -p ntsc-runtime
 (cd crates/ntsc-pkg && ../../target/release/ntsc build --release)
 
 # Linux (.deb/.rpm require dpkg-deb/rpmbuild; the tarball requires patchelf;

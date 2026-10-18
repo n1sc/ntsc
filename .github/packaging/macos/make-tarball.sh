@@ -11,6 +11,7 @@
 # Layout:
 #   ntsc-<version>-macos-<arch>/
 #     bin/ntsc
+#     bin/ntsc-lsp
 #     lib/ntsc/libntsc_runtime.a
 #     lib/ntsc/libLLVM.dylib + the rest of the dylib closure
 #     share/man/man1/ntsc.1.gz
@@ -27,14 +28,15 @@ set -euo pipefail
 VERSION="${1:?usage: make-tarball.sh <version> [binary]}"
 BIN="${2:-target/release/ntsc}"
 PKG="crates/ntsc-pkg/build/release/ntsc-pkg"
+LSP="target/release/ntsc-lsp"
 RUNTIME="target/release/libntsc_runtime.a"
 ARCH="$(uname -m)"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 MAN="$ROOT/../ntsc.1"
 
-for f in "$BIN" "$PKG" "$RUNTIME"; do
+for f in "$BIN" "$PKG" "$LSP" "$RUNTIME"; do
   if [ ! -f "$f" ]; then
-    echo "error: $f not found - build it with: cargo build --release -p ntsc-cli -p ntsc-runtime" >&2
+    echo "error: $f not found - build it with: cargo build --release -p ntsc-cli -p ntsc-lsp -p ntsc-runtime" >&2
     exit 1
   fi
 done
@@ -47,6 +49,7 @@ mkdir -p "$STAGE/bin" "$LIBDIR" "$STAGE/share/man/man1"
 
 install -m 755 "$BIN" "$STAGE/bin/ntsc"
 install -m 755 "$PKG" "$STAGE/bin/ntsc-pkg"
+install -m 755 "$LSP" "$STAGE/bin/ntsc-lsp"
 install -m 644 "$RUNTIME" "$LIBDIR/libntsc_runtime.a"
 gzip -9 -c "$MAN" > "$STAGE/share/man/man1/ntsc.1.gz"
 install -m 644 LICENSE "$STAGE/LICENSE"
@@ -84,6 +87,7 @@ copy_dylibs "$STAGE/bin/ntsc-pkg"
 install_name_tool -add_rpath "@executable_path/../lib/ntsc" "$STAGE/bin/ntsc"
 codesign --force --sign - "$STAGE/bin/ntsc"
 codesign --force --sign - "$STAGE/bin/ntsc-pkg"
+codesign --force --sign - "$STAGE/bin/ntsc-lsp"
 
 # ── Assemble the archive ───────────────────────────────────────────────────
 tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"

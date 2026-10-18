@@ -12,6 +12,7 @@ set -euo pipefail
 VERSION="${1:?usage: make-dmg.sh <version> [binary]}"
 BIN="${2:-target/release/ntsc}"
 PKG="crates/ntsc-pkg/build/release/ntsc-pkg"
+LSP="target/release/ntsc-lsp"
 RUNTIME="target/release/libntsc_runtime.a"
 
 APP="dist/ntsc.app"
@@ -19,9 +20,9 @@ FRAMEWORKS="$APP/Contents/Frameworks"
 MACOS="$APP/Contents/MacOS"
 DMGDIR="dist/dmg"
 
-for f in "$BIN" "$PKG" "$RUNTIME"; do
+for f in "$BIN" "$PKG" "$LSP" "$RUNTIME"; do
   if [ ! -f "$f" ]; then
-    echo "error: $f not found - build the release compiler, package manager, and runtime first" >&2
+    echo "error: $f not found - build the release compiler, package manager, language server, and runtime first" >&2
     exit 1
   fi
 done
@@ -33,6 +34,7 @@ mkdir -p "$FRAMEWORKS" "$MACOS" "$DMGDIR"
 
 install -m 755 "$BIN" "$MACOS/ntsc"
 install -m 755 "$PKG" "$MACOS/ntsc-pkg"
+install -m 755 "$LSP" "$MACOS/ntsc-lsp"
 
 # The static archive `ntsc build` links every NTSC program against. It goes in
 # Contents/lib/ntsc/ — NOT beside the binary in Contents/MacOS/ — because
@@ -98,6 +100,7 @@ copy_dylibs "$MACOS/ntsc-pkg"
 
 # Ad-hoc signature so macOS accepts the bundle.
 codesign --force --sign - "$MACOS/ntsc-pkg"
+codesign --force --sign - "$MACOS/ntsc-lsp"
 codesign --force --sign - "$APP"
 
 # ── Assemble the .dmg ──────────────────────────────────────────────────────

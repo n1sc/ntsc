@@ -77,6 +77,7 @@ package() {
   # archive are found with no further configuration.
   install -Dm755 bin/ntsc "$pkgdir/usr/bin/ntsc"
   install -Dm755 bin/ntsc-pkg "$pkgdir/usr/bin/ntsc-pkg"
+  install -Dm755 bin/ntsc-lsp "$pkgdir/usr/bin/ntsc-lsp"
   install -d "$pkgdir/usr/lib/ntsc"
   cp -a lib/ntsc/. "$pkgdir/usr/lib/ntsc/"
   install -Dm644 share/man/man1/ntsc.1.gz "$pkgdir/usr/share/man/man1/ntsc.1.gz"
