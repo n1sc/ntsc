@@ -1,0 +1,150 @@
+# build.arq — project automation for NTSC (neutron-rs), run with arq.
+#
+#   arq list            list tasks
+#   arq build           release build of the shipped artifacts
+#   arq install         build release binaries and install globally
+#   arq quick           fast gate: fmt + scoped clippy + unit tests
+#   arq full            full gate: fmt + workspace clippy + workspace tests
+#
+# Knobs (environment variables):
+#   PREFIX   install prefix, default /usr/local (binaries go to $PREFIX/bin)
+#   FILTER   e2e suite name prefix, default empty (run every suite)
+#   PROJ     smoke-test project for `arq proj`, default examples/bank
+
+let prefix = env("PREFIX")
+if prefix == "" {
+    prefix = "/usr/local"
+}
+let bindir = "${prefix}/bin"
+
+fn step(msg) {
+    print(color("cyan", "==> ${msg}"))
+}
+
+fn done(msg) {
+    print(color("green", "ok ${msg}"))
+}
+
+task build {
+    step("release build (workspace)")
+    run "cargo build --release"
+    done("release binaries in target/release")
+}
+
+task build_debug {
+    step("debug build (ntsc-cli)")
+    run "cargo build -p ntsc-cli"
+    done("debug binary in target/debug")
+}
+
+task dev {
+    step("ntsc --version (debug)")
+    run "cargo run -q -p ntsc-cli -- --version"
+    done("dev run finished")
+}
+
+task fmt {
+    step("cargo fmt")
+    run "cargo fmt --all"
+    done("formatted")
+}
+
+task fmt_check {
+    step("cargo fmt --check")
+    run "cargo fmt --all -- --check"
+    done("formatting clean")
+}
+
+task lint {
+    step("clippy (ntsc-codegen + ntsc-runtime)")
+    run "cargo clippy -p ntsc-codegen -p ntsc-runtime --all-targets --all-features -- -D warnings"
+    done("clippy clean")
+}
+
+task lint_all {
+    step("clippy (workspace)")
+    run "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+    done("clippy clean")
+}
+
+task test_codegen {
+    step("ntsc-codegen unit tests")
+    run "cargo test -p ntsc-codegen --lib"
+    done("codegen unit tests passed")
+}
+
+task test_runtime {
+    step("ntsc-runtime unit tests")
+    run "cargo test -p ntsc-runtime"
+    done("runtime unit tests passed")
+}
+
+task test {
+    step("unit tests (codegen + runtime)")
+    run "cargo test -p ntsc-runtime"
+    run "cargo test -p ntsc-codegen --lib"
+    done("unit tests passed")
+}
+
+task e2e {
+    step("e2e suites (FILTER selects a name prefix, empty runs all)")
+    run "set -e; filter=$FILTER; suites=0; for f in crates/ntsc-codegen/tests/*_e2e.rs; do s=$(basename $f .rs); case $s in $filter*) echo suite: $s; cargo test -p ntsc-codegen --test $s; suites=$((suites+1)) ;; esac; done; if [ $suites -eq 0 ]; then echo no e2e suites match filter: $filter; exit 2; fi"
+    done("e2e passed")
+}
+
+task proj {
+    step("smoke test (PROJ selects the project, default examples/bank)")
+    run "set -e; root=$(pwd); dir=$PROJ; if [ -z $dir ]; then dir=examples/bank; fi; echo smoke: $dir; cargo build -p ntsc-cli; cd $dir; $root/target/debug/ntsc build; ./build/debug/$(basename $dir)"
+    done("smoke test passed")
+}
+
+task quick {
+    step("quick gate: fmt + lint + unit tests")
+    run "cargo fmt --all"
+    print(color("cyan", "==> clippy (ntsc-codegen + ntsc-runtime)"))
+    run "cargo clippy -p ntsc-codegen -p ntsc-runtime --all-targets --all-features -- -D warnings"
+    print(color("cyan", "==> unit tests"))
+    run "cargo test -p ntsc-runtime"
+    run "cargo test -p ntsc-codegen --lib"
+    done("quick gate passed")
+}
+
+task full {
+    step("full gate: fmt + workspace clippy + workspace tests")
+    run "cargo fmt --all"
+    print(color("cyan", "==> clippy (workspace)"))
+    run "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+    print(color("cyan", "==> tests (workspace)"))
+    run "cargo test --workspace"
+    done("full gate passed")
+}
+
+task install after build {
+    step("installing ntsc globally to ${bindir} (PREFIX overrides)")
+    run "set -e; prefix=${prefix}; bindir=$prefix/bin; cargo build --release -p ntsc-cli -p ntsc-lsp; cargo build --release -p ntsc-runtime; if [ -w $bindir ]; then SUDO=; else SUDO=sudo; fi; $SUDO mkdir -p $bindir; $SUDO cp target/release/ntsc $bindir/ntsc; $SUDO cp target/release/ntsc-lsp $bindir/ntsc-lsp; $SUDO cp target/release/libntsc_runtime.a $bindir/libntsc_runtime.a; $SUDO chmod 755 $bindir/ntsc $bindir/ntsc-lsp; $bindir/ntsc --version; case :$PATH: in *:$bindir:*) ;; *) echo NOTE: add $bindir to PATH: export PATH=$bindir:$PATH ;; esac"
+    done("ntsc installed to ${bindir}")
+}
+
+task uninstall {
+    step("removing ntsc from ${bindir}")
+    run "set -e; prefix=${prefix}; bindir=$prefix/bin; if [ -w $bindir ]; then SUDO=; else SUDO=sudo; fi; $SUDO rm -f $bindir/ntsc $bindir/ntsc-lsp $bindir/libntsc_runtime.a; echo removed ntsc from $bindir"
+    done("uninstalled")
+}
+
+task clean {
+    step("clean per-feature runtime cache")
+    run "rm -rf target/ntsc-runtime-*"
+    done("clean")
+}
+
+task clean_all {
+    step("cargo clean")
+    run "cargo clean"
+    done("clean")
+}
+
+task prune {
+    step("prune regenerable artifacts (PRUNE_FLAGS forwards flags, e.g. --dry-run)")
+    run "sh scripts/prune-artifacts.sh $PRUNE_FLAGS"
+    done("pruned")
+}
