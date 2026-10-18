@@ -149,6 +149,16 @@ impl FileAnalysis {
         None
     }
 
+    /// The keyword under `offset`, if any. Keywords are separate token kinds
+    /// rather than identifiers, so [`Self::identifier_at`] skips them; hover
+    /// still documents them.
+    pub fn keyword_at(&self, offset: usize) -> Option<&'static str> {
+        self.tokens
+            .iter()
+            .find(|token| token.span.start <= offset && offset <= token.span.end)
+            .and_then(|token| token.kind.keyword_lexeme())
+    }
+
     /// Resolve the definition targeted by the identifier at `offset`.
     pub fn definition_at(&self, offset: usize) -> Option<&Symbol> {
         let (name, _, is_member) = self.identifier_at(offset)?;
@@ -2109,6 +2119,18 @@ mod tests {
         assert_eq!(enclosing.callee_name.as_deref(), Some("add"));
         let target = analysis.callable_at("add", offset).expect("callable");
         assert_eq!(target.params.len(), 2);
+    }
+
+    #[test]
+    fn keyword_at_reports_keyword_tokens() {
+        let analysis = analyze(SAMPLE);
+        let offset = SAMPLE.find("say(total)").expect("sample contains say") + 1;
+        // `say` is a keyword token, not an identifier, so hover can only
+        // describe it through the token under the cursor.
+        assert_eq!(analysis.identifier_at(offset), None);
+        assert_eq!(analysis.keyword_at(offset), Some("say"));
+        let identifier = SAMPLE.find("total)").expect("sample contains total") + 1;
+        assert_eq!(analysis.keyword_at(identifier), None);
     }
 
     #[test]

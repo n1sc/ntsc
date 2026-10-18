@@ -638,13 +638,19 @@ impl<'a> Server<'a> {
         let uri = &params.text_document_position_params.text_document.uri;
         let document = self.document_for(uri)?;
         let offset = document.offset(params.text_document_position_params.position)?;
-        let (name, _, is_member) = document.analysis.identifier_at(offset)?;
-        let contents: String = if is_member {
-            self.member_hover(document, name)
-        } else {
-            self.symbol_hover(document, name, offset)
-                .or_else(|| self.cross_file_hover(document, name))
-        }?;
+        let contents: String = match document.analysis.identifier_at(offset) {
+            Some((name, _, true)) => self.member_hover(document, name),
+            Some((name, _, false)) => self
+                .symbol_hover(document, name, offset)
+                .or_else(|| self.cross_file_hover(document, name)),
+            None => None,
+        }
+        // Keywords are their own token kinds, so they only reach hover
+        // through the token under the cursor.
+        .or_else(|| {
+            let keyword = document.analysis.keyword_at(offset)?;
+            builtin_markdown(keyword).or_else(|| keyword_markdown(keyword))
+        })?;
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
@@ -656,10 +662,17 @@ impl<'a> Server<'a> {
 
     fn symbol_hover(&self, document: &Document, name: &str, offset: usize) -> Option<String> {
         if let Some(symbol) = document.analysis.definition_at(offset) {
-            return Some(symbol_markdown(symbol));
+            // A `use` statement defines a module symbol whose signature says
+            // nothing beyond its own name; for a stdlib module fall through to
+            // the curated entry, which lists what the module offers.
+            let stdlib_import =
+                symbol.kind == SymbolKind::Module && stdlib::module(&symbol.name).is_some();
+            if !stdlib_import {
+                return Some(symbol_markdown(symbol));
+            }
         }
-        if let Some((builtin, detail)) = stdlib::BUILTINS.iter().find(|(label, _)| *label == name) {
-            return Some(format!("```neutron\n{detail}\n```\n*builtin `{builtin}`*"));
+        if let Some(markdown) = builtin_markdown(name) {
+            return Some(markdown);
         }
         if let Some(module) = stdlib::module(name) {
             return Some(format!(
@@ -674,13 +687,7 @@ impl<'a> Server<'a> {
                     .join(", ")
             ));
         }
-        if let Some((keyword, description)) =
-            stdlib::KEYWORDS.iter().find(|(label, _)| *label == name)
-        {
-            return Some(format!("`{keyword}` — {description}"));
-        }
-        let _ = document;
-        None
+        keyword_markdown(name)
     }
 
     /// Hover for a symbol that is not declared in this file: the flat
@@ -1924,6 +1931,22 @@ fn member_context(prefix: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((qualifier.trim_start_matches('@'), after_dot))
+}
+
+/// Markdown hover body for a builtin value: its call signature.
+fn builtin_markdown(name: &str) -> Option<String> {
+    stdlib::BUILTINS
+        .iter()
+        .find(|(label, _)| *label == name)
+        .map(|(builtin, detail)| format!("```neutron\n{detail}\n```\n*builtin `{builtin}`*"))
+}
+
+/// Markdown hover body for a keyword: `` `keyword` — description ``.
+fn keyword_markdown(keyword: &str) -> Option<String> {
+    stdlib::KEYWORDS
+        .iter()
+        .find(|(label, _)| *label == keyword)
+        .map(|(_, description)| format!("`{keyword}` — {description}"))
 }
 
 /// Markdown hover body for a symbol: signature, doc comment, parameters,
