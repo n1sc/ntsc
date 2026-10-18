@@ -10,12 +10,13 @@ members = [
     "crates/ntsc-runtime",
     "crates/ntsc-typeck",
     "crates/ntsc-cli",
+    "crates/ntsc-cargo",
+    "crates/ntsc-lsp",
 ]
 
 [workspace.package]
-# Cargo requires semver-valid versions, so the stage letter of the 26.0
-# scheme (26.0.0b) lives only in the CLI's NTSC_VERSION constant.
-version = "26.0.0"
+# Pre-release development version; use semantic versioning for releases.
+version = "0.0.0"
 edition = "2024"
 license = "NPL-1.1"
 
