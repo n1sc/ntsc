@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 struct Fixture(PathBuf);
 
@@ -254,6 +253,9 @@ fn cargo_doc_opens_generated_html_with_system_opener() {
     );
     let stdout = assert_success(&output);
     assert!(stdout.contains("wrote "), "{stdout}");
+
+    use std::thread;
+    use std::time::Duration;
 
     for _ in 0..100 {
         if marker.is_file() {
