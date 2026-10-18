@@ -619,7 +619,7 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
 
     // ── paths module ─────────────────────────────────────────────────────
 
-    declare!("ntsc_paths_join", i64_ty, i64_ty);
+    declare!("ntsc_paths_join", i64_ty, i64_ty, i64_ty);
     declare!("ntsc_paths_parent", i64_ty, i64_ty);
     declare!("ntsc_paths_file_name", i64_ty, i64_ty);
     declare!("ntsc_paths_extension", i64_ty, i64_ty);

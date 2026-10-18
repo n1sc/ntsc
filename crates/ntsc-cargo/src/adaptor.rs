@@ -9638,7 +9638,12 @@ mod tests {
         // The adaptor path-depends on the cached copy, not the registry.
         let cached_src = cache.crate_src_path("fake", "1.0.0");
         let manifest = fs::read_to_string(dir.join("Cargo.toml")).unwrap();
-        assert!(manifest.contains(&format!("path = {:?}", cached_src)));
+        let parsed: toml::Value = manifest.parse().expect("generated manifest parses as TOML");
+        assert_eq!(
+            parsed["dependencies"]["fake"]["path"].as_str().map(Path::new),
+            Some(cached_src.as_path()),
+            "adaptor path-depends on the cached copy"
+        );
         assert!(manifest.contains("crate-version = \"1.0.0\""));
 
         let export = fs::read_to_string(dir.join("fake.export.json")).unwrap();

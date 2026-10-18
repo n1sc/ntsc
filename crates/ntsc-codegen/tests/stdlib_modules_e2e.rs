@@ -403,3 +403,60 @@ fun main() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn paths_join_accepts_two_components() {
+    // Regression: the runtime ABI used to take one newline-packed
+    // argument while every caller (and the docs) used `paths.join(a, b)`;
+    // the stdlib arity checker then rejected those documented calls.
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rewrite_dir = workspace.parent().unwrap().parent().unwrap();
+    let runtime_lib = rewrite_dir.join(
+        Path::new("target")
+            .join("debug")
+            .join(ntsc_codegen::runtime_lib_name()),
+    );
+
+    let status = std::process::Command::new("cargo")
+        .args(["build", "-p", "ntsc-runtime"])
+        .current_dir(rewrite_dir)
+        .status()
+        .expect("failed to build ntsc-runtime");
+    assert!(status.success(), "failed to build ntsc-runtime");
+
+    let source = r#"
+use paths
+fun main() {
+    say(paths.join("/a", "b.txt"))
+}
+"#;
+    let dir = std::env::temp_dir().join("ntsc_paths_join_e2e_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join(format!("paths_join.{}", ntsc_codegen::object_extension()));
+    let bin_path = dir.join("paths_join_ntsc_test");
+
+    ntsc_codegen::compile_source(source, ntsc_codegen::host_triple(), "paths_join", &dir)
+        .expect("compile_source failed");
+    ntsc_codegen::link_binary(&obj_path, &runtime_lib, &bin_path).expect("link_binary failed");
+
+    let output = std::process::Command::new(&bin_path)
+        .output()
+        .expect("failed to run binary");
+
+    assert!(
+        output.status.success(),
+        "binary exited with non-zero status"
+    );
+    let separator = std::path::MAIN_SEPARATOR;
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("/a{separator}b.txt\n")
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Memory leak detected"),
+        "paths.join program leaked registry handles: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

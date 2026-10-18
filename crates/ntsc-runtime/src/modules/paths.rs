@@ -9,18 +9,20 @@ fn fail(fn_name: &str, msg: impl std::fmt::Display) -> i64 {
     super::throw_str(format!("paths.{fn_name}: {msg}"))
 }
 
-/// `paths.join(...)` — joins any number of path segments.
-/// Accepts a newline-separated list of segments.
+/// `paths.join(a, b)` — joins two path components; empty components
+/// contribute nothing, matching the documented join behavior.
 #[unsafe(no_mangle)]
-pub extern "C" fn ntsc_paths_join(segments: i64) -> i64 {
-    let segs = registry::get_string(segments).unwrap_or_default();
-    let mut result = PathBuf::new();
-    for seg in segs.split('\n') {
-        if !seg.is_empty() {
-            result = result.join(seg);
-        }
-    }
-    registry::put_string(result.to_string_lossy().to_string())
+pub extern "C" fn ntsc_paths_join(a: i64, b: i64) -> i64 {
+    let left = registry::get_string(a).unwrap_or_default();
+    let right = registry::get_string(b).unwrap_or_default();
+    let joined = if left.is_empty() {
+        right
+    } else if right.is_empty() {
+        left
+    } else {
+        Path::new(&left).join(&right).to_string_lossy().to_string()
+    };
+    registry::put_string(joined)
 }
 
 /// `paths.parent(path)` — the parent directory, or "" at root.
@@ -182,15 +184,11 @@ mod tests {
 
     #[test]
     fn test_join() {
-        let segments = put("a\nb\nc");
         assert_eq!(
-            read(ntsc_paths_join(segments)),
-            format!(
-                "a{}b{}c",
-                std::path::MAIN_SEPARATOR,
-                std::path::MAIN_SEPARATOR
-            )
+            read(ntsc_paths_join(put("a"), put("b"))),
+            format!("a{}b", std::path::MAIN_SEPARATOR)
         );
+        assert_eq!(read(ntsc_paths_join(put("a"), put(""))), "a");
     }
 
     #[test]

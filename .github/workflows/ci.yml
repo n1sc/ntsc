@@ -172,7 +172,13 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        # ntsc-runtime's registry keeps one process-global live-handle
+        # counter; its unit tests assert reclamation against that global,
+        # so they must not interleave with each other under the default
+        # parallel harness (the race intermittently broke CI).
+        run: |
+          cargo test --workspace --exclude ntsc-runtime
+          cargo test -p ntsc-runtime -- --test-threads=1
 
       # ── Smoke test: scaffold + build + run a project ─────────────────────
       # Runs under pwsh like every other step: a bash shell prepends the Git
