@@ -192,29 +192,6 @@ ntsc/
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-## Roadmap
-
-Current milestones for the 0.1 release:
-
-* [ ] Pattern matching on user-defined enum payloads with variable binding
-* [ ] Lambda closures that capture outer variables
-* [ ] Methods on enums
-* [ ] Module privacy (`private`)
-* [ ] Sequence combinators (`map`, `filter`, `fold`, `zip`)
-* [ ] Derived implementations (`deriving`)
-* [ ] `static var` / `static mut` module-level mutable state
-* [ ] C-string conversion helpers (`strings.from_c_str` / `to_c_str`)
-
-Post-0.1:
-
-* [ ] Inlining / devirtualization optimization passes
-* [ ] `\u{...}` Unicode escapes in string literals
-* [ ] `strings.length` counting characters, not bytes
-
-See the [open issues](https://github.com/n1sc/ntsc/issues) for a full list.
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
 ## Contributing
 
 Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
