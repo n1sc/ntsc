@@ -683,6 +683,34 @@ fn stmt_byte_range(stmt: &Stmt) -> (usize, usize) {
             }
             acc
         }
+        ExternFunction {
+            abi,
+            name,
+            params,
+            return_type,
+            ..
+        } => {
+            acc = add_span(abi.span, acc);
+            acc = add_span(name.span, acc);
+            for param in params {
+                acc = add_span(param.name.span, acc);
+                if let Some(ta) = &param.type_annotation {
+                    acc = add_ty(ta, acc);
+                }
+            }
+            if let Some(rt) = return_type {
+                acc = add_span(rt.arrow_span, acc);
+                acc = add_ty(&rt.ty, acc);
+            }
+            acc
+        }
+        ExternBlock { abi, functions } => {
+            acc = add_span(abi.span, acc);
+            for function in functions {
+                acc = add_sub(function, acc);
+            }
+            acc
+        }
         Return { value } => {
             if let Some(value) = value {
                 acc = add_expr(value, acc);

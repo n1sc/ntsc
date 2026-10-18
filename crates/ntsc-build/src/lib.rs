@@ -22,6 +22,19 @@ pub struct BuildConfig {
 
     /// Name of the output binary.
     pub output: String,
+
+    /// Native libraries required by `extern "C"` declarations, without the
+    /// platform-specific linker prefix (for example `m` becomes `-lm`).
+    pub ffi_libraries: Vec<String>,
+
+    /// Project-relative or absolute directories searched for FFI libraries.
+    /// Relative paths are resolved from the project directory by the CLI.
+    pub ffi_search_paths: Vec<String>,
+
+    /// Whether the experimental Rust-crate import feature (`use @crate`)
+    /// is enabled. Defaults to `false`; a `[experimental]` table with
+    /// `rust_modules = true` opts the project in.
+    pub experimental_rust_modules: bool,
 }
 
 /// A single error encountered while parsing `neutron.toml`.
@@ -80,12 +93,19 @@ pub fn parse(source: &str) -> Result<BuildConfig, Vec<BuildError>> {
         .unwrap_or_else(|| Some(host_triple().to_string()));
     let entry = extract_string(package, "entry", &mut errors);
     let output = extract_string(package, "output", &mut errors);
+    let ffi_libraries = extract_string_array(table.get("ffi"), "libraries", &mut errors);
+    let ffi_search_paths = extract_string_array(table.get("ffi"), "search_paths", &mut errors);
+    let experimental_rust_modules =
+        extract_bool(table.get("experimental"), "rust_modules", &mut errors);
 
     if errors.is_empty() {
         Ok(BuildConfig {
             target: target.expect("checked above"),
             entry: entry.expect("checked above"),
             output: output.expect("checked above"),
+            ffi_libraries,
+            ffi_search_paths,
+            experimental_rust_modules,
         })
     } else {
         Err(errors)
@@ -138,6 +158,71 @@ fn extract_string(
     }
 }
 
+fn extract_string_array(
+    table: Option<&toml::Value>,
+    key: &str,
+    errors: &mut Vec<BuildError>,
+) -> Vec<String> {
+    let Some(table) = table else {
+        return Vec::new();
+    };
+    let Some(value) = table.get(key) else {
+        return Vec::new();
+    };
+    let Some(values) = value.as_array() else {
+        errors.push(BuildError {
+            message: format!("`ffi.{key}` must be an array of strings"),
+            line: 0,
+            column: 0,
+        });
+        return Vec::new();
+    };
+    let mut result = Vec::with_capacity(values.len());
+    for value in values {
+        if let Some(value) = value.as_str() {
+            result.push(value.to_string());
+        } else {
+            errors.push(BuildError {
+                message: format!("every `ffi.{key}` entry must be a string"),
+                line: 0,
+                column: 0,
+            });
+        }
+    }
+    result
+}
+
+fn extract_bool(table: Option<&toml::Value>, key: &str, errors: &mut Vec<BuildError>) -> bool {
+    let Some(table) = table else {
+        return false;
+    };
+    match table.get(key) {
+        Some(toml::Value::Boolean(value)) => *value,
+        Some(_) => {
+            errors.push(BuildError {
+                message: format!("`experimental.{key}` must be a boolean"),
+                line: 0,
+                column: 0,
+            });
+            false
+        }
+        None => false,
+    }
+}
+
+/// Whether the program imports Rust crates through the experimental
+/// `use @crate` form (whole-module or per-symbol selective imports).
+pub fn uses_rust_crates(program: &ntsc_ast::stmt::Program) -> bool {
+    program.statements.iter().any(|stmt| match stmt {
+        ntsc_ast::stmt::Stmt::Use {
+            is_rust,
+            imported_is_rust,
+            ..
+        } => *is_rust || imported_is_rust.iter().any(|is_rust| *is_rust),
+        _ => false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,11 +234,16 @@ mod tests {
 target = "x86_64-unknown-linux-gnu"
 entry = "src/main.nt"
 output = "my-project"
+[ffi]
+search_paths = ["native"]
+libraries = ["m"]
 "#;
         let config = parse(src).expect("should parse successfully");
         assert_eq!(config.target, "x86_64-unknown-linux-gnu");
         assert_eq!(config.entry, "src/main.nt");
         assert_eq!(config.output, "my-project");
+        assert_eq!(config.ffi_libraries, vec!["m"]);
+        assert_eq!(config.ffi_search_paths, vec!["native"]);
     }
 
     #[test]
@@ -227,5 +317,58 @@ output = "cool-app"
         let src = "[package]\ntarget = 123\nentry = \"src/main.nt\"\noutput = \"p\"\n";
         let errs = parse(src).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("must be a string")));
+    }
+
+    #[test]
+    fn experimental_rust_modules_defaults_to_false() {
+        let src = "[package]\nentry = \"src/main.nt\"\noutput = \"p\"\n";
+        let config = parse(src).expect("config should parse");
+        assert!(!config.experimental_rust_modules);
+    }
+
+    #[test]
+    fn experimental_rust_modules_opt_in() {
+        let src = r#"
+[package]
+entry = "src/main.nt"
+output = "p"
+[experimental]
+rust_modules = true
+"#;
+        let config = parse(src).expect("config should parse");
+        assert!(config.experimental_rust_modules);
+    }
+
+    #[test]
+    fn experimental_rust_modules_wrong_type() {
+        let src = r#"
+[package]
+entry = "src/main.nt"
+output = "p"
+[experimental]
+rust_modules = "yes"
+"#;
+        let errs = parse(src).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.message == "`experimental.rust_modules` must be a boolean")
+        );
+    }
+
+    #[test]
+    fn uses_rust_crates_detects_at_crate_imports() {
+        let tokenize_and_parse = |source: &str| {
+            let tokens = ntsc_lexer::tokenize(source);
+            ntsc_parser::parse(&tokens).expect("source should parse")
+        };
+        let rust_program = tokenize_and_parse("use @serde_json\nfun main() {}\n");
+        assert!(uses_rust_crates(&rust_program));
+
+        let selective_program =
+            tokenize_and_parse("use (@json) = from @serde_json\nfun main() {}\n");
+        assert!(uses_rust_crates(&selective_program));
+
+        let plain_program = tokenize_and_parse("use sys\nfun main() { sys.print(1) }\n");
+        assert!(!uses_rust_crates(&plain_program));
     }
 }

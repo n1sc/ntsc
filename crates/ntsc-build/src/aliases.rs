@@ -240,6 +240,29 @@ impl Rewriter<'_> {
                     body: self.stmts(body),
                 }
             }
+            Stmt::ExternFunction {
+                abi,
+                mut name,
+                params,
+                return_type,
+                c_style,
+            } => {
+                name = self.id_token(&name, false);
+                Stmt::ExternFunction {
+                    abi,
+                    name,
+                    params: self.params(params),
+                    return_type: return_type.map(|r| ntsc_ast::types::ReturnType {
+                        ty: self.ty(r.ty),
+                        arrow_span: r.arrow_span,
+                    }),
+                    c_style,
+                }
+            }
+            Stmt::ExternBlock { abi, functions } => Stmt::ExternBlock {
+                abi,
+                functions: functions.into_iter().map(|f| self.stmt(f)).collect(),
+            },
             Stmt::Return { value } => Stmt::Return {
                 value: value.map(|v| self.expr(v)),
             },
