@@ -1012,11 +1012,19 @@ fn foreign_dependency_patches(foreign: &std::collections::BTreeMap<String, Forei
     }
     let mut patches = String::from("[patch.crates-io]\n");
     for dep in foreign.values() {
+        let mut table = toml::map::Map::new();
+        table.insert(
+            "path".into(),
+            toml::Value::String(dep.src.display().to_string()),
+        );
+        table.insert(
+            "version".into(),
+            toml::Value::String(format!("={}", dep.version)),
+        );
         patches.push_str(&format!(
-            "{} = {{ path = \"{}\", version = \"={}\" }}\n",
+            "{} = {}\n",
             dep.package,
-            dep.src.display(),
-            dep.version
+            toml::Value::Table(table)
         ));
     }
     patches
@@ -9709,6 +9717,35 @@ mod tests {
     }
     "#;
 
+    /// Build a generated adaptor offline, falling back to a networked
+    /// build when a dependency is missing from the local cargo cache:
+    /// fresh CI machines have not downloaded the crates a host may
+    /// already have (e.g. tokio from earlier local runs), while the
+    /// offline fast path keeps the test hermetic where possible.
+    fn build_adaptor_dir(manifest: &Path, target_dir: &Path) -> std::process::Output {
+        let attempt = |offline: bool| {
+            let mut command = std::process::Command::new("cargo");
+            command
+                .arg("build")
+                .arg("--manifest-path")
+                .arg(manifest)
+                .arg("--target-dir")
+                .arg(target_dir);
+            if offline {
+                command.arg("--offline");
+            }
+            command.output().expect("failed to run cargo")
+        };
+        let offline = attempt(true);
+        if offline.status.success()
+            || !String::from_utf8_lossy(&offline.stderr).contains("no matching package")
+        {
+            offline
+        } else {
+            attempt(false)
+        }
+    }
+
     fn write_callback_fixture(tag: &str) -> (TempDir, PathBuf) {
         let crate_dir = TempDir::new(tag);
         let src_dir = crate_dir.0.join("src");
@@ -9887,15 +9924,10 @@ mod tests {
         let lib = emit_lib("cbtest", &discovered);
         fs::write(adaptor_dir.0.join("src").join("lib.rs"), lib).unwrap();
 
-        let output = std::process::Command::new("cargo")
-            .arg("build")
-            .arg("--offline")
-            .arg("--manifest-path")
-            .arg(adaptor_dir.0.join("Cargo.toml"))
-            .arg("--target-dir")
-            .arg(adaptor_dir.0.join("target"))
-            .output()
-            .expect("failed to run cargo");
+        let output = build_adaptor_dir(
+            &adaptor_dir.0.join("Cargo.toml"),
+            &adaptor_dir.0.join("target"),
+        );
         assert!(
             output.status.success(),
             "callback adaptor must compile:\n{}",
@@ -11145,15 +11177,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let output = std::process::Command::new("cargo")
-            .arg("build")
-            .arg("--offline")
-            .arg("--manifest-path")
-            .arg(dir.join("Cargo.toml"))
-            .arg("--target-dir")
-            .arg(dir.join("target"))
-            .output()
-            .expect("failed to run cargo");
+        let output = build_adaptor_dir(&dir.join("Cargo.toml"), &dir.join("target"));
         assert!(
             output.status.success(),
             "foreign adaptor must compile:\n{}",
