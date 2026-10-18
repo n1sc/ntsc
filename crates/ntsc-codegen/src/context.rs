@@ -16,9 +16,29 @@ static INIT_LLVM: Once = Once::new();
 
 pub fn init_llvm() {
     INIT_LLVM.call_once(|| {
+        // Fail fast when the linked system libLLVM.so is not the LLVM major
+        // the inkwell C-API bindings were generated for: the mismatch is not
+        // reported at build or link time, and the ABI skew corrupts memory
+        // inside the pass pipeline instead of failing loudly.
+        let (mut major, mut minor, mut patch) = (0u32, 0u32, 0u32);
+        unsafe {
+            llvm_sys::core::LLVMGetVersion(&mut major, &mut minor, &mut patch);
+        }
+        assert_eq!(
+            major, EXPECTED_LLVM_MAJOR,
+            "linked LLVM runtime is {major}.{minor}.{patch}, but ntsc-codegen was built for the \
+             LLVM {EXPECTED_LLVM_MAJOR} C API (inkwell `llvm22-1`). A mismatched system \
+             libLLVM.so silently corrupts memory inside the pass pipeline: install LLVM \
+             {EXPECTED_LLVM_MAJOR} and point LLVM_SYS_221_PREFIX at it (see \
+             docs/reference/contributing.md)."
+        );
         Target::initialize_all(&InitializationConfig::default());
     });
 }
+
+/// The LLVM major version the inkwell C-API bindings were generated for.
+/// Must match the `llvm22-1` feature in `Cargo.toml`.
+const EXPECTED_LLVM_MAJOR: u32 = 22;
 
 /// Serializes every operation that touches LLVM's shared global state.
 ///

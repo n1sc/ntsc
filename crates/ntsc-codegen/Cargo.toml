@@ -17,3 +17,11 @@ ntsc-lexer = { path = "../ntsc-lexer" }
 ntsc-typeck = { path = "../ntsc-typeck" }
 ntsc-build = { path = "../ntsc-build" }
 ntsc-diag = { path = "../ntsc-diag" }
+# Direct, matching inkwell's `llvm22-1` feature: `init_llvm` calls
+# `LLVMGetVersion` to fail fast when the linked system libLLVM.so is not
+# the LLVM major the bindings were generated for (abi skew segfaults).
+llvm-sys = "221"
+# Parse the `ntsc-cargo` export manifests (`*.export.json`) as JSON when
+# loading Rust-call return types; the previous substring scanner coupled
+# codegen to the emitter's exact whitespace and broke on escaped strings.
+serde_json = "1.0"
