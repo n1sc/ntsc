@@ -1933,7 +1933,7 @@ fn declaration_mentions_impl_trait(statement: &Stmt) -> bool {
     };
     params
         .iter()
-        .any(|param| param.type_annotation.as_ref().is_some_and(&mentions))
+        .any(|param| param.type_annotation.as_ref().is_some_and(mentions))
         || return_type.as_ref().is_some_and(|ret| mentions(&ret.ty))
 }
 
