@@ -175,6 +175,56 @@ fun main() -> int {
 }
 
 #[test]
+fn result_payload_ownership_e2e() {
+    // Regression: `Err("..." + x)` and `Ok(call())` used to store the payload
+    // and then drop the same fresh temporary, leaving the cell holding a freed
+    // handle, so the message read back empty. A borrowed payload must be
+    // copied instead of being aliased.
+    let source = r#"use strings
+fun fail_concat(view string name) -> result[string, string] {
+    return Err("unknown package '" + copy(name) + "'")
+}
+
+fun fail_view(view string name) -> result[string, string] {
+    return Err(name)
+}
+
+fun fail_in_try(view string name) -> result[string, string] {
+    try {
+        if (strings.is_empty(name)) {
+            return Err("empty name")
+        }
+        return Ok("name:" + copy(name))
+    } catch (err) {
+        return Err("caught: " + err)
+    }
+}
+
+fun reveal(string msg) -> result[string, string] {
+    return Ok(msg)
+}
+
+fun main() -> int {
+    say(fail_concat("json").or_else(reveal).unwrap_or("?"))
+    say(fail_view("plain view").or_else(reveal).unwrap_or("?"))
+    say(fail_in_try("json").or_else(reveal).unwrap_or("?"))
+    say(fail_in_try("").or_else(reveal).unwrap_or("?"))
+    return 0
+}
+"#;
+
+    let stdout = compile_and_run(source, "result_payload_ownership");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    let expected = [
+        "unknown package 'json'", // concatenated error payload survives
+        "plain view",             // borrowed payload is copied into the cell
+        "name:json",              // Ok(...) inside try keeps its payload
+        "empty name",             // Err(...) inside try keeps its payload
+    ];
+    assert_eq!(lines, expected, "unexpected program output:\n{stdout}");
+}
+
+#[test]
 fn result_match_e2e() {
     // Destructuring match over results: variant binders, `_` payload skip,
     // guards reading the bound payload, default fallback, and a fresh call

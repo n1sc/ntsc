@@ -474,7 +474,9 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         | "ntsc_sys_exists"
         | "ntsc_sys_mkdir"
         | "ntsc_sys_cp"
+        | "ntsc_sys_cp_all"
         | "ntsc_sys_rm"
+        | "ntsc_sys_rm_all"
         | "ntsc_sys_symlink"
         | "ntsc_sys_is_symlink" => Ty::Bool,
         "ntsc_sys_exit" | "ntsc_sys_sleep" => Ty::Void,
@@ -498,6 +500,7 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         | "ntsc_strings_last_index_of"
         | "ntsc_strings_char_code"
         | "ntsc_json_length" => Ty::Int,
+        "ntsc_strings_split_array" => Ty::Array(Box::new(Ty::String)),
         "ntsc_strings_split"
         | "ntsc_strings_join"
         | "ntsc_strings_join_all"
@@ -1021,21 +1024,33 @@ pub(crate) fn emit_call<'ctx>(
             let want_ok = name_str == "Ok";
             let payload_ty = arg_values[0].ntsc_type.clone();
             let ok_ty = if want_ok { payload_ty.clone() } else { Ty::Any };
-            let err_ty = if want_ok { Ty::String } else { payload_ty };
-            let boxed = box_result_value(
-                fn_ctx,
-                &ok_ty,
-                &err_ty,
-                &arguments[0],
-                &arg_values[0],
-                want_ok,
-            )?;
+            let err_ty = if want_ok {
+                Ty::String
+            } else {
+                payload_ty.clone()
+            };
+
+            // The cell owns its payload: a bare owned variable moves out of
+            // its slot, a fresh temporary is adopted as is, and a borrowed
+            // value is copied. Dropping a fresh temporary after storing it
+            // would leave the cell holding a freed handle.
+            let mut payload = arg_values[0].clone();
+            let mut moved = false;
             if let Expr::Variable { name } = &arguments[0]
-                && ty_is_owned_handle(&arg_values[0].ntsc_type)
+                && ty_is_owned_handle(&payload_ty)
             {
                 fn_ctx.null_var_slot(name.lexeme());
+                moved = true;
             }
-            emit_drop_borrowed_fresh_args(fn_ctx, &arguments, &arg_values, &[])?;
+            if !moved
+                && !expr_is_fresh(fn_ctx, &arguments[0], &arg_values[0])
+                && !expr_is_string_literal(&arguments[0])
+            {
+                payload = copy_owned_value(fn_ctx, &arg_values[0])?;
+            }
+
+            let boxed =
+                box_result_value(fn_ctx, &ok_ty, &err_ty, &arguments[0], &payload, want_ok)?;
             return Ok(boxed);
         }
 

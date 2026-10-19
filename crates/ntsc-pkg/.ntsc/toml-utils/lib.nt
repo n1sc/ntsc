@@ -1,0 +1,261 @@
+use sys
+use toml
+use json
+use strings
+use arrays
+
+/// A JSON string value without its surrounding quotes. The `json` module hands
+/// values back as raw JSON text, so every string read needs this.
+fun unquote(view string value) -> string {
+    var text = strings.trim(value)
+    if (strings.length(text) >= 2 && strings.starts_with(text, "\"") && strings.ends_with(text, "\"")) {
+        return strings.substring(text, 1, strings.length(text) - 1)
+    }
+    return text
+}
+
+fun read_toml(view string path) -> result[string, string] {
+    if (!sys.exists(path)) {
+        return Err("cannot find " + copy(path))
+    }
+    var content = ""
+    try {
+        content = sys.read(path)
+    } catch (err) {
+        return Err("cannot read " + copy(path) + ": " + err)
+    }
+    var parsed = ""
+    try {
+        parsed = toml.parse(content)
+    } catch (err) {
+        return Err("cannot parse " + copy(path) + ": " + err)
+    }
+    return Ok(parsed)
+}
+
+fun get_package_name(view string toml_json) -> result[string, string] {
+    var pkg = json.get(toml_json, "package")
+    if (pkg == "null") {
+        return Err("missing [package] table")
+    }
+    var name = unquote(json.get(pkg, "name"))
+    if (strings.is_empty(name) || name == "null") {
+        return Err("missing 'name' in [package]")
+    }
+    return Ok(name)
+}
+
+fun get_entry(view string toml_json) -> result[string, string] {
+    var pkg = json.get(toml_json, "package")
+    if (pkg == "null") {
+        return Err("missing [package] table")
+    }
+    var entry = unquote(json.get(pkg, "entry"))
+    if (strings.is_empty(entry) || entry == "null") {
+        return Err("missing 'entry' in [package]")
+    }
+    return Ok(entry)
+}
+
+/// The `[dependencies]` table as JSON text, or `{}` when there is none.
+fun get_dependencies(view string toml_json) -> string {
+    var deps = json.get(toml_json, "dependencies")
+    if (deps == "null" || strings.is_empty(deps)) {
+        return "{}"
+    }
+    return deps
+}
+
+fun dependency_names(view string deps) -> array[string] {
+    var names = arrays.new()
+    var keys = json.keys(deps)
+    if (strings.is_empty(keys)) {
+        return names
+    }
+    var parts = strings.split_array(keys, ",")
+    var count = arrays.length(parts)
+    for (var i = 0; i < count; i = i + 1) {
+        var name = strings.trim(arrays.get(parts, i))
+        if (!strings.is_empty(name)) {
+            arrays.push(names, copy(name))
+        }
+    }
+    return names
+}
+
+/// The requirement string for `name`, or "" when it is not a dependency.
+fun get_dependency(view string deps, view string name) -> string {
+    var spec = unquote(json.get(deps, name))
+    if (spec == "null") {
+        return ""
+    }
+    return spec
+}
+
+/// Rewrite the `name = "spec"` line inside `[dependencies]`, adding the entry
+/// (and the section) when it is missing. Every other line is preserved, so
+/// comments and unrelated tables survive.
+fun set_dependency(view string path, view string name, view string spec) -> result[bool, string] {
+    var content = read_text(path)?
+    var lines = split_lines(content)
+    var section = find_section(lines, "dependencies")
+    var line = copy(name) + " = \"" + copy(spec) + "\""
+
+    if (section < 0) {
+        if (arrays.length(lines) > 0) {
+            arrays.push(lines, "")
+        }
+        arrays.push(lines, "[dependencies]")
+        arrays.push(lines, line)
+        return write_lines(path, lines)
+    }
+
+    var end = section_end(lines, section)
+    for (var i = section + 1; i < end; i = i + 1) {
+        if (key_of(arrays.get(lines, i)) == name) {
+            return write_lines(path, replace_line(lines, i, line))
+        }
+    }
+    return write_lines(path, insert_line(lines, end, line))
+}
+
+fun remove_dependency(view string path, view string name) -> result[bool, string] {
+    var content = read_text(path)?
+    var lines = split_lines(content)
+    var section = find_section(lines, "dependencies")
+    if (section < 0) {
+        return Err("'" + copy(name) + "' is not a dependency")
+    }
+    var end = section_end(lines, section)
+    for (var i = section + 1; i < end; i = i + 1) {
+        if (key_of(arrays.get(lines, i)) == name) {
+            return write_lines(path, remove_line(lines, i))
+        }
+    }
+    return Err("'" + copy(name) + "' is not a dependency")
+}
+
+fun read_text(view string path) -> result[string, string] {
+    if (!sys.exists(path)) {
+        return Err("cannot find " + copy(path))
+    }
+    var content = ""
+    try {
+        content = sys.read(path)
+    } catch (err) {
+        return Err("cannot read " + copy(path) + ": " + err)
+    }
+    return Ok(content)
+}
+
+fun split_lines(view string content) -> array[string] {
+    var raw = strings.split_array(content, "\n")
+    var lines = arrays.new()
+    var count = arrays.length(raw)
+    for (var i = 0; i < count; i = i + 1) {
+        var line = arrays.get(raw, i)
+        if (strings.ends_with(line, "\r")) {
+            line = strings.substring(line, 0, strings.length(line) - 1)
+        }
+        arrays.push(lines, copy(line))
+    }
+    var last = arrays.length(lines)
+    if (last > 0 && strings.is_empty(arrays.get(lines, last - 1))) {
+        lines = remove_line(lines, last - 1)
+    }
+    return lines
+}
+
+fun write_lines(view string path, view array[string] lines) -> result[bool, string] {
+    var content = arrays.join(lines, "\n")
+    if (!strings.is_empty(content)) {
+        content = content + "\n"
+    }
+    var written = false
+    try {
+        written = sys.write(path, content)
+    } catch (err) {
+        return Err("cannot write " + copy(path) + ": " + err)
+    }
+    return Ok(written)
+}
+
+/// The index of the `[name]` header, or -1.
+fun find_section(view array[string] lines, view string name) -> int {
+    var header = "[" + copy(name) + "]"
+    var count = arrays.length(lines)
+    for (var i = 0; i < count; i = i + 1) {
+        if (strings.trim(arrays.get(lines, i)) == header) {
+            return i
+        }
+    }
+    return -1
+}
+
+/// The index of the next section header, or the line count.
+fun section_end(view array[string] lines, int section) -> int {
+    var count = arrays.length(lines)
+    for (var i = section + 1; i < count; i = i + 1) {
+        var trimmed = strings.trim(arrays.get(lines, i))
+        if (strings.starts_with(trimmed, "[")) {
+            return i
+        }
+    }
+    return count
+}
+
+/// The key of a `key = value` line, or "" for blanks, comments and headers.
+fun key_of(view string line) -> string {
+    var trimmed = strings.trim(line)
+    if (strings.is_empty(trimmed) || strings.starts_with(trimmed, "#")) {
+        return ""
+    }
+    var equals = strings.index_of(trimmed, "=", 0)
+    if (equals < 0) {
+        return ""
+    }
+    var key = strings.trim(strings.substring(trimmed, 0, equals))
+    if (strings.starts_with(key, "\"") && strings.ends_with(key, "\"")) {
+        return strings.substring(key, 1, strings.length(key) - 1)
+    }
+    return key
+}
+
+fun replace_line(view array[string] lines, int index, view string line) -> array[string] {
+    var out = arrays.new()
+    var count = arrays.length(lines)
+    for (var i = 0; i < count; i = i + 1) {
+        if (i == index) {
+            arrays.push(out, copy(line))
+        } else {
+            arrays.push(out, copy(arrays.get(lines, i)))
+        }
+    }
+    return out
+}
+
+fun insert_line(view array[string] lines, int index, view string line) -> array[string] {
+    var out = arrays.new()
+    var count = arrays.length(lines)
+    for (var i = 0; i < count; i = i + 1) {
+        if (i == index) {
+            arrays.push(out, copy(line))
+        }
+        arrays.push(out, copy(arrays.get(lines, i)))
+    }
+    if (index >= count) {
+        arrays.push(out, copy(line))
+    }
+    return out
+}
+
+fun remove_line(view array[string] lines, int index) -> array[string] {
+    var out = arrays.new()
+    var count = arrays.length(lines)
+    for (var i = 0; i < count; i = i + 1) {
+        if (i != index) {
+            arrays.push(out, copy(arrays.get(lines, i)))
+        }
+    }
+    return out
+}
