@@ -2,7 +2,7 @@ use "lockfile" as lockfile
 use "registry" as registry
 use "resolve" as resolver
 use "source" as source
-use "toml-utils" as toml_utils
+use "toml_utils" as toml_utils
 
 use arrays
 use crypto

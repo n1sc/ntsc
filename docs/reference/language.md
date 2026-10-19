@@ -63,7 +63,9 @@ literal newline can also be written by breaking the line inside the quotes.
 Interpolation `${expr}` is available inside double-quoted strings. `r"..."`
 strings are stored verbatim: no escapes and no interpolation.
 
-Integers are decimal only. There are no hex, octal, or binary literals.
+Integers are decimal by default, with optional radix prefixes `0x`
+(hexadecimal), `0o` (octal), and `0b` (binary). Expressions may span line
+breaks when a binary operator leads the next line or ends the previous one.
 
 ### Keywords
 

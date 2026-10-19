@@ -1,0 +1,551 @@
+use arrays
+use fmt
+use json
+use strings
+use sys
+
+class Parser {
+    var string input
+    var int pos
+
+    fun init(view string source) {
+        this.input = copy(source)
+        this.pos = 0
+    }
+
+    fun rest() -> string {
+        return strings.substring(this.input, this.pos, -1)
+    }
+
+    fun peek() -> string {
+        return strings.char_at(this.input, this.pos)
+    }
+
+    fun advance() -> string {
+        var c = this.peek()
+        if (!strings.is_empty(c)) {
+            this.pos = this.pos + strings.length(c)
+        }
+        return c
+    }
+
+    fun consume(view string text) -> bool {
+        if (strings.starts_with(this.rest(), text)) {
+            this.pos = this.pos + strings.length(text)
+            return true
+        }
+        return false
+    }
+
+    fun fail(view string message) -> string {
+        throw "toml.parse: " + copy(message) + " at byte " + fmt.i64_to_str(this.pos)
+        return ""
+    }
+
+    fun skip() {
+        while (!strings.is_empty(this.peek())) {
+            var c = this.peek()
+            if (c == " " || c == "\t" || c == "\r" || c == "\n") {
+                this.advance()
+            } elif (c == "#") {
+                while (!strings.is_empty(this.peek()) && this.peek() != "\n") {
+                    this.advance()
+                }
+            } else {
+                return
+            }
+        }
+    }
+
+    fun parse_basic_string() -> string {
+        if (!this.consume("\"")) {
+            this.fail("expected double-quoted string")
+        }
+        var out = ""
+        while (!strings.is_empty(this.peek())) {
+            var c = this.advance()
+            if (strings.is_empty(c)) {
+                this.fail("unterminated basic string")
+            }
+            if (c == "\"") {
+                return out
+            }
+            if (c == "\\") {
+                var escaped = this.advance()
+                if (escaped == "\"") {
+                    out = out + "\""
+                } elif (escaped == "\\") {
+                    out = out + "\\"
+                } elif (escaped == "n") {
+                    out = out + "\n"
+                } elif (escaped == "r") {
+                    out = out + "\r"
+                } elif (escaped == "t") {
+                    out = out + "\t"
+                } elif (escaped == "b") {
+                    out = out + strings.from_char_code(8)
+                } elif (escaped == "f") {
+                    out = out + strings.from_char_code(12)
+                } elif (escaped == "u" || escaped == "U") {
+                    this.fail("Unicode escapes are not supported in basic strings")
+                } else {
+                    this.fail("invalid escape in basic string")
+                }
+            } else {
+                out = out + c
+            }
+        }
+        this.fail("unterminated basic string")
+        return out
+    }
+
+    fun parse_literal_string() -> string {
+        if (!this.consume("'")) {
+            this.fail("expected literal string")
+        }
+        var out = ""
+        while (!strings.is_empty(this.peek())) {
+            var c = this.advance()
+            if (strings.is_empty(c)) {
+                this.fail("unterminated literal string")
+            }
+            if (c == "'") {
+                return out
+            }
+            out = out + c
+        }
+        this.fail("unterminated literal string")
+        return out
+    }
+
+    fun is_key_char(view string c) -> bool {
+        return strings.is_alnum(c) || c == "_" || c == "-" || c == "."
+    }
+
+    fun parse_key_path() -> string {
+        this.skip()
+        var c = this.peek()
+        if (c == "\"") {
+            return json.escape_string(this.parse_basic_string())
+        }
+        if (c == "'") {
+            return json.escape_string(this.parse_literal_string())
+        }
+        var raw = ""
+        while (this.is_key_char(this.peek())) {
+            raw = raw + this.advance()
+        }
+        if (strings.is_empty(raw)) {
+            this.fail("expected key")
+        }
+        var pieces = strings.split_array(raw, ".")
+        var quoted = arrays.new()
+        var count = arrays.length(pieces)
+        for (var i = 0; i < count; i = i + 1) {
+            var piece = strings.trim(arrays.get(pieces, i))
+            if (strings.is_empty(piece)) {
+                this.fail("empty dotted key segment")
+            }
+            arrays.push(quoted, json.escape_string(piece))
+        }
+        return strings.join_all(quoted, ".")
+    }
+
+    fun parse_number() -> string {
+        var text = ""
+        var scanning = true
+        while (scanning) {
+            var c = this.peek()
+            if (strings.is_digit(c) || c == "_" || c == "." || c == "+" || c == "-" || c == "e" || c == "E" || c == "x" || c == "o" || c == "b" || strings.is_alpha(c)) {
+                text = text + this.advance()
+            } else {
+                scanning = false
+            }
+        }
+        var clean = strings.replace(text, "_", "")
+        if (strings.starts_with(clean, "0x") || strings.starts_with(clean, "-0x") || strings.starts_with(clean, "0o") || strings.starts_with(clean, "-0o") || strings.starts_with(clean, "0b") || strings.starts_with(clean, "-0b")) {
+            var negative = strings.starts_with(clean, "-")
+            var body = copy(clean)
+            if (negative || strings.starts_with(clean, "+")) {
+                body = strings.substring(clean, 1, -1)
+            }
+            var radix = 10
+            if (strings.starts_with(body, "0x")) {
+                radix = 16
+            } elif (strings.starts_with(body, "0o")) {
+                radix = 8
+            } elif (strings.starts_with(body, "0b")) {
+                radix = 2
+            }
+            var digits = strings.substring(body, 2, -1)
+            if (strings.is_empty(digits)) {
+                this.fail("invalid radix integer")
+            }
+            var number = 0
+            var digit_pos = 0
+            while (digit_pos < strings.length(digits)) {
+                var digit_text = strings.char_at(digits, digit_pos)
+                var digit = 0
+                if (strings.is_digit(digit_text)) {
+                    digit = fmt.to_int(digit_text)
+                } else {
+                    digit = strings.char_code(strings.lower(digit_text), 0) - strings.char_code("a", 0) + 10
+                }
+                if (digit < 0 || digit >= radix) {
+                    this.fail("invalid radix integer")
+                }
+                number = number * radix + digit
+                digit_pos = digit_pos + strings.length(digit_text)
+            }
+            if (negative) {
+                number = 0 - number
+            }
+            return fmt.i64_to_str(number)
+        }
+        if (clean == "inf" || clean == "+inf" || clean == "-inf" || clean == "nan" || clean == "+nan" || clean == "-nan") {
+            return json.escape_string(clean)
+        }
+        if (strings.contains(clean, ".") || strings.contains(clean, "e") || strings.contains(clean, "E")) {
+            if (!fmt.is_float(clean)) {
+                this.fail("invalid float")
+            }
+            return clean
+        }
+        if (!fmt.is_int(clean)) {
+            this.fail("invalid integer")
+        }
+        return clean
+    }
+
+    fun parse_value() -> string {
+        this.skip()
+        var c = this.peek()
+        if (c == "\"") {
+            return json.escape_string(this.parse_basic_string())
+        }
+        if (c == "'") {
+            return json.escape_string(this.parse_literal_string())
+        }
+        if (c == "[") {
+            this.consume("[")
+            var values = arrays.new()
+            this.skip()
+            if (this.consume("]")) {
+                return "[]"
+            }
+            while (true) {
+                arrays.push(values, this.parse_value())
+                this.skip()
+                if (this.consume("]")) {
+                    return "[" + strings.join_all(values, ",") + "]"
+                }
+                if (!this.consume(",")) {
+                    this.fail("expected ',' or ']' in array")
+                }
+                this.skip()
+                if (this.consume("]")) {
+                    return "[" + strings.join_all(values, ",") + "]"
+                }
+            }
+        }
+        if (c == "{") {
+            this.consume("{")
+            var entries = arrays.new()
+            this.skip()
+            if (this.consume("}")) {
+                return "{}"
+            }
+            while (true) {
+                var key = this.parse_key_path()
+                this.skip()
+                if (!this.consume("=")) {
+                    this.fail("expected '=' in inline table")
+                }
+                var value = this.parse_value()
+                arrays.push(entries, key + "\t" + value)
+                this.skip()
+                if (this.consume("}")) {
+                    return build_object(entries)
+                }
+                if (!this.consume(",")) {
+                    this.fail("expected ',' or '}' in inline table")
+                }
+                this.skip()
+                if (this.consume("}")) {
+                    return build_object(entries)
+                }
+            }
+        }
+        if (strings.starts_with(this.rest(), "true")) {
+            this.pos = this.pos + 4
+            return "true"
+        }
+        if (strings.starts_with(this.rest(), "false")) {
+            this.pos = this.pos + 5
+            return "false"
+        }
+        return this.parse_number()
+    }
+
+    fun parse_document() -> string {
+        var entries = arrays.new()
+        var current = ""
+        while (true) {
+            this.skip()
+            if (strings.is_empty(this.peek())) {
+                return build_object(entries)
+            }
+            if (this.consume("[[")) {
+                current = this.parse_key_path()
+                this.skip()
+                if (!this.consume("]]")) {
+                    this.fail("expected ']]'")
+                }
+                continue
+            }
+            if (this.consume("[")) {
+                current = this.parse_key_path()
+                this.skip()
+                if (!this.consume("]")) {
+                    this.fail("expected ']'")
+                }
+                continue
+            }
+            var key = this.parse_key_path()
+            this.skip()
+            if (!this.consume("=")) {
+                this.fail("expected '='")
+            }
+            var value = this.parse_value()
+            var path = copy(key)
+            if (!strings.is_empty(current)) {
+                path = copy(current) + "."
+                path = path + copy(key)
+            }
+            arrays.push(entries, path + "\t" + value)
+            this.skip()
+        }
+    }
+}
+
+fun path_head(view string path) -> string {
+    var quoted = false
+    var i = 0
+    while (i < strings.length(path)) {
+        var c = strings.char_at(path, i)
+        if (c == "\"") {
+            quoted = !quoted
+        } elif (c == "." && !quoted) {
+            return copy(strings.substring(path, 0, i))
+        }
+        i = i + strings.length(c)
+    }
+    return copy(path)
+}
+
+fun path_tail(view string path) -> string {
+    var quoted = false
+    var i = 0
+    while (i < strings.length(path)) {
+        var c = strings.char_at(path, i)
+        if (c == "\"") {
+            quoted = !quoted
+        } elif (c == "." && !quoted) {
+            return copy(strings.substring(path, i + 1, -1))
+        }
+        i = i + strings.length(c)
+    }
+    return ""
+}
+
+fun entry_path(view string entry) -> string {
+    var tab = strings.index_of(entry, "\t", 0)
+    return copy(strings.substring(entry, 0, tab))
+}
+
+fun entry_value(view string entry) -> string {
+    var tab = strings.index_of(entry, "\t", 0)
+    return copy(strings.substring(entry, tab + 1, -1))
+}
+
+fun build_object(view array[string] entries) -> string {
+    var keys = arrays.new()
+    var count = arrays.length(entries)
+    var entry_index = 0
+    while (entry_index < count) {
+        var key = path_head(entry_path(copy(arrays.get(entries, entry_index))))
+        var seen = false
+        var key_count = arrays.length(keys)
+        var candidate_index = 0
+        while (candidate_index < key_count) {
+            if (arrays.get(keys, candidate_index) == key) {
+                seen = true
+            }
+            candidate_index = candidate_index + 1
+        }
+        if (!seen) {
+            arrays.push(keys, copy(key))
+        }
+        entry_index = entry_index + 1
+    }
+    var output = "{"
+    var first = true
+    var key_count = arrays.length(keys)
+    var key_index = 0
+    while (key_index < key_count) {
+        var key = arrays.get(keys, key_index)
+        var child = arrays.new()
+        var value = ""
+        var has_value = false
+        var value_index = 0
+        while (value_index < count) {
+            var entry = copy(arrays.get(entries, value_index))
+            var path = entry_path(entry)
+            if (path_head(path) != key) {
+            } else {
+                var tail = path_tail(path)
+                if (strings.is_empty(tail)) {
+                    value = entry_value(entry)
+                    has_value = true
+                } else {
+                    arrays.push(child, tail + "\t" + entry_value(entry))
+                }
+            }
+            value_index = value_index + 1
+        }
+        if (arrays.length(child) > 0) {
+            value = build_object(child)
+        } elif (!has_value) {
+            value = "{}"
+        }
+        if (!first) {
+            output = output + ","
+        }
+        first = false
+        output = output + key + ":" + value
+        key_index = key_index + 1
+    }
+    return output + "}"
+}
+
+fun parse(view string text) -> string {
+    var parser = Parser(text)
+    return parser.parse_document()
+}
+
+fun bare_key(view string key) -> bool {
+    if (strings.is_empty(key)) {
+        return false
+    }
+    for (var i = 0; i < strings.length(key); i = i + strings.length(strings.char_at(key, i))) {
+        var c = strings.char_at(key, i)
+        if (!(strings.is_alnum(c) || c == "_" || c == "-")) {
+            return false
+        }
+    }
+    return true
+}
+
+fun toml_key(view string key) -> string {
+    if (bare_key(key)) {
+        return copy(key)
+    }
+    return json.escape_string(key)
+}
+
+fun value_to_toml(view string value) -> string {
+    if (value == "null") {
+        throw "toml.stringify: TOML has no null value"
+    }
+    if (strings.starts_with(value, "\"") || value == "true" || value == "false" || value == "inf" || value == "-inf" || value == "+inf" || value == "nan" || value == "-nan" || value == "+nan") {
+        return copy(value)
+    }
+    if (strings.char_at(value, 0) == "[") {
+        var output = "["
+        var count = json.length(value)
+        for (var i = 0; i < count; i = i + 1) {
+            if (i > 0) {
+                output = output + ", "
+            }
+            output = output + value_to_toml(json.at(value, i))
+        }
+        return output + "]"
+    }
+    if (value == "{}" || !strings.is_empty(json.keys(value))) {
+        return inline_table(value)
+    }
+    return copy(value)
+}
+
+fun inline_table(view string document) -> string {
+    var owned_document = copy(document)
+    var keys = strings.split_array(json.keys(owned_document), ",")
+    var output = "{"
+    var first = true
+    var count = arrays.length(keys)
+    for (var i = 0; i < count; i = i + 1) {
+        var key = strings.trim(arrays.get(keys, i))
+        if (strings.is_empty(key)) {
+            continue
+        }
+        if (!first) {
+            output = output + ", "
+        }
+        first = false
+        output = output + toml_key(key) + " = " + value_to_toml(json.get(owned_document, copy(key)))
+    }
+    return output + "}"
+}
+
+fun emit_table(view string path, view string document, bool root) -> string {
+    var owned_document = copy(document)
+    var keys = strings.split_array(json.keys(owned_document), ",")
+    var count = arrays.length(keys)
+    var output = ""
+    if (!root) {
+        output = "[" + copy(path) + "]\n"
+    }
+    for (var i = 0; i < count; i = i + 1) {
+        var key = strings.trim(arrays.get(keys, i))
+        if (strings.is_empty(key)) {
+            continue
+        }
+        var value = copy(json.get(owned_document, copy(key)))
+        if (value == "null") {
+            continue
+        }
+        var value_keys = copy(json.keys(value))
+        if (value_keys == "") {
+            output = output + toml_key(key) + " = " + value_to_toml(value) + "\n"
+        }
+    }
+    for (var j = 0; j < count; j = j + 1) {
+        var key = strings.trim(arrays.get(keys, j))
+        if (strings.is_empty(key)) {
+            continue
+        }
+        var child_keys = copy(json.keys(json.get(owned_document, copy(key))))
+        if (child_keys == "") {
+            continue
+        }
+        var child_path = copy(path)
+        if (!strings.is_empty(child_path)) {
+            child_path = child_path + "."
+        }
+        child_path = child_path + toml_key(key)
+        var child_document = copy(json.get(owned_document, copy(key)))
+        output = output + "\n" + emit_table(child_path, child_document, false)
+    }
+    return output
+}
+
+fun stringify(view string document) -> string {
+    var value = strings.trim(document)
+    if (!json.is_valid(value) || !strings.starts_with(value, "{")) {
+        throw "toml.stringify: expected a JSON object"
+    }
+    if (value == "{}") {
+        return ""
+    }
+    return emit_table("", value, true)
+}

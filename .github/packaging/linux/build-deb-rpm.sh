@@ -3,9 +3,9 @@
 #
 # Usage: build-deb-rpm.sh <version>
 #
-# The binary is already built at target/release/ntsc and links LLVM 22
+# The binary is already built at target/release/ntsc and links LLVM 23
 # dynamically; the packages therefore declare a runtime dependency on the
-# system LLVM (libLLVM-22 on Debian/Ubuntu, llvm-libs on Fedora/RHEL).
+# system LLVM (libLLVM-23 on Debian/Ubuntu, llvm-libs on Fedora/RHEL).
 #
 # Both packages also ship libntsc_runtime.a — the static archive `ntsc build`
 # links every NTSC program against. It is a static library, so it adds no

@@ -383,8 +383,8 @@ pub(crate) fn emit_static_const<'ctx>(
                 },
                 _,
             ) => {
-                let val: i64 = n.parse().map_err(|e| {
-                    crate::CodegenError::LLVMError(format!("invalid int constant: {e}"))
+                let val = ntsc_ast::expr::parse_int_literal(n).ok_or_else(|| {
+                    crate::CodegenError::LLVMError(format!("invalid int constant: {n}"))
                 })?;
                 slot.set_initializer(&context.i64_type().const_int(val as u64, true));
             }
@@ -425,8 +425,8 @@ pub(crate) fn emit_static_const<'ctx>(
                     ..
                 } = right.as_ref()
                 {
-                    let val: i64 = n.parse().map_err(|e| {
-                        crate::CodegenError::LLVMError(format!("invalid int constant: {e}"))
+                    let val = ntsc_ast::expr::parse_int_literal(n).ok_or_else(|| {
+                        crate::CodegenError::LLVMError(format!("invalid int constant: {n}"))
                     })?;
                     slot.set_initializer(
                         &context

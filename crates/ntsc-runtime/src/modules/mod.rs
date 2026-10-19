@@ -36,7 +36,6 @@ pub mod sys;
 pub mod term;
 pub mod testing;
 pub mod time;
-pub mod toml;
 pub mod yaml;
 
 use crate::registry;

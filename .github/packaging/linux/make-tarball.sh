@@ -13,7 +13,7 @@
 #     bin/ntsc
 #     bin/ntsc-lsp
 #     lib/ntsc/libntsc_runtime.a
-#     lib/ntsc/libLLVM.so.22.1 + the rest of the shared-library closure
+#     lib/ntsc/libLLVM.so.23.1 + the rest of the shared-library closure
 #     share/man/man1/ntsc.1.gz
 #     LICENSE
 #

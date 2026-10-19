@@ -3,7 +3,7 @@ Version: @VERSION@
 Section: devel
 Priority: optional
 Architecture: amd64
-Depends: libLLVM-22 (>= 22.0), libc6, libgcc-s1, libstdc++6
+Depends: libLLVM-23 (>= 23.0), libc6, libgcc-s1, libstdc++6
 Maintainer: yasakei
 Homepage: https://github.com/yasakei/neutron-rs
 Description: Neutron Type-Safe Compiler
@@ -11,5 +11,5 @@ Description: Neutron Type-Safe Compiler
  binaries through LLVM. Values move by default, borrows are declared with
  view, and memory is released deterministically when ownership ends.
  .
- The ntsc binary links LLVM 22 dynamically; this package therefore depends
- on the libLLVM-22 runtime.
+ The ntsc binary links LLVM 23 dynamically; this package therefore depends
+ on the libLLVM-23 runtime.

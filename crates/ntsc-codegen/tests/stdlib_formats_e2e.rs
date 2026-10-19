@@ -1,4 +1,4 @@
-//! End-to-end test for the `csv`, `toml`, and `yaml` standard library
+//! End-to-end test for the `csv` and `yaml` standard library
 //! modules and the `testing.bench` benchmark harness.
 
 use std::path::Path;
@@ -121,39 +121,6 @@ fn csv_roundtrip() {
 }
 
 #[test]
-fn toml_parse_and_stringify() {
-    let source = "use toml\nfun main() {\n    var toml_input = \"name = \\\"Alice\\\"\\nage = 30\\nactive = true\";\n    var parsed = toml.parse(toml_input);\n    say(\"t0: \" + parsed);\n\n    var output = toml.stringify(parsed);\n    say(\"t1: \" + output);\n\n    var empty = toml.parse(\"\");\n    say(\"t2: \" + empty);\n\n    try {\n        var bad = toml.stringify(\"[1,2,3]\");\n        say(\"unreached-toml-stringify\");\n    } catch (err) {\n        say(\"t4: \" + err);\n    }\n\n    say(\"done\")\n}\n";
-
-    let dir = std::env::temp_dir().join("ntsc_toml_e2e_test");
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let output = build_and_run(source, "toml_e2e", &dir);
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    assert!(
-        output.status.success(),
-        "binary exited with non-zero status:\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(
-        stdout.contains("t0:") && stdout.contains("\"name\""),
-        "t0 should contain parsed name:\n{stdout}"
-    );
-    assert!(stdout.contains("t1:"), "missing t1 output:\n{stdout}");
-    assert!(
-        stdout.contains("t2: {}"),
-        "t2 should be empty object:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("t4:") && stdout.contains("toml.stringify"),
-        "t4 should contain error:\n{stdout}"
-    );
-    assert!(stdout.trim().ends_with("done"));
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn yaml_parse_and_stringify() {
     let source = "use yaml\nfun main() {\n    var yaml_input = \"name: Alice\\nage: 30\\nactive: true\";\n    var parsed = yaml.parse(yaml_input);\n    say(\"y0: \" + parsed);\n\n    var output = yaml.stringify(parsed);\n    say(\"y1: \" + output);\n\n    var empty = yaml.parse(\"\");\n    say(\"y2: \" + empty);\n\n    try {\n        var bad = yaml.stringify(\"[1,2,3]\");\n        say(\"unreached-yaml-stringify\");\n    } catch (err) {\n        say(\"y4: \" + err);\n    }\n\n    say(\"done\")\n}\n";
 
@@ -202,27 +169,6 @@ fn yaml_roundtrip() {
     );
     assert!(stdout.contains("yrt0:"), "missing yrt0 output:\n{stdout}");
     assert!(stdout.contains("yrt1:"), "missing yrt1 output:\n{stdout}");
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn toml_roundtrip() {
-    let source = "use toml\nuse json\nfun main() {\n    var input = \"name = \\\"Bob\\\"\\nage = 25\\nactive = false\";\n    var data = toml.parse(input);\n    say(\"trt0: \" + data);\n\n    var parsed_name = json.get(data, \"name\");\n    say(\"trt1: \" + parsed_name);\n\n    var parsed_age = json.get(data, \"age\");\n    say(\"trt2: \" + parsed_age);\n\n    say(\"done\")\n}\n";
-
-    let dir = std::env::temp_dir().join("ntsc_toml_roundtrip_e2e");
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let output = build_and_run(source, "toml_roundtrip", &dir);
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    assert!(
-        output.status.success(),
-        "binary exited with non-zero status:\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(stdout.contains("trt0:"), "missing trt0 output:\n{stdout}");
-    assert!(stdout.contains("trt1:"), "missing trt1 output:\n{stdout}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

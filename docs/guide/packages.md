@@ -83,8 +83,8 @@ generated `.gitignore` keeps it out of version control. Commit
 tree so every machine builds the same code.
 
 One project is an exception: the package manager itself commits its
-`.ntsc/toml-utils/` tree, because `ntsc-pkg` cannot fetch its own dependency
-before it exists.
+`.ntsc/toml/` tree, because `ntsc-pkg` cannot fetch its own dependency before
+it exists.
 
 The lockfile is plain TOML:
 

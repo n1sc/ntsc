@@ -9,7 +9,7 @@ These recipes are versioned with the rest of the repository. The release job
 checks out the tree on a fresh runner and runs them from there, so a change
 here only takes effect once it is merged.
 
-The compiler links LLVM 22 **dynamically**. The native Linux packages built
+The compiler links LLVM 23 **dynamically**. The native Linux packages built
 from source (`.deb`, `.rpm`, and the AUR `PKGBUILD`) declare a runtime
 dependency on the system LLVM; the macOS `.dmg` and the Windows `.msi` ship the
 LLVM libraries alongside the binary. The portable `.tar.gz` archives (one per
@@ -63,7 +63,7 @@ packaging/
 
 `build-deb-rpm.sh` stages the binary and a gzipped man page, then runs
 `dpkg-deb`. The generated `debian/control` declares a dependency on
-`libLLVM-22`, the Debian/Ubuntu name for the LLVM 22 runtime (Fedora's is
+`libLLVM-23`, the Debian/Ubuntu name for the LLVM 23 runtime (Fedora's is
 `llvm-libs`), so each distro family is packaged against its own runtime.
 
 Artifact: `ntsc_<version>_amd64.deb`
@@ -73,7 +73,7 @@ Install with: `sudo dpkg -i ntsc_<version>_amd64.deb`
 ### Fedora / RHEL (.rpm)
 
 `build-deb-rpm.sh` runs `rpmbuild` against `fedora/ntsc.spec`, which requires
-`llvm-libs >= 22`.
+`llvm-libs >= 23`.
 
 Artifact: `ntsc-<version>-1.x86_64.rpm`
 
@@ -114,7 +114,7 @@ Artifact: `ntsc-bin-<version>-1-x86_64.pkg.tar.zst`
 ### macOS (.dmg)
 
 `make-dmg.sh` wraps the binary in a `ntsc.app` bundle, recursively copies the
-non-system dylib closure (including Homebrew's `llvm@22` libraries) into
+non-system dylib closure (including Homebrew's `llvm@23` libraries) into
 `Contents/Frameworks`, rewrites install names to `@rpath`, ad-hoc code signs,
 and packs everything into a `UDZO` .dmg with an Applications symlink.
 

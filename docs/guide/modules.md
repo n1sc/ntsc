@@ -32,7 +32,7 @@ csv       encoding  fmt          glob         hash
 http      io        json         math         memory
 net       os        paths        process      random
 regex     slices    sort         strings      sys
-term      testing   time         toml         yaml
+term      testing   time         yaml
 ```
 
 An alias lets you choose a local module name:

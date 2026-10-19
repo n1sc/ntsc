@@ -443,4 +443,4 @@ The code generator is written to produce deterministic IR:
 ## Platform support
 
 Supported hosts are Linux, macOS, and Windows on x86-64 and aarch64, on stable
-Rust with LLVM 22. The CI matrix builds and tests all three platforms.
+Rust with LLVM 23. The CI matrix builds and tests all three platforms.

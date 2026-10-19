@@ -613,6 +613,7 @@ pub(crate) fn emit_rc_array_op<'ctx>(
 pub(crate) fn array_elem_ty(ty: &Ty) -> Ty {
     match ty {
         Ty::Array(inner) => *inner.clone(),
+        Ty::View(inner, _) => array_elem_ty(inner),
         _ => Ty::Any,
     }
 }

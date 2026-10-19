@@ -13,7 +13,7 @@ compiler from source.
 NTSC requires:
 
 - Linux, macOS, or Windows.
-- The LLVM 22 toolchain (specifically the libraries used by the `llvm-sys`
+- The LLVM 23 toolchain (specifically the libraries used by the `llvm-sys`
   crate). On Linux and Windows the LLVM shared libraries must be discoverable;
   on macOS they are linked into the binary at compile time.
 - A C toolchain and linker (gcc or clang on Linux, clang and the Xcode command
@@ -23,15 +23,15 @@ NTSC requires:
 
 ### Finding LLVM
 
-The compiler locates LLVM through the `LLVM_SYS_221_PREFIX` environment
-variable, which must point at an LLVM 22 installation. For example:
+The compiler locates LLVM through the `LLVM_SYS_231_PREFIX` environment
+variable, which must point at an LLVM 23 installation. For example:
 
 ```sh
-export LLVM_SYS_221_PREFIX=/usr/local/opt/llvm@22
+export LLVM_SYS_231_PREFIX=/usr/local/opt/llvm@23
 ```
 
 Without this variable, the build looks in the usual system locations. On
-Windows, either set `LLVM_SYS_221_PREFIX` to the LLVM install directory or add
+Windows, either set `LLVM_SYS_231_PREFIX` to the LLVM install directory or add
 `llvm-config` to the `PATH`.
 
 ## Building from source
@@ -181,7 +181,7 @@ conventions](conventions.md).
 - **`ntsc` is not found:** check the `PATH` step above and keep the
   `target/release` directory where it was built.
 - **LLVM cannot be found during the compiler build:** check that
-  `LLVM_SYS_221_PREFIX` points to the LLVM 22 installation, not to its `bin`
+  `LLVM_SYS_231_PREFIX` points to the LLVM 23 installation, not to its `bin`
   directory.
 - **The linker or runtime library cannot be found:** check that the C toolchain
   is installed and that the runtime archive stayed alongside the compiler.

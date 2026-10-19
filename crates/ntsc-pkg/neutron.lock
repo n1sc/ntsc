@@ -2,10 +2,10 @@
 version = 1
 
 [packages]
-toml-utils = "1.0.0"
+toml = "1.0.0"
 
 [sources]
-toml-utils = "https://github.com/n1sc/toml-utils"
+toml = "https://github.com/n1sc/toml"
 
 [integrity]
-toml-utils = "sha256:c25a24e570dc0ba573957a150a804d566019841e181b53b7dede72a7d7bea33d"
+toml = "sha256:36915ec2b9bf862408a718bba40b6a62c3b6768dfef7981a96b6c11293043382"

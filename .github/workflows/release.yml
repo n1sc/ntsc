@@ -2,7 +2,7 @@ name: release
 
 # Builds and attaches installers to a GitHub Release when a version tag
 # (`v26.0.0b`, ...) is pushed. Each runner builds the `ntsc` release binary
-# against LLVM 22 and packages it for its platform:
+# against LLVM 23 and packages it for its platform:
 #
 #   Linux   -> .deb (Debian/Ubuntu), .rpm (Fedora/RHEL), PKGBUILD (Arch source)
 #              + a prebuilt Arch package (.pkg.tar.zst, `pacman -U`), plus a
@@ -14,8 +14,8 @@ name: release
 #              libraries + GNU runtime bundled so linking needs no MSVC/gcc),
 #              plus a self-contained .tar.gz
 #
-# The native packages link LLVM 22 dynamically and declare a runtime
-# dependency on the system LLVM (libLLVM-22 / llvm-libs). The .tar.gz archives
+# The native packages link LLVM 23 dynamically and declare a runtime
+# dependency on the system LLVM (libLLVM-23 / llvm-libs). The .tar.gz archives
 # instead bundle the LLVM libraries and the ntsc runtime, so they run with no
 # LLVM install and no toolchain. Every package ships libntsc_runtime.a, the
 # static archive `ntsc build` links NTSC programs against.
@@ -72,7 +72,7 @@ env:
   # that owns AUR_SSH_KEY, so this must be that account's Name <email>.
   AUR_MAINTAINER: "yasakei <yasakei@proton.me>"
 
-  LLVM_VERSION: 22.1.6
+  LLVM_VERSION: 23.1.3
   # Pinned so release builds are reproducible; the UI extension registered
   # below must match this exact version.
   WIX_VERSION: 5.0.2
@@ -179,9 +179,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ubuntu-latest has a 14 GB disk; the ntsc release binary statically
-      # links LLVM, so reclaim the preinstalled toolchains (Android SDK, .NET,
-      # Haskell, CodeQL, Docker images) that nothing in this workflow needs.
+      # ubuntu-latest has a 14 GB disk, so reclaim the preinstalled toolchains
+      # (Android SDK, .NET, Haskell, CodeQL, Docker images) that nothing in this
+      # workflow needs.
       - name: Disk usage before cleanup (Linux)
         if: runner.os == 'Linux'
         run: df -h
@@ -197,38 +197,38 @@ jobs:
         if: runner.os == 'Linux'
         run: df -h
 
-      # ── LLVM 22 ──────────────────────────────────────────────────────────
-      - name: Install LLVM 22 (Linux)
+      # ── LLVM 23 ──────────────────────────────────────────────────────────
+      - name: Install LLVM 23 (Linux)
         if: runner.os == 'Linux'
         run: |
           curl -fsSL -o llvm.tar.xz "https://github.com/llvm/llvm-project/releases/download/llvmorg-${{ env.LLVM_VERSION }}/LLVM-${{ env.LLVM_VERSION }}-Linux-X64.tar.xz"
           tar -xf llvm.tar.xz
           mv LLVM-*-Linux-X64 "$HOME/llvm"
           rm -f llvm.tar.xz
-          # Only llvm-config (llvm-sys), the static libs, the headers, and the
-          # shared libLLVM are needed to build and link. Drop the ~3.5 GB of
-          # tools/docs nothing here invokes so the 14 GB runner disk has room
-          # for the release build and the packaging tools.
+          # Only llvm-config (llvm-sys), the shared libLLVM, and the headers are
+          # needed to build and link. Drop the ~3.5 GB of tools/docs nothing
+          # here invokes so the 14 GB runner disk has room for the release
+          # build and the packaging tools.
           rm -rf "$HOME/llvm/libexec" "$HOME/llvm/share"
           rm -rf "$HOME/llvm/lib/clang" "$HOME/llvm/lib/cmake"
           find "$HOME/llvm/bin" -mindepth 1 -maxdepth 1 ! -name 'llvm-config*' -exec rm -rf {} +
           # Sanity check that llvm-sys can still find and run llvm-config.
           "$HOME/llvm/bin/llvm-config" --version
-          echo "LLVM_SYS_221_PREFIX=$HOME/llvm" >> "$GITHUB_ENV"
+          echo "LLVM_SYS_231_PREFIX=$HOME/llvm" >> "$GITHUB_ENV"
           echo "$HOME/llvm/bin" >> "$GITHUB_PATH"
 
-      - name: Install LLVM 22 (macOS)
+      - name: Install LLVM 23 (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install llvm@22
-          echo "LLVM_SYS_221_PREFIX=$(brew --prefix llvm@22)" >> "$GITHUB_ENV"
-          echo "$(brew --prefix llvm@22)/bin" >> "$GITHUB_PATH"
+          brew install llvm@23
+          echo "LLVM_SYS_231_PREFIX=$(brew --prefix llvm@23)" >> "$GITHUB_ENV"
+          echo "$(brew --prefix llvm@23)/bin" >> "$GITHUB_PATH"
 
       # The win64 .exe installer is an NSIS stub whose child process can
       # outlive Start-Process -Wait, so the build sometimes found no LLVM. Use
       # the clang+llvm archive instead, which is the package for projects
       # that link against LLVM (include/, lib/, and the DLLs, plus lld).
-      - name: Install LLVM 22 (Windows)
+      - name: Install LLVM 23 (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -236,7 +236,7 @@ jobs:
           tar -xf llvm.tar.xz
           Remove-Item llvm.tar.xz
           $llvm = Join-Path $pwd "clang+llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc"
-          "LLVM_SYS_221_PREFIX=$llvm" >> $env:GITHUB_ENV
+          "LLVM_SYS_231_PREFIX=$llvm" >> $env:GITHUB_ENV
           "LLVM_BIN=$llvm\bin" >> $env:GITHUB_ENV
           "$llvm\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
@@ -245,75 +245,9 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # The official clang+llvm Windows archive is built with
-      # LLVM_ENABLE_LIBXML2=FORCE_ON against a static libxml2, but the archive
-      # does not ship it: llvm-config --system-libs reports xml2s.lib, so
-      # statically linking LLVM fails with LNK1181. Build the same minimal
-      # static libxml2 (v2.9.12) that LLVM's own release script builds and
-      # drop it into the LLVM lib dir under the names the linker wants.
-      - name: Provide libxml2 static library (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Fail fast on native command failures (curl/tar/cmake).
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          $libxmlVersion = "2.9.12"
-          $tarball = "libxml2-v$libxmlVersion.tar.gz"
-          curl.exe -fsSL -o $tarball "https://gitlab.gnome.org/GNOME/libxml2/-/archive/v$libxmlVersion/$tarball"
-          $hash = (Get-FileHash $tarball -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -ne "98bfa7a9a5e2a75638422050740448ee9f02bf4dc2075c9822d7747d5ff9e617") {
-            throw "libxml2 checksum mismatch: $hash"
-          }
-          tar -xzf $tarball
-          # The LLVM package's bin dir is on PATH, so CMake's Ninja generator
-          # picks its native clang.exe over cl.exe. That compiler treats MSVC
-          # differently (CMake's MSVC flag is false), so libxml2's xmlIO.c
-          # fails with undeclared read/write/close/getcwd. Pin the MSVC
-          # compiler, and build with /MD so the static objects match the CRT
-          # of the Rust test binaries (avoids the LNK4098 libcmt/msvcrt
-          # conflict; LLVM's own release script uses /MT for its own tools).
-          # NOTE: keep comment lines OUT of the backtick-continued command.
-          cmake -GNinja -S "libxml2-v$libxmlVersion" -B libxml2-build `
-            -DCMAKE_C_COMPILER=cl `
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=libxml2-install `
-            -DBUILD_SHARED_LIBS=OFF `
-            -DLIBXML2_WITH_C14N=OFF -DLIBXML2_WITH_CATALOG=OFF `
-            -DLIBXML2_WITH_DEBUG=OFF -DLIBXML2_WITH_DOCB=OFF `
-            -DLIBXML2_WITH_FTP=OFF -DLIBXML2_WITH_HTML=OFF `
-            -DLIBXML2_WITH_HTTP=OFF -DLIBXML2_WITH_ICONV=OFF `
-            -DLIBXML2_WITH_ICU=OFF -DLIBXML2_WITH_ISO8859X=OFF `
-            -DLIBXML2_WITH_LEGACY=OFF -DLIBXML2_WITH_LZMA=OFF `
-            -DLIBXML2_WITH_MEM_DEBUG=OFF -DLIBXML2_WITH_MODULES=OFF `
-            -DLIBXML2_WITH_OUTPUT=ON -DLIBXML2_WITH_PATTERN=OFF `
-            -DLIBXML2_WITH_PROGRAMS=OFF -DLIBXML2_WITH_PUSH=OFF `
-            -DLIBXML2_WITH_PYTHON=OFF -DLIBXML2_WITH_READER=OFF `
-            -DLIBXML2_WITH_REGEXPS=OFF -DLIBXML2_WITH_RUN_DEBUG=OFF `
-            -DLIBXML2_WITH_SAX1=ON -DLIBXML2_WITH_SCHEMAS=OFF `
-            -DLIBXML2_WITH_SCHEMATRON=OFF -DLIBXML2_WITH_TESTS=OFF `
-            -DLIBXML2_WITH_THREADS=ON -DLIBXML2_WITH_THREAD_ALLOC=OFF `
-            -DLIBXML2_WITH_TREE=ON -DLIBXML2_WITH_VALID=OFF `
-            -DLIBXML2_WITH_WRITER=OFF -DLIBXML2_WITH_XINCLUDE=OFF `
-            -DLIBXML2_WITH_XPATH=OFF -DLIBXML2_WITH_XPTR=OFF `
-            -DLIBXML2_WITH_ZLIB=OFF `
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
-          cmake --build libxml2-build
-          cmake --install libxml2-build
-          $lib = Get-ChildItem -Recurse -Filter *.lib libxml2-install | Select-Object -First 1
-          if (-not $lib) { throw "libxml2 static library was not built" }
-          $llvmLib = Join-Path $env:LLVM_SYS_221_PREFIX "lib"
-          # llvm-config reports the name without the lib prefix; install both
-          # spellings so link.exe finds the library either way.
-          Copy-Item $lib.FullName (Join-Path $llvmLib "xml2s.lib") -Force
-          Copy-Item $lib.FullName (Join-Path $llvmLib "libxml2s.lib") -Force
-
       # ── Rust ─────────────────────────────────────────────────────────────
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          # Invalidate the cache whenever the Windows linker/CRT settings
-          # change, so stale link.exe-linked artifacts are never reused.
-          key: toolchain-${{ hashFiles('.cargo/config.toml') }}
 
       - name: Build release binary
         run: cargo build -p ntsc-cli --release

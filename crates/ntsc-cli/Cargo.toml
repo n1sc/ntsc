@@ -19,4 +19,4 @@ ntsc-typeck = { path = "../ntsc-typeck" }
 ntsc-diag = { path = "../ntsc-diag" }
 ntsc-cargo = { path = "../ntsc-cargo" }
 ntsc-lsp = { path = "../ntsc-lsp" }
-inkwell = { version = "0.9.0", default-features = false, features = ["target-x86", "target-aarch64"] }
+inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["llvm23-1-force-dynamic", "target-x86", "target-aarch64"] }

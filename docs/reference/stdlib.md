@@ -200,39 +200,6 @@ var text = csv.stringify(data)
 // "name,age\nAlice,30\nBob,25"
 ```
 
-## TOML
-
-`toml` parses and serializes TOML text.  `toml.parse` returns a JSON object;
-`toml.stringify` accepts a JSON object and produces TOML text.
-
-| Function | Returns | Behavior |
-| --- | --- | --- |
-| `toml.parse(s)` | `string` | Parses TOML text into a JSON object. Throws on malformed input. |
-| `toml.stringify(v)` | `string` | Serializes a JSON object into TOML text. Throws when `v` is not an object. |
-
-Keys may be bare (`name`), double-quoted (`"name"`), or single-quoted
-(`'name'`, the TOML literal form, which never expands escapes). Text is
-handled as UTF-8 throughout, so non-ASCII values and keys survive a parse
-unchanged. An empty input produces `{}`. Sections nest properly (`[a.b]`
-merges into `[a]`); repeated `[[table]]` blocks merge into one object with
-later keys winning. Integers accept `0x`/`0o`/`0b` radix prefixes and `_` separators,
-emitted decimal.
-
-```ntsc
-var data = toml.parse("name = 'Alice'
-age = 30
-[view]
-timestamp = true")
-// {"name":"Alice","age":30,"view":{"timestamp":true}}
-
-var text = toml.stringify(data)
-// name = "Alice"
-// age = 30
-//
-// [view]
-// timestamp = true
-```
-
 ## YAML
 
 `yaml` parses and serializes YAML text.  `yaml.parse` returns a JSON object

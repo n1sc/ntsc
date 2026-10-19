@@ -16,6 +16,22 @@ pub enum LiteralValue {
     String(String),
 }
 
+/// Parse integer literal text, honoring the `0x`, `0o`, and `0b` radix
+/// prefixes the lexer accepts. `None` for floats and text outside any
+/// accepted number form.
+pub fn parse_int_literal(text: &str) -> Option<i64> {
+    let (radix, digits) = if let Some(rest) = text.strip_prefix("0x") {
+        (16, rest)
+    } else if let Some(rest) = text.strip_prefix("0o") {
+        (8, rest)
+    } else if let Some(rest) = text.strip_prefix("0b") {
+        (2, rest)
+    } else {
+        (10, text)
+    };
+    i64::from_str_radix(digits, radix).ok()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal {
@@ -316,5 +332,25 @@ impl Expr {
             } => receiver.span.to(channel.span()).to(*op_span),
             Expr::Close { channel, keyword } => keyword.to(channel.span()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_int_literal;
+
+    #[test]
+    fn parses_radix_prefixes() {
+        assert_eq!(parse_int_literal("0xff"), Some(255));
+        assert_eq!(parse_int_literal("0o17"), Some(15));
+        assert_eq!(parse_int_literal("0b1010"), Some(10));
+        assert_eq!(parse_int_literal("42"), Some(42));
+    }
+
+    #[test]
+    fn rejects_floats_and_malformed_text() {
+        assert_eq!(parse_int_literal("3.14"), None);
+        assert_eq!(parse_int_literal("0x"), None);
+        assert_eq!(parse_int_literal(""), None);
     }
 }

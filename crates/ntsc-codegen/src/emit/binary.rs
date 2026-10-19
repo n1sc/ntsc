@@ -504,8 +504,12 @@ pub(crate) fn emit_binary<'ctx>(
         }
 
         _ => Err(crate::CodegenError::LLVMError(format!(
-            "unsupported binary operation {:?} on type {}",
-            op.kind, op_ty
+            "unsupported binary operation {:?} on type {} in function `{}` (lhs `{}`, rhs `{}`)",
+            op.kind,
+            op_ty,
+            fn_ctx.function.get_name().to_string_lossy(),
+            lhs.ntsc_type,
+            rhs.ntsc_type
         ))),
     }
 }

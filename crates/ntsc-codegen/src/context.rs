@@ -27,9 +27,9 @@ pub fn init_llvm() {
         assert_eq!(
             major, EXPECTED_LLVM_MAJOR,
             "linked LLVM runtime is {major}.{minor}.{patch}, but ntsc-codegen was built for the \
-             LLVM {EXPECTED_LLVM_MAJOR} C API (inkwell `llvm22-1`). A mismatched system \
+             LLVM {EXPECTED_LLVM_MAJOR} C API (inkwell `llvm23-1-force-dynamic`). A mismatched system \
              libLLVM.so silently corrupts memory inside the pass pipeline: install LLVM \
-             {EXPECTED_LLVM_MAJOR} and point LLVM_SYS_221_PREFIX at it (see \
+             {EXPECTED_LLVM_MAJOR} and point LLVM_SYS_231_PREFIX at it (see \
              docs/reference/contributing.md)."
         );
         Target::initialize_all(&InitializationConfig::default());
@@ -37,16 +37,14 @@ pub fn init_llvm() {
 }
 
 /// The LLVM major version the inkwell C-API bindings were generated for.
-/// Must match the `llvm22-1` feature in `Cargo.toml`.
-const EXPECTED_LLVM_MAJOR: u32 = 22;
+/// Must match the `llvm23-1-force-dynamic` feature in `Cargo.toml`.
+const EXPECTED_LLVM_MAJOR: u32 = 23;
 
 /// Serializes every operation that touches LLVM's shared global state.
 ///
-/// The statically-linked LLVM build is not fully thread-safe: target registry
-/// lookups, the new pass manager, and the object-file backend crash on
-/// concurrent access (the parallel test harness trips this on Windows). The
-/// production compiler is single-threaded; the lock exists so concurrent
-/// codegen and the parallel test suite are safe.
+/// LLVM's target registry, pass manager, and object-file backend share global
+/// state that must not be accessed concurrently. The production compiler is
+/// single-threaded; the lock also keeps the parallel test suite safe.
 static CODGEN_LOCK: Mutex<()> = Mutex::new(());
 
 thread_local! {

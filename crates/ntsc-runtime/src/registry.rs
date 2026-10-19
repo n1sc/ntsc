@@ -583,6 +583,33 @@ pub(crate) fn live_count() -> i64 {
     LIVE.load(Ordering::Relaxed)
 }
 
+/// Whether `id` currently has an entry in the registry.
+#[cfg(test)]
+pub(crate) fn is_registered(id: i64) -> bool {
+    shard_lock(id).contains_key(&id)
+}
+
+/// `LIVE + PERMANENT` must always equal the number of entries in the map.
+///
+/// Every counter mutation happens while the registry lock is held, so the
+/// two can only be observed in agreement — including while sibling tests
+/// in this binary register and drop handles of their own. That is why the
+/// counter tests assert this invariant instead of an absolute snapshot of
+/// `LIVE`: a snapshot races with every other test in the process.
+#[cfg(test)]
+pub(crate) fn assert_counters_agree_with_map(step: &str) {
+    let shards = all_shards();
+    let live = LIVE.load(Ordering::Relaxed);
+    let permanent = PERMANENT.load(Ordering::Relaxed);
+    let entries = shards.iter().map(|g| g.len() as i64).sum::<i64>();
+    drop(shards);
+    assert_eq!(
+        live + permanent,
+        entries,
+        "counters drifted from the map after {step}: live {live} + permanent {permanent} != {entries} entries",
+    );
+}
+
 /// Return a stable snapshot of every non-permanent live handle and its kind.
 /// The shutdown reporter uses this instead of only printing the aggregate
 /// count, which makes the first debugging pass identify the surviving object.
@@ -2319,33 +2346,6 @@ mod tests {
         );
         let taken = take_opaque::<Vec<i64>>(op);
         assert_eq!(taken, Some(vec![1, 2, 3]));
-    }
-
-    /// `LIVE + PERMANENT` must always equal the number of entries in the
-    /// map.
-    ///
-    /// Every counter mutation happens while the registry lock is held, so
-    /// the two can only be observed in agreement — including while
-    /// sibling tests in this binary register and drop handles of their
-    /// own. That is why the counter tests assert this invariant instead
-    /// of an absolute snapshot of `LIVE`: a snapshot races with every
-    /// other test in the process.
-    fn assert_counters_agree_with_map(step: &str) {
-        let shards = all_shards();
-        let live = LIVE.load(Ordering::Relaxed);
-        let permanent = PERMANENT.load(Ordering::Relaxed);
-        let entries = shards.iter().map(|g| g.len() as i64).sum::<i64>();
-        drop(shards);
-        assert_eq!(
-            live + permanent,
-            entries,
-            "counters drifted from the map after {step}: live {live} + permanent {permanent} != {entries} entries",
-        );
-    }
-
-    /// Whether `id` still has an entry in the registry.
-    fn is_registered(id: i64) -> bool {
-        shard_lock(id).contains_key(&id)
     }
 
     /// Regression: `take_string`/`take_opaque` remove the entry directly

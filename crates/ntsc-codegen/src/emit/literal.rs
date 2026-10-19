@@ -18,8 +18,8 @@ pub(crate) fn emit_literal<'ctx>(
                     Ty::Float,
                 ))
             } else {
-                let val: i64 = n.parse().map_err(|e| {
-                    crate::CodegenError::LLVMError(format!("invalid int literal: {e}"))
+                let val = ntsc_ast::expr::parse_int_literal(n).ok_or_else(|| {
+                    crate::CodegenError::LLVMError(format!("invalid int literal: {n}"))
                 })?;
                 Ok(TypedValue::new(
                     fn_ctx.context.i64_type().const_int(val as u64, true).into(),
@@ -231,8 +231,7 @@ pub(crate) fn emit_variable<'ctx>(
             // Only when no local variable shadows the module name.
             match stripped {
                 "math" | "fmt" | "time" | "sys" | "strings" | "json" | "http" | "crypto"
-                | "collections" | "regex" | "arrays" | "process" | "csv" | "toml" | "yaml"
-                | "term" => {
+                | "collections" | "regex" | "arrays" | "process" | "csv" | "yaml" | "term" => {
                     return Ok(TypedValue::new(
                         fn_ctx
                             .context

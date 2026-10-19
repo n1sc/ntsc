@@ -409,11 +409,6 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_csv_parse", i64_ty, i64_ty);
     declare!("ntsc_csv_stringify", i64_ty, i64_ty);
 
-    // ── toml module ──────────────────────────────────────────────────────
-
-    declare!("ntsc_toml_parse", i64_ty, i64_ty);
-    declare!("ntsc_toml_stringify", i64_ty, i64_ty);
-
     // ── yaml module ──────────────────────────────────────────────────────
 
     declare!("ntsc_yaml_parse", i64_ty, i64_ty);

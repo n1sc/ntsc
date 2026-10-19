@@ -10,11 +10,13 @@ the [guide](../guide/getting-started.md) and the [CLI reference](cli.md).
 
 - **Stable Rust** (edition 2024). The project must always compile on
   stable; nightly features are never used.
-- **LLVM development libraries**, version 22. `ntsc-codegen` uses inkwell
-  (`features = ["llvm22-1"]`) and links only the x86-64 and aarch64
-  targets. `LLVM_SYS_221_PREFIX` must point at an LLVM 22 prefix
-  (e.g. `LLVM_SYS_221_PREFIX=/usr/lib/llvm22` on Arch with the `llvm22`
-  package). This must be *LLVM 22 exactly*: a newer system LLVM silently
+- **LLVM development libraries**, version 23. `ntsc-codegen` uses inkwell's
+  git source pinned to the release that provides
+  `features = ["llvm23-1-force-dynamic"]` and
+  links only the x86-64 and aarch64
+  targets. `LLVM_SYS_231_PREFIX` must point at an LLVM 23 prefix
+  (e.g. `LLVM_SYS_231_PREFIX=/usr/lib/llvm23` when it is not the default
+  `llvm-config` on `PATH`). This must be *LLVM 23 exactly*: a different system LLVM silently
   links its `libLLVM.so` anyway, and the version-skew corrupts memory
   inside the optimization pass pipeline (SIGSEGV in LLVM-heavy code, in
   and out of tests).

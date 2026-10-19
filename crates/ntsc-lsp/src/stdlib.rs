@@ -280,11 +280,6 @@ pub static MODULES: &[StdModule] = &[
         ),
     },
     StdModule {
-        name: "toml",
-        description: "TOML parsing.",
-        functions: fns!(("parse", "toml.parse(s) -> any"),),
-    },
-    StdModule {
         name: "yaml",
         description: "YAML parsing.",
         functions: fns!(("parse", "yaml.parse(s) -> any"),),

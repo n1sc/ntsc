@@ -159,7 +159,6 @@ mod tests {
 
     #[test]
     fn test_sort_by_string_elements_reclaims_clone_handles() {
-        let before = registry::live_count();
         let arr = registry::array_new(8, 0, 1);
         for value in ["c", "a", "b"] {
             let source = registry::put_string(value.to_string());
@@ -173,9 +172,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some("a".into()), Some("b".into()), Some("c".into())]
         );
+        // An absolute `live_count()` before/after comparison would race with
+        // every other test in this binary (the registry is process-global),
+        // so assert on this test's own handles instead: every element both
+        // arrays own must be unregistered once the arrays are dropped, and
+        // the registry counters must still agree with the map.
+        let owned: Vec<i64> = (0..3)
+            .map(|index| registry::array_get(arr, index).unwrap())
+            .chain((0..3).map(|index| registry::array_get(sorted, index).unwrap()))
+            .collect();
         registry::array_drop(sorted);
         registry::array_drop(arr);
-        assert_eq!(registry::live_count(), before);
+        for handle in owned {
+            assert!(
+                !registry::is_registered(handle),
+                "element handle {handle} survived its array's drop"
+            );
+        }
+        registry::assert_counters_agree_with_map("sort_by string reclaim");
     }
 
     #[test]

@@ -5,14 +5,14 @@ Summary:        Neutron Type-Safe Compiler
 
 License:        NPL-1.1
 URL:            https://github.com/yasakei/neutron-rs
-Requires:       llvm-libs >= 22
+Requires:       llvm-libs >= 23
 
 %description
 A statically typed, memory-safe systems language that compiles to native
 binaries through LLVM. Values move by default, borrows are declared with
 view, and memory is released deterministically when ownership ends.
 
-The ntsc binary links LLVM 22 dynamically; this package therefore requires
+The ntsc binary links LLVM 23 dynamically; this package therefore requires
 the llvm-libs runtime.
 
 %install

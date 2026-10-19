@@ -102,7 +102,7 @@ The [`examples/`](examples/) directory has small, browsable programs for every f
 To build the compiler from source you need:
 
 * **Rust** (stable) — [rustup.rs](https://rustup.rs)
-* **LLVM 22** — with `llvm-config` on `PATH`; set `LLVM_SYS_221_PREFIX` if it lives elsewhere
+* **LLVM 23** — with `llvm-config` on `PATH`; set `LLVM_SYS_231_PREFIX` if it lives elsewhere
 * **A C linker** — `cc`/`clang` on Linux and macOS, MSVC `link.exe` or MinGW `gcc` on Windows
 
 ### Installation
@@ -124,7 +124,7 @@ The Homebrew tap, the Scoop bucket and the AUR packages are updated by the
 release workflow on every tag, so `brew upgrade`, `scoop update` and
 `yay -Syu` keep `ntsc` current without reinstalling by hand.
 
-The compiler links LLVM 22 dynamically, so the Linux packages declare a dependency on the system LLVM runtime (`libLLVM-22` / `llvm-libs`), and the macOS and Windows installers bundle the LLVM libraries they need. See [`.github/packaging/`](.github/packaging/README.md) for the full recipe documentation.
+The compiler links LLVM 23 dynamically, so the Linux packages declare a dependency on the system LLVM runtime (`libLLVM-23` / `llvm-libs`), and the macOS and Windows installers bundle the LLVM libraries they need. See [`.github/packaging/`](.github/packaging/README.md) for the full recipe documentation.
 
 Or build from source:
 
@@ -186,7 +186,7 @@ ntsc/
 │   ├── ntsc-lexer          Lexer
 │   ├── ntsc-parser         Recursive-descent parser
 │   ├── ntsc-typeck         Name resolution, type checking, linting, ownership
-│   ├── ntsc-codegen        LLVM IR codegen and linking (inkwell / LLVM 22)
+│   ├── ntsc-codegen        LLVM IR codegen and linking (inkwell / LLVM 23)
 │   ├── ntsc-runtime        Runtime static library
 │   ├── ntsc-build          neutron.toml parsing and module loading
 │   ├── ntsc-cargo          Rust dependency fetching and generated adaptors

@@ -473,6 +473,20 @@ mod tests {
     }
 
     #[test]
+    fn radix_number_literal_lexeme() {
+        let kinds = strip_newlines(token_kinds("var x = 0xff"));
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Var,
+                TokenKind::Identifier("x".to_string()),
+                TokenKind::Equal,
+                TokenKind::NumberLiteral("0xff".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn typed_variable() {
         let kinds = strip_newlines(token_kinds("var int x = 42"));
         assert_eq!(

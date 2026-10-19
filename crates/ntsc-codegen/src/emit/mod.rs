@@ -762,7 +762,7 @@ fn const_int_expr_value(expr: &Expr) -> Option<i32> {
         Expr::Literal {
             value: LiteralValue::Number(n),
             ..
-        } => n.parse::<i64>().ok().and_then(|v| i32::try_from(v).ok()),
+        } => ntsc_ast::expr::parse_int_literal(n).and_then(|v| i32::try_from(v).ok()),
         Expr::Unary { op, right } if op.lexeme() == "-" => {
             const_int_expr_value(right).map(|v| v.wrapping_neg())
         }

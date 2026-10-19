@@ -63,28 +63,15 @@ pub(crate) fn emit_if<'ctx>(
     else_branch: &Option<Box<Stmt>>,
 ) -> Result<(), crate::CodegenError> {
     let current_fn = fn_ctx.function;
-
     let cond_val = emit_expression(fn_ctx, condition)?;
     let cond_i1 = bool_to_i1(fn_ctx, cond_val);
-
     let then_bb = fn_ctx.context.append_basic_block(current_fn, "if.then");
     let merge_bb = fn_ctx.context.append_basic_block(current_fn, "if.merge");
 
-    let has_else = !elif_branches.is_empty() || else_branch.is_some();
-
-    let else_or_merge = if has_else {
-        let else_bb = fn_ctx.context.append_basic_block(current_fn, "if.else");
-        fn_ctx
-            .builder
-            .build_conditional_branch(cond_i1, then_bb, else_bb)?;
-        else_bb
-    } else {
-        fn_ctx
-            .builder
-            .build_conditional_branch(cond_i1, then_bb, merge_bb)?;
-
-        merge_bb
-    };
+    let false_bb = fn_ctx.context.append_basic_block(current_fn, "if.false");
+    fn_ctx
+        .builder
+        .build_conditional_branch(cond_i1, then_bb, false_bb)?;
 
     fn_ctx.builder.position_at_end(then_bb);
     emit_statement_in_function(fn_ctx, then_branch)?;
@@ -98,79 +85,64 @@ pub(crate) fn emit_if<'ctx>(
         fn_ctx.builder.build_unconditional_branch(merge_bb)?;
     }
 
-    if has_else {
-        fn_ctx.builder.position_at_end(else_or_merge);
-
-        if !elif_branches.is_empty() {
-            // The first elif is emitted inline, then the remaining
-            // elif/else chain recurses into `emit_if` as a nested if-else.
-            let elif = &elif_branches[0];
-            let elif_cond = emit_expression(fn_ctx, &elif.condition)?;
-            let elif_i1 = bool_to_i1(fn_ctx, elif_cond);
-
-            let elif_then_bb = fn_ctx.context.append_basic_block(current_fn, "elif.then");
-            let elif_else_or_merge = fn_ctx
-                .context
-                .append_basic_block(current_fn, "elif.else_or_merge");
-
-            fn_ctx
-                .builder
-                .build_conditional_branch(elif_i1, elif_then_bb, elif_else_or_merge)?;
-
-            fn_ctx.builder.position_at_end(elif_then_bb);
-            emit_statement_in_function(fn_ctx, &elif.body)?;
-            if fn_ctx
-                .builder
-                .get_insert_block()
-                .unwrap()
-                .get_terminator()
-                .is_none()
-            {
-                fn_ctx.builder.build_unconditional_branch(merge_bb)?;
-            }
-
-            fn_ctx.builder.position_at_end(elif_else_or_merge);
-            let remaining_elifs = &elif_branches[1..];
-            let remaining_else = else_branch.clone();
-            if !remaining_elifs.is_empty() || remaining_else.is_some() {
-                let first_elif = &remaining_elifs[0];
-                let elif_cond = first_elif.condition.clone();
-                let elif_body = first_elif.body.clone();
-                let next_elifs: Vec<ntsc_ast::stmt::ElifBranch> = remaining_elifs[1..].to_vec();
-                let else_for_recursion = if remaining_else.is_some() && remaining_elifs.len() <= 1 {
-                    remaining_else.clone()
-                } else if remaining_elifs.len() <= 1 {
-                    None
-                } else {
-                    remaining_else.clone()
-                };
-                emit_if(
-                    fn_ctx,
-                    &elif_cond,
-                    &elif_body,
-                    &next_elifs,
-                    &else_for_recursion,
-                )?;
-            } else {
-                fn_ctx.builder.build_unconditional_branch(merge_bb)?;
-            }
-        } else if let Some(else_branch) = else_branch {
-            emit_statement_in_function(fn_ctx, else_branch)?;
-            if fn_ctx
-                .builder
-                .get_insert_block()
-                .unwrap()
-                .get_terminator()
-                .is_none()
-            {
-                fn_ctx.builder.build_unconditional_branch(merge_bb)?;
-            }
-        } else {
-            fn_ctx.builder.build_unconditional_branch(merge_bb)?;
-        }
-    }
+    emit_if_false_chain(fn_ctx, false_bb, elif_branches, else_branch, merge_bb)?;
 
     fn_ctx.builder.position_at_end(merge_bb);
+    Ok(())
+}
+
+fn emit_if_false_chain<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    false_bb: inkwell::basic_block::BasicBlock<'ctx>,
+    elif_branches: &[ntsc_ast::stmt::ElifBranch],
+    else_branch: &Option<Box<Stmt>>,
+    merge_bb: inkwell::basic_block::BasicBlock<'ctx>,
+) -> Result<(), crate::CodegenError> {
+    let current_fn = fn_ctx.function;
+    fn_ctx.builder.position_at_end(false_bb);
+
+    if let Some(elif) = elif_branches.first() {
+        let cond_val = emit_expression(fn_ctx, &elif.condition)?;
+        let cond_i1 = bool_to_i1(fn_ctx, cond_val);
+        let then_bb = fn_ctx.context.append_basic_block(current_fn, "elif.then");
+        let next_false = fn_ctx.context.append_basic_block(current_fn, "elif.false");
+        fn_ctx
+            .builder
+            .build_conditional_branch(cond_i1, then_bb, next_false)?;
+
+        fn_ctx.builder.position_at_end(then_bb);
+        emit_statement_in_function(fn_ctx, &elif.body)?;
+        if fn_ctx
+            .builder
+            .get_insert_block()
+            .unwrap()
+            .get_terminator()
+            .is_none()
+        {
+            fn_ctx.builder.build_unconditional_branch(merge_bb)?;
+        }
+
+        return emit_if_false_chain(
+            fn_ctx,
+            next_false,
+            &elif_branches[1..],
+            else_branch,
+            merge_bb,
+        );
+    }
+
+    if let Some(else_branch) = else_branch {
+        emit_statement_in_function(fn_ctx, else_branch)?;
+    }
+    if fn_ctx
+        .builder
+        .get_insert_block()
+        .unwrap()
+        .get_terminator()
+        .is_none()
+    {
+        fn_ctx.builder.build_unconditional_branch(merge_bb)?;
+    }
     Ok(())
 }
 

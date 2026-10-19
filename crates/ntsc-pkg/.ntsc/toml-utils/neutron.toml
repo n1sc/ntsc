@@ -1,3 +1,0 @@
-[package]
-entry = "lib.nt"
-output = "toml-utils"

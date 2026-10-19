@@ -230,6 +230,20 @@ var a = 1;
 var b = 2
 ```
 
+An expression may also span multiple lines. A line that starts with a binary
+operator (such as `&&` or `||`) continues the expression above it, and an
+operator at the end of a line continues onto the next line:
+
+```ntsc
+if (len > 0
+    && valid) {
+    ...
+}
+
+var total = base +
+    bonus
+```
+
 ### String literals
 
 Strings are written with double or single quotes. Escapes are processed:
@@ -246,8 +260,9 @@ say("Hello, ${name}!")
 A raw string literal `r"..."` stores its content verbatim, which is convenient
 for regular expressions and Windows paths.
 
-Numbers are written in decimal notation. `1`, `1.5`, and `0.25` are all valid
-literals; hexadecimal, octal, and binary literals are not currently supported.
+Numbers are written in decimal notation: `1`, `1.5`, and `0.25` are all valid
+literals. Integers may also use the radix prefixes `0x` (hexadecimal),
+`0o` (octal), and `0b` (binary), as in `0xff`, `0o17`, and `0b1010`.
 
 ### Identifiers and keywords
 

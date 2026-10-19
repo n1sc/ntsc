@@ -3,7 +3,7 @@
 #
 # Usage: make-dmg.sh <version> [path-to-binary]
 #
-# The binary links LLVM 22 dynamically via Homebrew's llvm@22. The script
+# The binary links LLVM 23 dynamically via Homebrew's llvm@23. The script
 # packages the binary into an .app bundle and copies the full dylib closure
 # into Contents/Frameworks, rewriting install names to @rpath so the bundle
 # is self-contained. It is ad-hoc code-signed so it runs on Apple Silicon.

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use ntsc_ast::expr::Expr;
 use ntsc_ast::span::Span;
 use ntsc_ast::stmt::{Program, Stmt};
-use ntsc_ast::token::TokenKind;
+use ntsc_ast::token::{Token, TokenKind};
 use ntsc_ast::types::TypeAnnotation;
 use ntsc_diag::Diagnostic;
 use ntsc_diag::SourceBuffer;
@@ -270,9 +270,10 @@ pub fn load_program(entry: &Path) -> Result<ModuleLoadResult, ModuleLoadError> {
 /// Walk the `use`-file imports of `entry`, producing the dependency
 /// graph.
 ///
-/// Imports are located by scanning tokens for `use "<path>"` (a quoted
-/// string names a file; an identifier such as `use process` names a
-/// stdlib module and is ignored here). The returned file order is
+/// Imports are located by scanning tokens for `use "<path>"` and vendored
+/// package names (a quoted string names a file; an identifier such as
+/// `use process` names a stdlib module and is ignored unless a matching
+/// vendored package exists). The returned file order is
 /// post-order DFS: every import comes before its importer, so merging in
 /// this order puts library code ahead of entry code.
 ///
@@ -351,9 +352,10 @@ fn canonicalize(path: &Path) -> Result<PathBuf, ModuleLoadError> {
     })
 }
 
-/// Lex a file and return the canonical paths of every `use "<path>"`
+/// Lex a file and return the canonical paths of every file or vendored-package
 /// import, along with the namespace alias if the import names one with
-/// `... as X`.
+/// `... as X`. A vendored package can therefore be used like a stdlib module:
+/// `use toml` is equivalent to importing `.ntsc/toml/lib.nt` as `toml`.
 ///
 /// A string literal after `use` (or after `from` in a selective import)
 /// names a file; an `as` immediately after it names the import alias.
@@ -374,15 +376,19 @@ fn file_imports(
         if token.kind != TokenKind::Use {
             continue;
         }
-        // Find the first string literal on this statement; there is
-        // exactly one, and it is the file path. Stop at the terminator so
-        // a string on a later statement is never misread as this import.
+        // Collect the path/package token and optional alias until the
+        // statement terminator so a string on a later statement is never
+        // misread as this import.
         let mut import: Option<String> = None;
+        let mut package: Option<String> = None;
         let mut alias: Option<String> = None;
         loop {
             match tokens.next() {
                 Some(t) if matches!(t.kind, TokenKind::StringLiteral(_)) => {
                     import = Some(t.lexeme().to_string());
+                }
+                Some(t) if package.is_none() && matches!(t.kind, TokenKind::Identifier(_)) => {
+                    package = Some(t.lexeme().to_string());
                 }
                 Some(t) if t.kind == TokenKind::As => {
                     if let Some(a) = tokens.next() {
@@ -396,6 +402,10 @@ fn file_imports(
         }
         if let Some(import) = import {
             imports.push((resolve_import(root, parent, &import)?, alias));
+        } else if let Some(package_name) = package
+            && let Some(package_path) = vendored_import(root, &package_name)
+        {
+            imports.push((package_path, Some(alias.unwrap_or(package_name))));
         }
     }
     Ok(imports)
@@ -536,10 +546,11 @@ fn merge(
         }
 
         for stmt in &module.program.statements {
+            let stmt = external_package_use(stmt, path, &graph.edges, &graph.aliases);
             // Bare file imports are dropped (their content is already part of
             // the flat program); aliased imports are preserved so the resolver
             // learns the namespace name.
-            let keep = match stmt {
+            let keep = match &stmt {
                 Stmt::Use {
                     is_file_path: true,
                     alias: Some(_),
@@ -551,7 +562,7 @@ fn merge(
                 _ => true,
             };
             if keep {
-                statements.push(stmt.clone());
+                statements.push(stmt);
                 origins.push(path.clone());
                 bases.push(base);
             }
@@ -560,6 +571,52 @@ fn merge(
     }
 
     Ok((Program { statements }, origins, bases))
+}
+
+/// Rewrite `use package` into the same namespaced file-import form used by
+/// `use "package" as package`. Standard-library imports are left untouched;
+/// only a package path recorded in the discovered graph is rewritten.
+fn external_package_use(
+    stmt: &Stmt,
+    importer: &Path,
+    edges: &[(PathBuf, PathBuf)],
+    aliases: &HashMap<PathBuf, String>,
+) -> Stmt {
+    let Stmt::Use {
+        library,
+        is_file_path: false,
+        is_rust: false,
+        imported_symbols,
+        imported_is_rust,
+        alias,
+    } = stmt
+    else {
+        return stmt.clone();
+    };
+
+    let import_name = alias
+        .as_ref()
+        .map_or_else(|| library.lexeme(), |name| name.lexeme());
+    let Some((_, package_path)) = edges.iter().find(|(from, to)| {
+        from == importer && aliases.get(to).is_some_and(|name| name == import_name)
+    }) else {
+        return stmt.clone();
+    };
+    let Some(package_alias) = aliases.get(package_path) else {
+        return stmt.clone();
+    };
+
+    Stmt::Use {
+        library: library.clone(),
+        is_file_path: true,
+        is_rust: false,
+        imported_symbols: imported_symbols.clone(),
+        imported_is_rust: imported_is_rust.clone(),
+        alias: Some(Token::new(
+            TokenKind::Identifier(package_alias.clone()),
+            library.span,
+        )),
+    }
 }
 
 /// Byte range `(start, end)` covered by a top-level statement subtree.
@@ -1060,6 +1117,34 @@ mod tests {
             .canonicalize()
             .unwrap();
         assert!(result.graph.files.contains(&vendored));
+    }
+
+    #[test]
+    fn bare_vendored_package_is_namespaced_like_a_module() {
+        let project = TestProject::new();
+        project.write(
+            "src/main.nt",
+            "use json\n\nfun main() {\n    say(json.encode())\n}\n",
+        );
+        fs::create_dir_all(project.dir.join("src/.ntsc/json")).unwrap();
+        project.write(
+            "src/.ntsc/json/lib.nt",
+            "fun encode() -> string {\n    return \"ok\"\n}\n",
+        );
+
+        let result = load_program(&project.dir.join("src/main.nt")).expect("loads");
+        assert!(result.program.statements.iter().any(|stmt| matches!(
+            stmt,
+            Stmt::Use {
+                is_file_path: true,
+                alias: Some(alias),
+                ..
+            } if alias.lexeme() == "json"
+        )));
+        assert!(result.program.statements.iter().any(|stmt| matches!(
+            stmt,
+            Stmt::Function { name, .. } if name.lexeme() == "json::encode"
+        )));
     }
 
     #[test]

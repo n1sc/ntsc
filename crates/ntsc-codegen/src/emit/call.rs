@@ -519,8 +519,6 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
 
         "ntsc_csv_parse"
         | "ntsc_csv_stringify"
-        | "ntsc_toml_parse"
-        | "ntsc_toml_stringify"
         | "ntsc_yaml_parse"
         | "ntsc_yaml_stringify"
         | "ntsc_json_parse"

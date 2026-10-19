@@ -10,8 +10,8 @@
         -d UpgradeCode=<guid> -o ntsc-<version>.msi
 
   The LLVM DLLs that ntsc.exe links against are discovered at build time by
-  build-msi.ps1 (dumpbin /DEPENDENTS) and emitted into dlls.wxs. (ntsc.exe
-  links LLVM statically, so that closure is usually empty.)
+  build-msi.ps1 (dumpbin /DEPENDENTS) and emitted into dlls.wxs. The LLVM DLL
+  closure is bundled with the installer so it needs no separate LLVM install.
 
   LLVM needs no separate installation: the DLLs ntsc.exe links against are
   bundled into this MSI. The only optional choice the installer offers is

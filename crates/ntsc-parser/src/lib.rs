@@ -44,6 +44,35 @@ fn is_operator_token(kind: &TokenKind) -> bool {
     )
 }
 
+/// The infix precedence of an operator token kind: `Precedence::None` for
+/// anything that cannot continue an expression on the right.
+fn operator_precedence(kind: &TokenKind) -> Precedence {
+    match kind {
+        TokenKind::Equal => Precedence::Assignment,
+        TokenKind::Question => Precedence::Ternary,
+        TokenKind::OrSym => Precedence::Or,
+        TokenKind::AndSym => Precedence::And,
+        TokenKind::EqualEqual | TokenKind::BangEqual => Precedence::Equality,
+        TokenKind::Greater | TokenKind::GreaterEqual | TokenKind::Less | TokenKind::LessEqual => {
+            Precedence::Comparison
+        }
+        TokenKind::Pipe => Precedence::BitwiseOr,
+        TokenKind::Caret => Precedence::BitwiseXor,
+        TokenKind::Ampersand => Precedence::BitwiseAnd,
+        TokenKind::LessLess
+        | TokenKind::GreaterGreater
+        | TokenKind::LessPipe
+        | TokenKind::PipeGreater => Precedence::Shift,
+        TokenKind::Plus | TokenKind::Minus => Precedence::Term,
+        TokenKind::Star | TokenKind::Slash | TokenKind::Percent => Precedence::Factor,
+        TokenKind::PlusPlus | TokenKind::MinusMinus => Precedence::Call,
+        TokenKind::Dot | TokenKind::QuestionDot | TokenKind::LeftParen | TokenKind::LeftBracket => {
+            Precedence::Call
+        }
+        _ => Precedence::None,
+    }
+}
+
 /// Map an operator token kind to its source-level lexeme, used when
 /// synthesising an `Identifier(lexeme)` token for an operator method name.
 fn operator_token_lexeme(kind: &TokenKind) -> &'static str {
@@ -852,8 +881,10 @@ impl<'src> Parser<'src> {
             "expected `(` after extern function name",
         )?;
         let mut params = Vec::new();
+        self.skip_newlines();
         if !self.check(&TokenKind::RightParen) {
             loop {
+                self.skip_newlines();
                 let type_annotation =
                     self.parse_declaration_type_annotation()
                         .ok_or_else(|| ParseError {
@@ -874,11 +905,13 @@ impl<'src> Parser<'src> {
                     name: param_name,
                     type_annotation: Some(type_annotation),
                 });
+                self.skip_newlines();
                 if self.consume(&TokenKind::Comma).is_none() {
                     break;
                 }
             }
         }
+        self.skip_newlines();
         self.expect(
             TokenKind::RightParen,
             "expected `)` after extern parameters",
@@ -1252,8 +1285,10 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::LeftParen, "expected '(' after function name")?;
         let mut params = Vec::new();
 
+        self.skip_newlines();
         if !self.check(&TokenKind::RightParen) {
             loop {
+                self.skip_newlines();
                 let type_annotation = self.parse_declaration_type_annotation();
 
                 let param_name = self.expect_ident("expected parameter name")?;
@@ -1262,12 +1297,14 @@ impl<'src> Parser<'src> {
                     name: param_name,
                     type_annotation,
                 });
+                self.skip_newlines();
                 if self.consume(&TokenKind::Comma).is_none() {
                     break;
                 }
             }
         }
 
+        self.skip_newlines();
         self.expect(TokenKind::RightParen, "expected ')'")?;
 
         let return_type = if self.consume(&TokenKind::ReturnArrow).is_some() {
@@ -2205,11 +2242,47 @@ impl<'src> Parser<'src> {
     fn parse_precedence(&mut self, precedence: Precedence) -> Result<Expr, ParseError> {
         let mut left = self.parse_prefix()?;
 
-        while !self.is_at_end() && precedence <= self.infix_precedence() {
+        while !self.is_at_end() {
+            // A line that starts with a binary operator continues this
+            // expression when the operator binds tightly enough, mirroring
+            // the ASI rule `next_is_continuation` already applies at
+            // statement ends.
+            if self.check(&TokenKind::Newline) {
+                if precedence > self.leading_continuation_precedence() {
+                    break;
+                }
+                self.skip_newlines();
+                if self.is_at_end() {
+                    break;
+                }
+            }
+            if precedence > self.infix_precedence() {
+                break;
+            }
             left = self.parse_infix(left)?;
         }
 
         Ok(left)
+    }
+
+    /// The infix precedence of the operator starting the line after a
+    /// pending newline, or `Precedence::None` when the next line cannot
+    /// continue an expression. Leading `?` is excluded: it is ambiguous
+    /// between a ternary and a postfix `?` and the ASI rules do not list it
+    /// as a continuation. The tokens that double as prefix operators usable
+    /// at line start (`&a`, `*c`, `-x`) are also excluded, so a borrow,
+    /// deref, or negation line stays its own expression statement. Leading
+    /// `+` continues: the grammar has no unary `+`.
+    fn leading_continuation_precedence(&self) -> Precedence {
+        if !self.check(&TokenKind::Newline) {
+            return Precedence::None;
+        }
+        match self.peek_at(1) {
+            TokenKind::Question | TokenKind::Ampersand | TokenKind::Star | TokenKind::Minus => {
+                Precedence::None
+            }
+            kind => operator_precedence(kind),
+        }
     }
 
     fn parse_prefix(&mut self) -> Result<Expr, ParseError> {
@@ -2506,10 +2579,16 @@ impl<'src> Parser<'src> {
     fn parse_array_literal(&mut self) -> Result<Expr, ParseError> {
         let open = self.advance();
         let mut elements = Vec::new();
+        self.skip_newlines();
         if !self.check(&TokenKind::RightBracket) {
             loop {
                 elements.push(self.parse_expression()?);
+                self.skip_newlines();
                 if self.consume(&TokenKind::Comma).is_none() {
+                    break;
+                }
+                self.skip_newlines();
+                if self.check(&TokenKind::RightBracket) {
                     break;
                 }
             }
@@ -2663,32 +2742,7 @@ impl<'src> Parser<'src> {
     // ── Infix ───────────────────────────────────────────────────────
 
     fn infix_precedence(&self) -> Precedence {
-        match &self.peek().kind {
-            TokenKind::Equal => Precedence::Assignment,
-            TokenKind::Question => Precedence::Ternary,
-            TokenKind::OrSym => Precedence::Or,
-            TokenKind::AndSym => Precedence::And,
-            TokenKind::EqualEqual | TokenKind::BangEqual => Precedence::Equality,
-            TokenKind::Greater
-            | TokenKind::GreaterEqual
-            | TokenKind::Less
-            | TokenKind::LessEqual => Precedence::Comparison,
-            TokenKind::Pipe => Precedence::BitwiseOr,
-            TokenKind::Caret => Precedence::BitwiseXor,
-            TokenKind::Ampersand => Precedence::BitwiseAnd,
-            TokenKind::LessLess
-            | TokenKind::GreaterGreater
-            | TokenKind::LessPipe
-            | TokenKind::PipeGreater => Precedence::Shift,
-            TokenKind::Plus | TokenKind::Minus => Precedence::Term,
-            TokenKind::Star | TokenKind::Slash | TokenKind::Percent => Precedence::Factor,
-            TokenKind::PlusPlus | TokenKind::MinusMinus => Precedence::Call,
-            TokenKind::Dot
-            | TokenKind::QuestionDot
-            | TokenKind::LeftParen
-            | TokenKind::LeftBracket => Precedence::Call,
-            _ => Precedence::None,
-        }
+        operator_precedence(&self.peek().kind)
     }
 
     fn parse_infix(&mut self, left: Expr) -> Result<Expr, ParseError> {
@@ -2716,6 +2770,7 @@ impl<'src> Parser<'src> {
             | TokenKind::LessLess
             | TokenKind::GreaterGreater => {
                 let op = self.advance();
+                self.skip_newlines();
                 let right = self.parse_precedence(op_prec.next_higher())?;
                 Ok(Expr::Binary {
                     left: Box::new(left),
@@ -2752,6 +2807,7 @@ impl<'src> Parser<'src> {
             }
             TokenKind::Equal => {
                 self.advance();
+                self.skip_newlines();
                 let value = self.parse_precedence(Precedence::Assignment)?;
                 match left {
                     Expr::Variable { name } => Ok(Expr::Assign {
@@ -2845,6 +2901,7 @@ impl<'src> Parser<'src> {
             TokenKind::LeftParen => {
                 let paren = self.advance();
                 let mut arguments = Vec::new();
+                self.skip_newlines();
                 if !self.check(&TokenKind::RightParen) {
                     loop {
                         if self.check(&TokenKind::DotDotDot) {
@@ -2855,13 +2912,16 @@ impl<'src> Parser<'src> {
                                 op_span: spread_op.span,
                             });
                         } else {
+                            self.skip_newlines();
                             arguments.push(self.parse_precedence(Precedence::Assignment)?);
                         }
+                        self.skip_newlines();
                         if self.consume(&TokenKind::Comma).is_none() {
                             break;
                         }
                     }
                 }
+                self.skip_newlines();
                 self.expect(TokenKind::RightParen, "expected ')'")?;
                 Ok(Expr::Call {
                     callee: Box::new(left),
@@ -3657,6 +3717,130 @@ extern "C" { int labs(int value); }"#,
                 assert_eq!(n, "42");
             }
             other => panic!("expected Return, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_radix_number_literal() {
+        let prog = parse_source("var x = 0xff").unwrap();
+        match &prog.statements[0] {
+            Stmt::Var {
+                initializer:
+                    Some(Expr::Literal {
+                        value: LiteralValue::Number(n),
+                        ..
+                    }),
+                ..
+            } => {
+                assert_eq!(n, "0xff");
+            }
+            other => panic!("expected Var with Number literal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_multiline_leading_operator_condition() {
+        let source = r#"fun main() {
+    var a = 3
+    var b = 5
+    if (a < 10
+        && b < 10) {
+        say("both")
+    }
+}
+"#;
+        let prog = parse_source(source).unwrap();
+        let Stmt::Function { body, .. } = &prog.statements[0] else {
+            panic!("expected Function statement")
+        };
+        match &body[2] {
+            Stmt::If {
+                condition: Expr::Binary { .. },
+                ..
+            } => {}
+            other => panic!("expected If with binary condition, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_multiline_trailing_operator_expression() {
+        let source = r#"fun main() {
+    var x = 1 +
+        2
+    say(x)
+}
+"#;
+        let prog = parse_source(source).unwrap();
+        let Stmt::Function { body, .. } = &prog.statements[0] else {
+            panic!("expected Function statement")
+        };
+        match &body[0] {
+            Stmt::Var {
+                initializer: Some(Expr::Binary { .. }),
+                ..
+            } => {}
+            other => panic!("expected Var with binary initializer, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_multiline_call_arguments() {
+        let source = r#"fun main() {
+    add(
+        1,
+        2
+    )
+}
+"#;
+        let prog = parse_source(source).unwrap();
+        let Stmt::Function { body, .. } = &prog.statements[0] else {
+            panic!("expected Function statement")
+        };
+        match &body[0] {
+            Stmt::Expression {
+                expression: Expr::Call { arguments, .. },
+                ..
+            } => {
+                assert_eq!(arguments.len(), 2);
+            }
+            other => panic!("expected Call, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_multiline_function_params() {
+        let source = r#"fun greet(int n,
+    string name) -> string {
+    return name
+}
+"#;
+        let prog = parse_source(source).unwrap();
+        match &prog.statements[0] {
+            Stmt::Function { params, .. } => {
+                assert_eq!(params.len(), 2);
+            }
+            other => panic!("expected Function with two params, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_multiline_leading_plus_continuation() {
+        let source = r#"fun main() {
+    var x = "a"
+        + "b"
+    say(x)
+}
+"#;
+        let prog = parse_source(source).unwrap();
+        let Stmt::Function { body, .. } = &prog.statements[0] else {
+            panic!("expected Function statement")
+        };
+        match &body[0] {
+            Stmt::Var {
+                initializer: Some(Expr::Binary { .. }),
+                ..
+            } => {}
+            other => panic!("expected Var with binary initializer, got {:?}", other),
         }
     }
 

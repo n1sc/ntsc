@@ -10,17 +10,17 @@ description = "LLVM code generation for the NTSC compiler"
 # LLVM Windows binaries only ship a subset, so linking fails with unresolved
 # LLVMInitialize*Target symbols for the rest. Enable only the targets this
 # compiler actually emits for (x86_64 / aarch64), like ntsc-cli does.
-inkwell = { version = "0.9.0", default-features = false, features = ["llvm22-1", "target-x86", "target-aarch64"] }
+inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["llvm23-1-force-dynamic", "target-x86", "target-aarch64"] }
 ntsc-ast = { path = "../ntsc-ast" }
 ntsc-parser = { path = "../ntsc-parser" }
 ntsc-lexer = { path = "../ntsc-lexer" }
 ntsc-typeck = { path = "../ntsc-typeck" }
 ntsc-build = { path = "../ntsc-build" }
 ntsc-diag = { path = "../ntsc-diag" }
-# Direct, matching inkwell's `llvm22-1` feature: `init_llvm` calls
+# Direct, matching inkwell's `llvm23-1-force-dynamic` feature: `init_llvm` calls
 # `LLVMGetVersion` to fail fast when the linked system libLLVM.so is not
 # the LLVM major the bindings were generated for (abi skew segfaults).
-llvm-sys = "221"
+llvm-sys = { version = "231", default-features = false, features = ["force-dynamic"] }
 # Parse the `ntsc-cargo` export manifests (`*.export.json`) as JSON when
 # loading Rust-call return types; the previous substring scanner coupled
 # codegen to the emitter's exact whitespace and broke on escaped strings.

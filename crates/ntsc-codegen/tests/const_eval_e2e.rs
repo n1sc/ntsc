@@ -235,3 +235,20 @@ fun main() {
     assert!(ok, "program failed: {stderr}");
     assert_eq!(stdout, "i=0\ni=1\ni=2\ni=3\ni=4\ni=5\n");
 }
+
+// ── Radix number literals ───────────────────────────────────────────────
+
+#[test]
+fn radix_literals() {
+    let source = r#"static const var int HEX = 0xff
+
+fun main() {
+    say("sum=" + (0x10 + 0b101))
+    say("hex=" + HEX)
+    say("oct=" + 0o17)
+}
+"#;
+    let (ok, stdout, stderr) = compile_run("radix_literals", source);
+    assert!(ok, "program failed: {stderr}");
+    assert_eq!(stdout, "sum=21\nhex=255\noct=15\n");
+}

@@ -160,7 +160,7 @@ Errors aim to point at the fix, not just the problem:
 
 | Variable | Meaning |
 | --- | --- |
-| `LLVM_SYS_221_PREFIX` | Location of an LLVM 22 installation. |
+| `LLVM_SYS_231_PREFIX` | Location of an LLVM 23 installation. |
 | `NTSC_MAX_ERRORS` | Maximum diagnostics shown per run; `0` is unlimited. |
 | `NTSC_REGISTRY` | Package registry index URL; defaults to `https://ntsc.yasakei.dev/v1/registry`. |
 | `CLICOLOR_FORCE`, `NO_COLOR`, `CLICOLOR`, `TERM` | Diagnostic color control. |

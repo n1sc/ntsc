@@ -4,7 +4,7 @@
 # Usage: make-tarball.sh <version> [path-to-binary]
 #
 # Bundles everything `ntsc` and `ntsc build` need — the compiler, the runtime
-# static library, and the full dylib closure (including Homebrew's llvm@22) —
+# static library, and the full dylib closure (including Homebrew's llvm@23) —
 # so it runs on a Mac with no LLVM install and no cargo toolchain. Extract it
 # anywhere and run bin/ntsc.
 #

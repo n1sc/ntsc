@@ -102,7 +102,10 @@ pub(crate) enum RawToken {
     Newline,
 
     // ── Number literals ──────────────────────────────────────────
-    #[regex(r"[0-9]+(\.[0-9]+)?")]
+    // Radix-prefixed integers come first so `0x1f`, `0o17`, and `0b1010`
+    // lex as a single token instead of `0` plus an identifier. Lowercase
+    // prefixes only, matching Rust and TOML.
+    #[regex(r"0x[0-9a-fA-F]+|0o[0-7]+|0b[01]+|[0-9]+(\.[0-9]+)?")]
     NumberLiteral,
 
     // ── String literals (both " and ' delimiters) ────────────────
@@ -408,6 +411,26 @@ mod tests {
                 RawToken::NumberLiteral,
                 RawToken::NumberLiteral,
             ]
+        );
+    }
+
+    #[test]
+    fn radix_number_literals() {
+        assert_eq!(
+            token_kinds("0x1f 0o17 0b1010"),
+            vec![
+                RawToken::NumberLiteral,
+                RawToken::NumberLiteral,
+                RawToken::NumberLiteral,
+            ]
+        );
+    }
+
+    #[test]
+    fn incomplete_radix_prefix_splits() {
+        assert_eq!(
+            token_kinds("0xzz"),
+            vec![RawToken::NumberLiteral, RawToken::Identifier,]
         );
     }
 

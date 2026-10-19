@@ -132,7 +132,7 @@ impl ConstEvaluator {
                     if n.contains('.') {
                         n.parse::<f64>().ok().map(ConstValue::Float)
                     } else {
-                        n.parse::<i64>().ok().map(ConstValue::Int)
+                        ntsc_ast::expr::parse_int_literal(n).map(ConstValue::Int)
                     }
                 }
                 LiteralValue::Bool(b) => Some(ConstValue::Bool(*b)),
