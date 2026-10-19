@@ -9,6 +9,19 @@ and how to publish your own module so others can do the same.
 the matching releases into `.ntsc/`, and records the result in
 `neutron.lock`.
 
+The compiler treats installed packages as first-class modules. The official
+`term` and `yaml` packages are ordinary registry dependencies:
+
+```console
+$ ntsc pkg install term
+$ ntsc pkg install yaml
+```
+
+```ntsc
+use term
+use yaml
+```
+
 ## Adding a dependency
 
 From the project directory:
@@ -85,8 +98,8 @@ generated `.gitignore` keeps it out of version control. Commit
 tree so every machine builds the same code.
 
 One project is an exception: the package manager itself commits its
-`.ntsc/toml/` tree, because `ntsc-pkg` cannot fetch its own dependency before
-it exists.
+`.ntsc/term/` and `.ntsc/toml/` trees, because `ntsc-pkg` cannot fetch its own
+dependencies before it exists.
 
 The lockfile is plain TOML:
 

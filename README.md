@@ -155,7 +155,8 @@ $ ntsc pkg install slug  # add a dependency from the registry
 
 Dependencies are recorded in `neutron.lock` and vendored into `.ntsc/`; the
 [Packages](docs/guide/packages.md) chapter covers requirements, publishing,
-and mirrors.
+and mirrors. Official packages such as `term` and `yaml` use the same
+first-class bare-module imports as builtin modules.
 
 ### Command-line interface
 

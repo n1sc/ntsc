@@ -47,7 +47,28 @@ namespaces are always in scope; the concurrency chapter uses them without an
 import.
 
 See the [standard library reference](../reference/stdlib.md) for the full
-function list.
+builtin function list.
+
+## First-class library packages
+
+Some integrations are distributed as first-class packages instead of being
+linked into every runtime. Install them from the registry, then import them
+with the same bare-module syntax used for builtin modules:
+
+```console
+ntsc pkg install term
+ntsc pkg install yaml
+```
+
+```ntsc
+use term
+use yaml
+```
+
+`term` provides interactive terminal sessions and key polling. `yaml` parses
+and serializes YAML through the same compact JSON representation used by
+`json`, so `json.get`, `json.keys`, and `json.at` can inspect parsed documents.
+The [Packages](packages.md) chapter covers lockfiles, vendoring, and publishing.
 
 ## Selective imports
 
@@ -80,9 +101,10 @@ Run `ntsc run` from the directory containing `neutron.toml`. It prints
 function declaration.
 
 `use` pulls another `.nt` file into the program when its argument is a
-quoted path; an identifier after `use` (like `use strings`) refers to a
-stdlib module instead. The path is resolved relative to the file that
-contains the import, and the `.nt` extension is inferred when omitted:
+quoted path; an identifier after `use` (like `use strings` or `use yaml`)
+refers to a builtin module or an installed package. The path is resolved
+relative to the file that contains the import, and the `.nt` extension is
+inferred when omitted:
 
 ```ntsc
 use "lib"

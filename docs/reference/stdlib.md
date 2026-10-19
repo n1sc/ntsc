@@ -14,6 +14,53 @@ Unless noted, a function that fails throws an exception whose message starts
 with `module.func:`. Functions that previously returned a default value on
 failure now throw instead.
 
+## First-class packages
+
+`term` and `yaml` are official packages published in the NTSC registry rather
+than builtin runtime modules. Install them in a project with:
+
+```console
+ntsc pkg install term
+ntsc pkg install yaml
+```
+
+Then import them normally:
+
+```ntsc
+use term
+use yaml
+```
+
+### `term`
+
+The terminal package exposes raw-mode sessions and key events. `open` should
+be paired with `restore`, including when the application exits through an
+error-handling path.
+
+| Function | Returns | Behavior |
+| --- | --- | --- |
+| `term.is_tty()` | `bool` | Whether stdout is interactive. |
+| `term.open()` | `int` | Enters raw mode and the alternate screen. |
+| `term.restore(handle)` | `bool` | Restores the normal terminal. |
+| `term.poll_key(handle, timeout_ms)` | `bool` | Waits for a key press. |
+| `term.key_code()` | `string` | Stable name of the last key. |
+| `term.key_character()` | `string` | Character from the last key, if any. |
+| `term.key_ctrl()` | `bool` | Whether the last key used Control. |
+
+### `yaml`
+
+`yaml.parse` returns compact JSON text, and `yaml.stringify` accepts that JSON
+representation. This makes parsed YAML interoperable with the builtin `json`
+module.
+
+| Function | Returns | Behavior |
+| --- | --- | --- |
+| `yaml.parse(text)` | `string` | Parses YAML into a JSON object. |
+| `yaml.stringify(document)` | `string` | Serializes a JSON object as YAML. |
+
+The package supports mappings, nested mappings, block and flow sequences, flow
+mappings, comments, strings, booleans, numbers, and null values.
+
 ## Arrays
 
 The `arrays` module operates on the runtime heap array type produced by array

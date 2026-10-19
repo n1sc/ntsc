@@ -127,6 +127,8 @@ The language currently provides:
   to state machines.
 - A standard library of over twenty modules, from `strings` and `arrays` to
   `net`, `json`, `crypto`, `glob`, `paths`, and `archive`.
+- First-class registry packages such as `term` and `yaml`, imported with bare
+  module names after installation.
 - Filesystem operations: recursive directory walk, symlinks, file locking.
 - HTTP: range downloads, file downloads with progress, concurrent downloads.
 - Crypto: SHA-256/384/224/512, MD5, HMAC, file hashing, hash verification.

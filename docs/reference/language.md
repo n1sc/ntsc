@@ -691,10 +691,10 @@ use "file.nt" [as alias]
 use (a, b) = from "file.nt"
 ```
 
-An identifier after `use` names a standard library module (all module names
-are predeclared, so module `use` is optional). A quoted path loads a source
-file relative to the including file; the `.nt` extension is inferred when
-omitted and the path must stay within the project root.
+An identifier after `use` names a builtin module or an installed package (all
+builtin module names are predeclared, so builtin `use` is optional). A quoted
+path loads a source file relative to the including file; the `.nt` extension
+is inferred when omitted and the path must stay within the project root.
 See [Modules](../guide/modules.md).
 
 ### Test
