@@ -228,19 +228,6 @@ pub static MODULES: &[StdModule] = &[
         ),
     },
     StdModule {
-        name: "term",
-        description: "Interactive terminal mode and key events.",
-        functions: fns!(
-            ("is_tty", "term.is_tty() -> bool"),
-            ("open", "term.open() -> int"),
-            ("restore", "term.restore(handle) -> bool"),
-            ("poll_key", "term.poll_key(handle, timeout_ms) -> bool"),
-            ("key_code", "term.key_code() -> string"),
-            ("key_character", "term.key_character() -> string"),
-            ("key_ctrl", "term.key_ctrl() -> bool"),
-        ),
-    },
-    StdModule {
         name: "sort",
         description: "Sorting helpers.",
         functions: fns!(
@@ -278,11 +265,6 @@ pub static MODULES: &[StdModule] = &[
             ("parse", "csv.parse(s) -> array"),
             ("stringify", "csv.stringify(rows) -> string"),
         ),
-    },
-    StdModule {
-        name: "yaml",
-        description: "YAML parsing.",
-        functions: fns!(("parse", "yaml.parse(s) -> any"),),
     },
     StdModule {
         name: "net",

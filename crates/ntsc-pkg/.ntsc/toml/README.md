@@ -13,7 +13,7 @@ ntsc pkg install toml
 ## Use
 
 ```ntsc
-use toml
+use "toml"
 use json
 
 fun main() {

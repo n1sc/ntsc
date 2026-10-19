@@ -482,10 +482,12 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         "ntsc_sys_exit" | "ntsc_sys_sleep" => Ty::Void,
         "ntsc_sys_exec" => Ty::Int,
 
-        "ntsc_term_is_tty" | "ntsc_term_poll_key" | "ntsc_term_key_ctrl" => Ty::Bool,
-        "ntsc_term_open" => Ty::Int,
-        "ntsc_term_restore" => Ty::Bool,
-        "ntsc_term_key_code" | "ntsc_term_key_character" => Ty::String,
+        "ntsc_term_native_is_tty" | "ntsc_term_native_poll_key" | "ntsc_term_native_key_ctrl" => {
+            Ty::Bool
+        }
+        "ntsc_term_native_open" => Ty::Int,
+        "ntsc_term_native_restore" => Ty::Bool,
+        "ntsc_term_native_key_code" | "ntsc_term_native_key_character" => Ty::String,
 
         "ntsc_strings_contains"
         | "ntsc_strings_starts_with"
@@ -519,8 +521,6 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
 
         "ntsc_csv_parse"
         | "ntsc_csv_stringify"
-        | "ntsc_yaml_parse"
-        | "ntsc_yaml_stringify"
         | "ntsc_json_parse"
         | "ntsc_json_stringify"
         | "ntsc_json_get"

@@ -6,4 +6,5 @@ output = "ntsc-pkg"
 # committed because the manager cannot fetch this dependency before it is
 # built. Refresh it with `ntsc pkg install` and force-add changes.
 [dependencies]
+term = "^1.0.0"
 toml = "^1.0.0"

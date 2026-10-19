@@ -1,0 +1,4 @@
+[package]
+name = "term"
+entry = "lib.nt"
+output = "term"

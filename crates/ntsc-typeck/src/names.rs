@@ -44,11 +44,9 @@ pub const BUILTIN_MODULES: &[&str] = &[
     "sort",
     "strings",
     "sys",
-    "term",
+    "term_native",
     "testing",
     "time",
-    "toml",
-    "yaml",
 ];
 
 /// Resolve all declarations and references in a program.

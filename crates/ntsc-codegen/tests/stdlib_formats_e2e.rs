@@ -1,5 +1,5 @@
-//! End-to-end test for the `csv` and `yaml` standard library
-//! modules and the `testing.bench` benchmark harness.
+//! End-to-end test for the `csv` standard library module and the
+//! `testing.bench` benchmark harness.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -116,59 +116,6 @@ fn csv_roundtrip() {
     );
     assert!(stdout.contains("rt0:"), "missing rt0 output:\n{stdout}");
     assert!(stdout.contains("rt1:"), "missing rt1 output:\n{stdout}");
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn yaml_parse_and_stringify() {
-    let source = "use yaml\nfun main() {\n    var yaml_input = \"name: Alice\\nage: 30\\nactive: true\";\n    var parsed = yaml.parse(yaml_input);\n    say(\"y0: \" + parsed);\n\n    var output = yaml.stringify(parsed);\n    say(\"y1: \" + output);\n\n    var empty = yaml.parse(\"\");\n    say(\"y2: \" + empty);\n\n    try {\n        var bad = yaml.stringify(\"[1,2,3]\");\n        say(\"unreached-yaml-stringify\");\n    } catch (err) {\n        say(\"y4: \" + err);\n    }\n\n    say(\"done\")\n}\n";
-
-    let dir = std::env::temp_dir().join("ntsc_yaml_e2e_test");
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let output = build_and_run(source, "yaml_e2e", &dir);
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    assert!(
-        output.status.success(),
-        "binary exited with non-zero status:\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(
-        stdout.contains("y0:") && stdout.contains("\"name\""),
-        "y0 should contain parsed name:\n{stdout}"
-    );
-    assert!(stdout.contains("y1:"), "missing y1 output:\n{stdout}");
-    assert!(
-        stdout.contains("y2: {}"),
-        "y2 should be empty object:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("y4:") && stdout.contains("yaml.stringify"),
-        "y4 should contain error:\n{stdout}"
-    );
-    assert!(stdout.trim().ends_with("done"));
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn yaml_roundtrip() {
-    let source = "use yaml\nfun main() {\n    var input = \"name: Alice\\nage: 30\\ncity: NYC\";\n    var data = yaml.parse(input);\n    var output = yaml.stringify(data);\n    say(\"yrt0: \" + output);\n\n    var reparsed = yaml.parse(output);\n    say(\"yrt1: \" + reparsed);\n\n    say(\"done\")\n}\n";
-
-    let dir = std::env::temp_dir().join("ntsc_yaml_roundtrip_e2e");
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let output = build_and_run(source, "yaml_roundtrip", &dir);
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-
-    assert!(
-        output.status.success(),
-        "binary exited with non-zero status:\n{stdout}"
-    );
-    assert!(stdout.contains("yrt0:"), "missing yrt0 output:\n{stdout}");
-    assert!(stdout.contains("yrt1:"), "missing yrt1 output:\n{stdout}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

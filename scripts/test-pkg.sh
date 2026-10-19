@@ -162,7 +162,11 @@ cd "$PROJ"
 export NTSC_REGISTRY="$URL"
 
 echo "== install"
-"$NTSC" pkg install
+INSTALL_OUTPUT="$($NTSC pkg install 2>&1)"
+echo "$INSTALL_OUTPUT"
+grep -q 'neutron modules' <<<"$INSTALL_OUTPUT" || fail "install output has no module header"
+grep -q 'ok outer v1.0.0' <<<"$INSTALL_OUTPUT" || fail "install output has no outer package status"
+grep -q 'installed 2 packages' <<<"$INSTALL_OUTPUT" || fail "install output has no install summary"
 [[ -f .ntsc/outer/lib.nt ]] || fail "outer was not vendored"
 [[ -f .ntsc/fixture/lib.nt ]] || fail "transitive dependency was not vendored"
 [[ ! -d .ntsc/outer/.git ]] || fail "the checkout's .git directory was vendored"

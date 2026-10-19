@@ -32,7 +32,7 @@ csv       encoding  fmt          glob         hash
 http      io        json         math         memory
 net       os        paths        process      random
 regex     slices    sort         strings      sys
-term      testing   time         yaml
+testing   time
 ```
 
 An alias lets you choose a local module name:
@@ -108,11 +108,11 @@ entry file's directory (for example through `../`) is rejected.
 
 ### Installed packages
 
-`ntsc pkg` vendors dependencies into `.ntsc/<name>/` at the project root, and
-a quoted import without a path separator or `.nt` suffix names one of them:
+`ntsc pkg` vendors dependencies into `.ntsc/<name>/` at the project root. A
+bare import matching a vendored package name loads it as a normal module:
 
 ```ntsc
-use "slug"
+use slug
 
 fun main() {
     say(slugify("Hello, World!"))

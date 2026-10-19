@@ -10,6 +10,62 @@ use fmt
 use paths
 use strings
 use sys
+use term
+
+fun style(view string code, view string text) -> string {
+    if (!term.is_tty()) {
+        return copy(text)
+    }
+    var escape = strings.from_char_code(27)
+    return escape + "[" + copy(code) + "m" + copy(text) + escape + "[0m"
+}
+
+fun cyan(view string text) -> string {
+    return style("36", text)
+}
+
+fun dim(view string text) -> string {
+    return style("2", text)
+}
+
+fun green(view string text) -> string {
+    return style("32", text)
+}
+
+fun bold(view string text) -> string {
+    return style("1", text)
+}
+
+fun symbol(view string terminal_symbol, view string plain_symbol) -> string {
+    if (term.is_tty()) {
+        return copy(terminal_symbol)
+    }
+    return copy(plain_symbol)
+}
+
+fun package_word(int count) -> string {
+    if (count == 1) {
+        return "package"
+    }
+    return "packages"
+}
+
+fun install_header(int count) {
+    say("")
+    say("  " + cyan(symbol("◆", ">")) + " " + bold("neutron modules"))
+    if (count == 1) {
+        say("  " + dim("resolving 1 dependency"))
+    } else {
+        say("  " + dim("resolving " + fmt.i64_to_str(count) + " dependencies"))
+    }
+}
+
+fun install_success(int count) {
+    var total = fmt.i64_to_str(count)
+    say("  " + green(symbol("✓", "ok")) + " " + bold("installed " + total + " " + package_word(count)))
+    say("  " + dim("linked into .ntsc/"))
+    say("")
+}
 
 /// Install the manifest's dependencies, reusing the lockfile where it still
 /// satisfies the declared requirements.
@@ -46,14 +102,14 @@ fun add(view string project_dir, view string request) -> result[bool, string] {
 
     var toml_path = paths.join(project_dir, "neutron.toml")
     toml_utils.set_dependency(toml_path, name, pin)?
-    say("added " + copy(name) + " = \"" + pin + "\"")
+    say("  " + cyan(symbol("↳", ">>")) + " " + dim("manifest updated") + "  " + copy(name) + " = \"" + pin + "\"")
     return install(project_dir)
 }
 
 fun remove(view string project_dir, view string name) -> result[bool, string] {
     var toml_path = paths.join(project_dir, "neutron.toml")
     toml_utils.remove_dependency(toml_path, name)?
-    say("removed " + copy(name))
+    say("  " + cyan(symbol("↳", ">>")) + " " + dim("manifest updated") + "  removed " + copy(name))
     return install(project_dir)
 }
 
@@ -92,11 +148,15 @@ fun apply(view string project_dir, view string manifest, view string lock_json) 
     var count = arrays.length(plan)
 
     if (count == 0) {
-        say("no dependencies to install")
+        install_header(0)
+        say("  " + green(symbol("✓", "ok")) + " " + bold("manifest already in sync"))
+        say("")
         prune_vendor(vendor_root, plan)
         lockfile.write_lockfile(lock_path(project_dir), entries)?
         return Ok(true)
     }
+
+    install_header(count)
 
     try {
         sys.mkdir(vendor_root)
@@ -122,12 +182,12 @@ fun apply(view string project_dir, view string manifest, view string lock_json) 
         var integrity = compute_integrity(target)
         var record = copy(name) + "\t" + copy(version) + "\t" + copy(repo) + "\t" + "sha256:" + integrity
         arrays.push(entries, record)
-        say("  " + copy(name) + " " + copy(version))
+        say("  " + green(symbol("✓", "ok")) + " " + copy(name) + " " + dim("v" + copy(version)))
     }
 
     prune_vendor(vendor_root, plan)
     lockfile.write_lockfile(lock_path(project_dir), entries)?
-    say("installed " + fmt.i64_to_str(count) + " package(s)")
+    install_success(count)
     return Ok(true)
 }
 

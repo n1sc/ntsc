@@ -409,11 +409,6 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_csv_parse", i64_ty, i64_ty);
     declare!("ntsc_csv_stringify", i64_ty, i64_ty);
 
-    // ── yaml module ──────────────────────────────────────────────────────
-
-    declare!("ntsc_yaml_parse", i64_ty, i64_ty);
-    declare!("ntsc_yaml_stringify", i64_ty, i64_ty);
-
     // ── json module ──────────────────────────────────────────────────────
 
     declare!("ntsc_json_parse", i64_ty, i64_ty);
@@ -499,14 +494,14 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_os_rename", i8_ty, i64_ty, i64_ty);
     declare!("ntsc_os_executable_path", i64_ty);
 
-    // ── term module ───────────────────────────────────────────────────────
-    declare!("ntsc_term_is_tty", i8_ty);
-    declare!("ntsc_term_open", i64_ty);
-    declare!("ntsc_term_restore", i8_ty, i64_ty);
-    declare!("ntsc_term_poll_key", i8_ty, i64_ty, f64_ty);
-    declare!("ntsc_term_key_code", i64_ty);
-    declare!("ntsc_term_key_character", i64_ty);
-    declare!("ntsc_term_key_ctrl", i8_ty);
+    // ── native terminal substrate ────────────────────────────────────────
+    declare!("ntsc_term_native_is_tty", i8_ty);
+    declare!("ntsc_term_native_open", i64_ty);
+    declare!("ntsc_term_native_restore", i8_ty, i64_ty);
+    declare!("ntsc_term_native_poll_key", i8_ty, i64_ty, f64_ty);
+    declare!("ntsc_term_native_key_code", i64_ty);
+    declare!("ntsc_term_native_key_character", i64_ty);
+    declare!("ntsc_term_native_key_ctrl", i8_ty);
 
     // ── process module ───────────────────────────────────────────────────
 

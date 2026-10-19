@@ -1,4 +1,4 @@
-//! NTSC standard library: `term` module.
+//! Native terminal substrate for the external Neutron `term` package.
 //!
 //! Terminal ownership and key decoding live in the runtime so applications
 //! can implement their screens in Neutron without a crate-specific terminal
@@ -32,13 +32,13 @@ fn fail(fn_name: &str, error: impl std::fmt::Display) -> i64 {
 
 /// `term.is_tty()` — whether stdout is connected to an interactive terminal.
 #[unsafe(no_mangle)]
-pub extern "C" fn ntsc_term_is_tty() -> i8 {
+pub extern "C" fn ntsc_term_native_is_tty() -> i8 {
     i8::from(std::io::stdout().is_terminal())
 }
 
 /// `term.open()` — enable raw input and the alternate screen.
 #[unsafe(no_mangle)]
-pub extern "C" fn ntsc_term_open() -> i64 {
+pub extern "C" fn ntsc_term_native_open() -> i64 {
     let mut active = ACTIVE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -67,7 +67,7 @@ pub extern "C" fn ntsc_term_open() -> i64 {
 
 /// `term.restore(handle)` — restore the normal screen and cooked input.
 #[unsafe(no_mangle)]
-pub extern "C" fn ntsc_term_restore(handle: i64) -> i8 {
+pub extern "C" fn ntsc_term_native_restore(handle: i64) -> i8 {
     if handle == 0 {
         return 1;
     }
@@ -97,7 +97,7 @@ pub extern "C" fn ntsc_term_restore(handle: i64) -> i8 {
 
 /// `term.poll_key(handle, timeout_ms)` — wait for a key press.
 #[unsafe(no_mangle)]
-pub extern "C" fn ntsc_term_poll_key(handle: i64, timeout_ms: f64) -> i8 {
+pub extern "C" fn ntsc_term_native_poll_key(handle: i64, timeout_ms: f64) -> i8 {
     if handle == 0
         || !*ACTIVE
             .lock()
@@ -127,7 +127,7 @@ pub extern "C" fn ntsc_term_poll_key(handle: i64, timeout_ms: f64) -> i8 {
 
 /// `term.key_code()` — the stable code for the last key returned by poll.
 #[unsafe(no_mangle)]
-pub extern "C" fn ntsc_term_key_code() -> i64 {
+pub extern "C" fn ntsc_term_native_key_code() -> i64 {
     registry::put_string(
         LAST_KEY
             .lock()
@@ -139,7 +139,7 @@ pub extern "C" fn ntsc_term_key_code() -> i64 {
 
 /// `term.key_character()` — the character for the last character key.
 #[unsafe(no_mangle)]
-pub extern "C" fn ntsc_term_key_character() -> i64 {
+pub extern "C" fn ntsc_term_native_key_character() -> i64 {
     registry::put_string(
         LAST_KEY
             .lock()
@@ -151,7 +151,7 @@ pub extern "C" fn ntsc_term_key_character() -> i64 {
 
 /// `term.key_ctrl()` — whether the last key had the control modifier.
 #[unsafe(no_mangle)]
-pub extern "C" fn ntsc_term_key_ctrl() -> i8 {
+pub extern "C" fn ntsc_term_native_key_ctrl() -> i8 {
     i8::from(
         LAST_KEY
             .lock()

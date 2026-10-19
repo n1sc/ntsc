@@ -2,10 +2,13 @@
 version = 1
 
 [packages]
+term = "1.0.0"
 toml = "1.0.0"
 
 [sources]
+term = "https://github.com/n1sc/term"
 toml = "https://github.com/n1sc/toml"
 
 [integrity]
+term = "sha256:e5de972928c513b1a99fe547e180320976c2fe1efc4d9556528a4e4e820bec16"
 toml = "sha256:36915ec2b9bf862408a718bba40b6a62c3b6768dfef7981a96b6c11293043382"

@@ -335,8 +335,6 @@ fn is_builtin_module(name: &str) -> bool {
         "sys",
         "testing",
         "time",
-        "toml",
-        "yaml",
     ];
     BUILTIN.contains(&name)
 }

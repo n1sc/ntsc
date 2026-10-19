@@ -231,7 +231,7 @@ pub(crate) fn emit_variable<'ctx>(
             // Only when no local variable shadows the module name.
             match stripped {
                 "math" | "fmt" | "time" | "sys" | "strings" | "json" | "http" | "crypto"
-                | "collections" | "regex" | "arrays" | "process" | "csv" | "yaml" | "term" => {
+                | "collections" | "regex" | "arrays" | "process" | "csv" | "term_native" => {
                     return Ok(TypedValue::new(
                         fn_ctx
                             .context

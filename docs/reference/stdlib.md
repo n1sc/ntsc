@@ -3,6 +3,9 @@
 The standard library is exposed as modules callable from Neutron source.
 Import a module with `use module` (for example, `use arrays`) before calling
 its functions. The `async` and `chan` namespaces are always in scope.
+The `term` and `yaml` integrations are first-class packages: install them with
+`ntsc pkg install term` or `ntsc pkg install yaml`, then import them with
+`use term` or `use yaml`.
 Functions follow the `module.func` naming
 convention. Return types below are as seen by NTSC source; runtime `bool`
 results are normalized to `bool` and scalar results to `int`/`float`.
@@ -127,22 +130,6 @@ negative argument.
 | `sys.readlink(path)` | `string` | Returns the target of a symbolic link. Throws if not a symlink. |
 | `sys.is_symlink(path)` | `bool` | Whether the path is a symbolic link. |
 
-## Terminal
-
-The `term` module provides the platform-sensitive terminal primitives needed
-by interactive Neutron applications. Rendering is application-owned: use
-`io.write` with ANSI sequences or another output format around these calls.
-
-| Function | Returns | Behavior |
-| --- | --- | --- |
-| `term.is_tty()` | `bool` | Whether stdout is an interactive terminal. |
-| `term.open()` | `int` | Enables raw input and the alternate screen; returns a session handle. |
-| `term.restore(handle)` | `bool` | Restores cooked input and the normal screen; safe to repeat. |
-| `term.poll_key(handle, timeout_ms)` | `bool` | Waits up to `timeout_ms` for a key press and stores it as the last key. |
-| `term.key_code()` | `string` | Stable code for the last key (`character`, `enter`, `up`, `ctrl_c`, and so on). |
-| `term.key_character()` | `string` | Character for the last character key. |
-| `term.key_ctrl()` | `bool` | Whether the last key had the Control modifier. |
-
 ## Time
 
 | Function | Returns | Behavior |
@@ -198,27 +185,6 @@ var data = csv.parse("name,age\nAlice,30\nBob,25")
 
 var text = csv.stringify(data)
 // "name,age\nAlice,30\nBob,25"
-```
-
-## YAML
-
-`yaml` parses and serializes YAML text.  `yaml.parse` returns a JSON object
-(or array for top-level sequences); `yaml.stringify` accepts a JSON value and
-produces YAML text.
-
-| Function | Returns | Behavior |
-| --- | --- | --- |
-| `yaml.parse(s)` | `string` | Parses YAML text into a JSON value. Throws on malformed input. |
-| `yaml.stringify(v)` | `string` | Serializes a JSON value into YAML text. |
-
-An empty input produces `{}`.
-
-```ntsc
-var data = yaml.parse("name: Alice\nage: 30\nactive: true")
-// {"name":"Alice","age":30,"active":true}
-
-var text = yaml.stringify(data)
-// name: Alice\nage: 30\nactive: true
 ```
 
 ## HTTP

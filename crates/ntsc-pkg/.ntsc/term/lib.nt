@@ -1,0 +1,36 @@
+use term_native
+
+/// Return true when stdout is attached to an interactive terminal.
+fun is_tty() -> bool {
+    return term_native.is_tty()
+}
+
+/// Enter raw terminal mode and return a session handle.
+fun open() -> int {
+    return term_native.open()
+}
+
+/// Restore the terminal after `open`.
+fun restore(int handle) -> bool {
+    return term_native.restore(handle)
+}
+
+/// Wait for a key press for up to `timeout_ms` milliseconds.
+fun poll_key(int handle, float timeout_ms) -> bool {
+    return term_native.poll_key(handle, timeout_ms)
+}
+
+/// Return the stable name of the last key returned by `poll_key`.
+fun key_code() -> string {
+    return term_native.key_code()
+}
+
+/// Return the character associated with the last key returned by `poll_key`.
+fun key_character() -> string {
+    return term_native.key_character()
+}
+
+/// Return whether the last key had the control modifier.
+fun key_ctrl() -> bool {
+    return term_native.key_ctrl()
+}

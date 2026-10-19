@@ -15,9 +15,12 @@ From the project directory:
 
 ```console
 $ ntsc pkg install slug
-added slug = "^1.2.0"
-  slug 1.2.0
-installed 1 package(s)
+
+  > neutron modules
+  resolving 1 dependency
+  ok slug v1.2.0
+  ok installed 1 package
+  linked into .ntsc/
 ```
 
 This writes a line into `neutron.toml`, resolves the newest version that
@@ -44,11 +47,10 @@ are preserved when `ntsc pkg` edits the file.
 
 ## Importing a package
 
-A package is imported by its name, exactly like a local file, but without an
-extension:
+A package is imported by its name, exactly like a standard-library module:
 
 ```ntsc
-use "slug"
+use slug
 
 fun main() {
     say(slugify("Hello, World!"))
@@ -200,7 +202,7 @@ the same tag twice. Delete that directory to force a fresh clone.
 Publish the `slug` module: create a repository with `lib.nt` and a
 `neutron.toml`, tag `v1.0.0`, then add `packages/slug.toml` to the registry
 with a pull request. Once CI rebuilds the index, install it into a second
-project with `ntsc pkg install slug`, import it with `use "slug" as slug`, and
+project with `ntsc pkg install slug`, import it with `use slug`, and
 call a function.
 
 Then run `ntsc pkg list` and open `neutron.lock` to see the version and
