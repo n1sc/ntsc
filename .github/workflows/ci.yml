@@ -232,3 +232,11 @@ jobs:
             & $pkg
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally { Pop-Location }
+
+      # The manager shells out to `git`, so the full install/build/update
+      # cycle runs on the Unix runners only.
+      - name: Package manager end-to-end
+        if: runner.os != 'Windows'
+        run: |
+          cp crates/ntsc-pkg/build/release/ntsc-pkg target/release/ntsc-pkg
+          ./scripts/test-pkg.sh

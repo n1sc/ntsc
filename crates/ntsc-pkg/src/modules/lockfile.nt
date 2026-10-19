@@ -1,111 +1,119 @@
+use "text" as text
+
 use sys
 use toml
 use json
 use strings
 use arrays
 
+/// `{}` when the project has never been installed.
 fun read_lockfile(view string path) -> result[string, string] {
     if (!sys.exists(path)) {
         return Ok("{}")
     }
+    var content = ""
     try {
-        var content = sys.read(path)
-        return Ok(toml.parse(content))
+        content = sys.read(path)
     } catch (err) {
-        return Err("lockfile.read: " + err)
+        return Err("cannot read " + copy(path) + ": " + err)
     }
-}
-
-fun write_lockfile(view string path, view string json_data) -> result[bool, string] {
+    var parsed = ""
     try {
-        sys.write(path, toml.stringify(json_data))
-        return Ok(true)
+        parsed = toml.parse(content)
     } catch (err) {
-        return Err("lockfile.write: " + err)
+        return Err("cannot parse " + copy(path) + ": " + err)
     }
+    return Ok(parsed)
 }
 
-fun get_package(view string lockfile_json, view string name) -> string {
-    try {
-        var pkgs = json.get(lockfile_json, "package")
-        if (strings.is_empty(pkgs) || pkgs == "nil") {
-            return "{}"
-        }
-        var pkg = json.get(pkgs, name)
-        if (strings.is_empty(pkg) || pkg == "nil") {
-            return "{}"
-        }
-        return pkg
-    } catch (_) {
-        return "{}"
-    }
+fun locked_version(view string lock_json, view string name) -> string {
+    return table_value(lock_json, "packages", name)
 }
 
-fun set_package(view string lockfile_json, view string name, view string version, view string source, view string integrity) -> result[string, string] {
-    try {
-        var pkg_json = "{\"name\":\"" + copy(name) + "\",\"version\":\"" + copy(version) + "\",\"source\":\"" + copy(source) + "\",\"integrity\":\"" + copy(integrity) + "\"}"
-        var existing = json.get(lockfile_json, "package")
-        if (strings.is_empty(existing) || existing == "nil") {
-            existing = "{}"
-        }
-        var updated = set_json_key(existing, name, pkg_json)
-        var result_json = set_json_key(lockfile_json, "package", updated)
-        return Ok(result_json)
-    } catch (err) {
-        return Err("lockfile.set_package: " + err)
-    }
+fun locked_source(view string lock_json, view string name) -> string {
+    return table_value(lock_json, "sources", name)
 }
 
-fun set_json_key(view string json_str, view string key, view string value) -> string {
-    var keys = json.keys(json_str)
-    var has_key = false
-    if (!strings.is_empty(keys)) {
-        has_key = strings.contains(keys, key)
-    }
-    var parts = arrays.new()
-    if (!strings.is_empty(keys)) {
-        var key_list = strings.split(keys, "\n")
-        var count = arrays.length(key_list)
-        for (var i = 0; i < count; i = i + 1) {
-            var k = strings.trim(arrays.get(key_list, i))
-            if (strings.is_empty(k)) { continue }
-            if (k == key) {
-                arrays.push(parts, quote_str(k) + ": " + quote_str(value))
-            } else {
-                var v = json.get(json_str, k)
-                arrays.push(parts, quote_str(k) + ": " + quote_str(v))
-            }
-        }
-    }
-    if (!has_key) {
-        arrays.push(parts, quote_str(key) + ": " + quote_str(value))
-    }
-    return "{" + arrays.join(parts, ", ") + "}"
+fun locked_integrity(view string lock_json, view string name) -> string {
+    return table_value(lock_json, "integrity", name)
 }
 
-fun quote_str(view string s) -> string {
-    return "\"" + strings.replace(s, "\"", "\\\"") + "\""
+fun table_value(view string lock_json, view string table, view string name) -> string {
+    if (lock_json == "{}") {
+        return ""
+    }
+    var values = json.get(lock_json, table)
+    if (values == "null") {
+        return ""
+    }
+    var value = text.unquote(json.get(values, name))
+    if (value == "null") {
+        return ""
+    }
+    return value
 }
 
-fun list_packages(view string lockfile_json) -> array[string] {
+/// Every locked package name, in the order the file lists them.
+fun list_packages(view string lock_json) -> array[string] {
     var names = arrays.new()
-    try {
-        var pkgs = json.get(lockfile_json, "package")
-        if (strings.is_empty(pkgs) || pkgs == "nil") {
-            return names
+    if (lock_json == "{}") {
+        return names
+    }
+    var packages = json.get(lock_json, "packages")
+    if (packages == "null") {
+        return names
+    }
+    var keys = json.keys(packages)
+    if (strings.is_empty(keys)) {
+        return names
+    }
+    var parts = strings.split_array(keys, ",")
+    var count = arrays.length(parts)
+    for (var i = 0; i < count; i = i + 1) {
+        var name = strings.trim(arrays.get(parts, i))
+        if (!strings.is_empty(name)) {
+            arrays.push(names, copy(name))
         }
-        var keys = json.keys(pkgs)
-        if (strings.is_empty(keys)) {
-            return names
-        }
-        var key_list = strings.split(keys, "\n")
-        var count = arrays.length(key_list)
-        for (var i = 0; i < count; i = i + 1) {
-            var key = strings.trim(arrays.get(key_list, i))
-            if (!strings.is_empty(key)) {
-                arrays.push(names, key)
-            }
-        }
-    } catch (_) {}
+    }
     return names
+}
+
+/// `entries` holds `name\tversion\tsource\tintegrity` records.
+fun write_lockfile(view string path, view array[string] entries) -> result[bool, string] {
+    var lines = arrays.new()
+    arrays.push(lines, "# Generated by `ntsc pkg`; run `ntsc pkg install` to refresh it.")
+    arrays.push(lines, "version = 1")
+    var count = arrays.length(entries)
+    if (count > 0) {
+        arrays.push(lines, "")
+        arrays.push(lines, "[packages]")
+        for (var i = 0; i < count; i = i + 1) {
+            var fields = strings.split_array(arrays.get(entries, i), "\t")
+            arrays.push(lines, copy(arrays.get(fields, 0)) + " = \"" + copy(arrays.get(fields, 1)) + "\"")
+        }
+        arrays.push(lines, "")
+        arrays.push(lines, "[sources]")
+        for (var i = 0; i < count; i = i + 1) {
+            var fields = strings.split_array(arrays.get(entries, i), "\t")
+            arrays.push(lines, copy(arrays.get(fields, 0)) + " = \"" + quote(arrays.get(fields, 2)) + "\"")
+        }
+        arrays.push(lines, "")
+        arrays.push(lines, "[integrity]")
+        for (var i = 0; i < count; i = i + 1) {
+            var fields = strings.split_array(arrays.get(entries, i), "\t")
+            arrays.push(lines, copy(arrays.get(fields, 0)) + " = \"" + quote(arrays.get(fields, 3)) + "\"")
+        }
+    }
+    var content = arrays.join(lines, "\n") + "\n"
+    var written = false
+    try {
+        written = sys.write(path, content)
+    } catch (err) {
+        return Err("cannot write " + copy(path) + ": " + err)
+    }
+    return Ok(written)
+}
+
+fun quote(view string s) -> string {
+    return strings.replace(s, "\"", "\\\"")
 }

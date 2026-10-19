@@ -1,0 +1,11 @@
+use strings
+
+/// A JSON string value without its surrounding quotes. The `json` module hands
+/// values back as raw JSON text, so every string read needs this.
+fun unquote(view string value) -> string {
+    var text = strings.trim(value)
+    if (strings.length(text) >= 2 && strings.starts_with(text, "\"") && strings.ends_with(text, "\"")) {
+        return strings.substring(text, 1, strings.length(text) - 1)
+    }
+    return text
+}

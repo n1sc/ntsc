@@ -92,6 +92,12 @@ task e2e {
     done("e2e passed")
 }
 
+task test_pkg {
+    step("package manager end-to-end (local registry + git fixtures)")
+    run "set -e; cargo build --release -p ntsc-cli; (cd crates/ntsc-pkg && ../../target/release/ntsc build --release); cp crates/ntsc-pkg/build/release/ntsc-pkg target/release/ntsc-pkg; ./scripts/test-pkg.sh"
+    done("package manager passed")
+}
+
 task proj {
     step("smoke test (PROJ selects the project, default examples/bank)")
     run "set -e; root=$(pwd); dir=$PROJ; if [ -z $dir ]; then dir=examples/bank; fi; echo smoke: $dir; cargo build -p ntsc-cli; cd $dir; $root/target/debug/ntsc build; ./build/debug/$(basename $dir)"
@@ -121,13 +127,13 @@ task full {
 
 task install after build {
     step("installing ntsc globally to ${bindir} (PREFIX overrides)")
-    run "set -e; prefix=${prefix}; bindir=$prefix/bin; cargo build --release -p ntsc-cli -p ntsc-lsp; cargo build --release -p ntsc-runtime; if [ -w $bindir ]; then SUDO=; else SUDO=sudo; fi; $SUDO mkdir -p $bindir; $SUDO cp target/release/ntsc $bindir/ntsc; $SUDO cp target/release/ntsc-lsp $bindir/ntsc-lsp; $SUDO cp target/release/libntsc_runtime.a $bindir/libntsc_runtime.a; $SUDO chmod 755 $bindir/ntsc $bindir/ntsc-lsp; $bindir/ntsc --version; case :$PATH: in *:$bindir:*) ;; *) echo NOTE: add $bindir to PATH: export PATH=$bindir:$PATH ;; esac"
+    run "set -e; prefix=${prefix}; bindir=$prefix/bin; cargo build --release -p ntsc-cli -p ntsc-lsp; cargo build --release -p ntsc-runtime; (cd crates/ntsc-pkg && ../../target/release/ntsc build --release); if [ -w $bindir ]; then SUDO=; else SUDO=sudo; fi; $SUDO mkdir -p $bindir; $SUDO cp target/release/ntsc $bindir/ntsc; $SUDO cp target/release/ntsc-lsp $bindir/ntsc-lsp; $SUDO cp crates/ntsc-pkg/build/release/ntsc-pkg $bindir/ntsc-pkg; $SUDO cp target/release/libntsc_runtime.a $bindir/libntsc_runtime.a; $SUDO chmod 755 $bindir/ntsc $bindir/ntsc-lsp $bindir/ntsc-pkg; $bindir/ntsc --version; case :$PATH: in *:$bindir:*) ;; *) echo NOTE: add $bindir to PATH: export PATH=$bindir:$PATH ;; esac"
     done("ntsc installed to ${bindir}")
 }
 
 task uninstall {
     step("removing ntsc from ${bindir}")
-    run "set -e; prefix=${prefix}; bindir=$prefix/bin; if [ -w $bindir ]; then SUDO=; else SUDO=sudo; fi; $SUDO rm -f $bindir/ntsc $bindir/ntsc-lsp $bindir/libntsc_runtime.a; echo removed ntsc from $bindir"
+    run "set -e; prefix=${prefix}; bindir=$prefix/bin; if [ -w $bindir ]; then SUDO=; else SUDO=sudo; fi; $SUDO rm -f $bindir/ntsc $bindir/ntsc-lsp $bindir/ntsc-pkg $bindir/libntsc_runtime.a; echo removed ntsc from $bindir"
     done("uninstalled")
 }
 

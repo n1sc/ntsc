@@ -1,0 +1,102 @@
+use os
+use paths
+use process
+use strings
+use sys
+use fmt
+
+/// `~/.ntsc/packages`, shared by every project on the machine.
+fun cache_root() -> string {
+    var home = os.getenv("HOME")
+    if (strings.is_empty(home)) {
+        home = os.getenv("USERPROFILE")
+    }
+    if (strings.is_empty(home)) {
+        home = os.temp_dir()
+    }
+    return paths.join(home, ".ntsc/packages")
+}
+
+fun checkout_path(view string name, view string version) -> string {
+    return paths.join(cache_root(), copy(name) + "@" + copy(version))
+}
+
+/// Package names become directory names and shell arguments, so only the
+/// characters the registry allows are accepted.
+fun is_safe_name(view string name) -> bool {
+    if (strings.is_empty(name) || name == "." || name == "..") {
+        return false
+    }
+    return only_safe_characters(name, false)
+}
+
+/// Versions become git tags and directory names; prereleases add `-`.
+fun is_safe_version(view string version) -> bool {
+    if (strings.is_empty(version) || version == "." || version == "..") {
+        return false
+    }
+    return only_safe_characters(version, true)
+}
+
+fun only_safe_characters(view string text, bool allow_prerelease) -> bool {
+    var count = strings.length(text)
+    for (var i = 0; i < count; i = i + 1) {
+        var c = strings.char_at(text, i)
+        if (strings.is_alnum(c) || c == "." || c == "_" || c == "-") {
+            continue
+        }
+        if (allow_prerelease && (c == "+")) {
+            continue
+        }
+        return false
+    }
+    return true
+}
+
+/// The repository URL is interpolated into a shell command, so anything that
+/// could end the quoting or start an expansion is rejected.
+fun is_safe_repo(view string repo) -> bool {
+    if (strings.is_empty(repo)) { return false }
+    if (strings.contains(repo, "\"")) { return false }
+    if (strings.contains(repo, "'")) { return false }
+    if (strings.contains(repo, "`")) { return false }
+    if (strings.contains(repo, "$")) { return false }
+    if (strings.contains(repo, "\\")) { return false }
+    if (strings.contains(repo, "\n")) { return false }
+    return true
+}
+
+/// A local checkout of `name@version`, cloned on first use and reused
+/// afterwards.
+fun checkout(view string name, view string version, view string repo) -> result[string, string] {
+    if (!is_safe_name(name)) {
+        return Err("source: unsafe package name '" + copy(name) + "'")
+    }
+    if (!is_safe_version(version)) {
+        return Err("source: unsafe version '" + copy(version) + "' for '" + copy(name) + "'")
+    }
+    if (!is_safe_repo(repo)) {
+        return Err("source: unsafe repository URL for '" + copy(name) + "'")
+    }
+
+    var target = checkout_path(name, version)
+    if (sys.exists(target)) {
+        return Ok(target)
+    }
+
+    try {
+        sys.mkdir(cache_root())
+    } catch (err) {
+        return Err("source: cannot create " + cache_root() + ": " + err)
+    }
+
+    var command = "git -c advice.detachedHead=false clone --quiet --depth 1 --branch \"" + "v" + copy(version) + "\" \"" + copy(repo) + "\" \"" + target + "\""
+    var status = process.exec(command)
+    if (status != 0) {
+        sys.rm_all(target)
+        var message = "source: git clone failed for '" + copy(name) + "@" + copy(version) + "'"
+        message = message + " from " + copy(repo) + " (exit " + fmt.i64_to_str(status) + ")"
+        return Err(message)
+    }
+    return Ok(target)
+}

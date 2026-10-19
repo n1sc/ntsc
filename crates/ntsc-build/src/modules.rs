@@ -404,22 +404,72 @@ fn file_imports(
 /// Resolve a `use "path"` import against the importing file's directory.
 ///
 /// The `.nt` extension is inferred when the path has none, matching how
-/// the parser reports the imported name. The resolved path must stay
-/// inside `root`: a file cannot reach outside the project through `../`.
+/// the parser reports the imported name. A bare name that has no sibling
+/// file falls back to the vendor directory populated by `ntsc pkg install`,
+/// so `use "json"` reaches `.ntsc/json/lib.nt` without a relative path.
+/// The resolved path must stay inside `root` (or inside a vendor directory):
+/// a file cannot reach outside the project through `../`.
 fn resolve_import(root: &Path, parent: &Path, import: &str) -> Result<PathBuf, ModuleLoadError> {
     let candidate = if import.ends_with(".nt") {
         parent.join(import)
     } else {
         parent.join(format!("{import}.nt"))
     };
+    let candidate = if candidate.is_file() {
+        candidate
+    } else {
+        vendored_import(root, import).unwrap_or(candidate)
+    };
     let canonical = canonicalize(&candidate)?;
-    if !canonical.starts_with(root) {
+    if !canonical.starts_with(root) && !is_vendored(root, &canonical) {
         return Err(ModuleLoadError::EscapesProjectRoot {
             path: canonical,
             import: import.to_string(),
         });
     }
     Ok(canonical)
+}
+
+/// The vendor directories that may hold installed packages.
+///
+/// `ntsc pkg install` vendors into the project root — the directory holding
+/// `neutron.toml`, which is usually the entry file's parent but is one level
+/// up when the entry lives in `src/`. Both locations are accepted so a
+/// project keeps working wherever its manifest sits.
+fn vendor_roots(root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![root.join(".ntsc")];
+    if let Some(parent) = root.parent()
+        && parent.join("neutron.toml").is_file()
+    {
+        roots.push(parent.join(".ntsc"));
+    }
+    roots
+}
+
+fn is_vendored(root: &Path, path: &Path) -> bool {
+    vendor_roots(root).iter().any(|dir| path.starts_with(dir))
+}
+
+/// The entry file of a vendored package, if `import` names one.
+///
+/// A package's entry module is either `lib.nt` at the package root or
+/// `src/lib.nt` for a package that keeps its sources under `src/`. Anything
+/// containing a path separator or an `.nt` suffix stays purely relative.
+fn vendored_import(root: &Path, import: &str) -> Option<PathBuf> {
+    if import.is_empty() || import.ends_with(".nt") || import.contains('/') || import.contains('\\')
+    {
+        return None;
+    }
+    for vendor in vendor_roots(root) {
+        let package = vendor.join(import);
+        let found = [package.join("lib.nt"), package.join("src").join("lib.nt")]
+            .into_iter()
+            .find(|candidate| candidate.is_file());
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
 }
 
 fn parse_file(path: &Path) -> Result<(String, Program), ModuleLoadError> {
@@ -988,6 +1038,101 @@ mod tests {
         let util = project.dir.join("src/util.nt").canonicalize().unwrap();
         let count = result.graph.files.iter().filter(|p| **p == util).count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn resolves_a_vendored_package_by_bare_name() {
+        let project = TestProject::new();
+        project.write(
+            "src/main.nt",
+            "use \"json\"\n\nfun main() {\n    say(encode())\n}\n",
+        );
+        fs::create_dir_all(project.dir.join("src/.ntsc/json")).unwrap();
+        project.write(
+            "src/.ntsc/json/lib.nt",
+            "fun encode() -> int {\n    return 1;\n}\n",
+        );
+
+        let result = load_program(&project.dir.join("src/main.nt")).expect("loads");
+        let vendored = project
+            .dir
+            .join("src/.ntsc/json/lib.nt")
+            .canonicalize()
+            .unwrap();
+        assert!(result.graph.files.contains(&vendored));
+    }
+
+    #[test]
+    fn a_vendored_package_may_keep_its_sources_under_src() {
+        let project = TestProject::new();
+        project.write(
+            "src/main.nt",
+            "use \"json\"\n\nfun main() {\n    say(encode())\n}\n",
+        );
+        fs::create_dir_all(project.dir.join("src/.ntsc/json/src")).unwrap();
+        project.write(
+            "src/.ntsc/json/src/lib.nt",
+            "fun encode() -> int {\n    return 1;\n}\n",
+        );
+
+        let result = load_program(&project.dir.join("src/main.nt")).expect("loads");
+        let vendored = project
+            .dir
+            .join("src/.ntsc/json/src/lib.nt")
+            .canonicalize()
+            .unwrap();
+        assert!(result.graph.files.contains(&vendored));
+    }
+
+    #[test]
+    fn resolves_a_package_vendored_at_the_project_root() {
+        let project = TestProject::new();
+        project.write(
+            "src/main.nt",
+            "use \"json\"\n\nfun main() {\n    say(encode())\n}\n",
+        );
+        project.write(
+            "neutron.toml",
+            "[package]\nentry = \"src/main.nt\"\n\n[dependencies]\njson = \"1.0.0\"\n",
+        );
+        fs::create_dir_all(project.dir.join(".ntsc/json")).unwrap();
+        project.write(
+            ".ntsc/json/lib.nt",
+            "fun encode() -> int {\n    return 1;\n}\n",
+        );
+
+        let result = load_program(&project.dir.join("src/main.nt")).expect("loads");
+        let vendored = project
+            .dir
+            .join(".ntsc/json/lib.nt")
+            .canonicalize()
+            .unwrap();
+        assert!(result.graph.files.contains(&vendored));
+    }
+
+    #[test]
+    fn a_sibling_file_wins_over_the_vendor_directory() {
+        let project = TestProject::new();
+        project.write(
+            "src/main.nt",
+            "use \"json\"\n\nfun main() {\n    say(encode())\n}\n",
+        );
+        project.write("src/json.nt", "fun encode() -> int {\n    return 2;\n}\n");
+        fs::create_dir_all(project.dir.join("src/.ntsc/json")).unwrap();
+        project.write(
+            "src/.ntsc/json/lib.nt",
+            "fun encode() -> int {\n    return 1;\n}\n",
+        );
+
+        let result = load_program(&project.dir.join("src/main.nt")).expect("loads");
+        let sibling = project.dir.join("src/json.nt").canonicalize().unwrap();
+        let vendored = project
+            .dir
+            .join("src/.ntsc/json/lib.nt")
+            .canonicalize()
+            .unwrap();
+        assert!(result.graph.files.contains(&sibling));
+        assert!(!result.graph.files.contains(&vendored));
     }
 
     #[test]

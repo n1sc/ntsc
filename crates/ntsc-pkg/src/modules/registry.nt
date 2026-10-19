@@ -1,103 +1,156 @@
 use "semver" as semver
+use "text" as text
 
 use http
 use fmt
-use toml
 use json
 use strings
 use arrays
+use os
 
-static const var string REGISTRY_URL = "https://registry.example.invalid/packages.toml"
+static const var string DEFAULT_REGISTRY = "https://ntsc.yasakei.dev/v1/registry"
 
+/// The index URL, overridable with `NTSC_REGISTRY` so self-hosted mirrors and
+/// the end-to-end test can point the client elsewhere.
+fun registry_url() -> string {
+    var override = strings.trim(os.getenv("NTSC_REGISTRY"))
+    if (!strings.is_empty(override)) {
+        return override
+    }
+    return DEFAULT_REGISTRY
+}
+
+/// The index body, as JSON text.
 fun fetch() -> result[string, string] {
+    var url = registry_url()
+    var response = ""
     try {
-        var response = http.get(REGISTRY_URL)
-        var status = http.status_code(response)
-        if (status != 200) {
-            return Err("registry: HTTP " + fmt.i64_to_str(status))
-        }
-        var parsed = toml.parse(response)
-        return Ok(parsed)
+        response = http.get(url)
     } catch (err) {
-        return Err("registry.fetch: " + err)
+        return Err("registry: cannot reach " + copy(url) + ": " + err)
     }
+    var status = http.status_code(response)
+    if (status != 200) {
+        return Err("registry: HTTP " + fmt.i64_to_str(status) + " from " + copy(url))
+    }
+    var body = text.unquote(json.get(response, "body"))
+    if (strings.is_empty(body)) {
+        return Err("registry: empty index at " + copy(url))
+    }
+    if (json.get(body, "packages") == "null") {
+        return Err("registry: malformed index at " + copy(url) + " (missing \"packages\")")
+    }
+    return Ok(body)
 }
 
+/// A JSON string value without its surrounding quotes.
+fun field(view string entry, view string key) -> string {
+    return text.unquote(json.get(entry, key))
+}
+
+fun package_name(view string entry) -> string {
+    return field(entry, "name")
+}
+
+fun package_description(view string entry) -> string {
+    return field(entry, "description")
+}
+
+/// The registry entry for `name`, as JSON text.
 fun lookup(view string name) -> result[string, string] {
-    var reg = fetch()?
-    try {
-        var packages = json.get(reg, "package")
-        if (strings.is_empty(packages) || packages == "nil") {
-            return Err("registry: no packages in registry")
+    var body = fetch()?
+    var packages = json.get(body, "packages")
+    var count = json.length(packages)
+    for (var i = 0; i < count; i = i + 1) {
+        var entry = json.at(packages, i)
+        if (package_name(entry) == name) {
+            return Ok(entry)
         }
-        var pkg = json.get(packages, name)
-        if (strings.is_empty(pkg) || pkg == "nil") {
-            return Err("registry: package '" + copy(name) + "' not found")
-        }
-        return Ok(pkg)
-    } catch (err) {
-        return Err("registry.lookup: " + err)
     }
+    return Err("registry: package '" + copy(name) + "' not found")
 }
 
+/// Every published version of `name`, oldest first as the index lists them.
 fun get_versions(view string name) -> result[array[string], string] {
-    var pkg = lookup(name)?
-    try {
-        var versions = json.get(pkg, "versions")
-        if (strings.is_empty(versions) || versions == "nil") {
-            return Err("registry: no versions for '" + copy(name) + "'")
-        }
-        return Ok(parse_version_array(versions))
-    } catch (err) {
-        return Err("registry.get_versions: " + err)
+    var entry = lookup(name)?
+    var versions = json.get(entry, "versions")
+    if (versions == "null") {
+        return Err("registry: no versions for '" + copy(name) + "'")
     }
+    var items = arrays.new()
+    var count = json.length(versions)
+    for (var i = 0; i < count; i = i + 1) {
+        arrays.push(items, text.unquote(json.at(versions, i)))
+    }
+    if (arrays.length(items) == 0) {
+        return Err("registry: no versions for '" + copy(name) + "'")
+    }
+    return Ok(items)
 }
 
 fun get_repo(view string name) -> result[string, string] {
-    var pkg = lookup(name)?
-    try {
-        var repo = json.get(pkg, "repo")
-        if (strings.is_empty(repo) || repo == "nil") {
-            return Err("registry: no repo for '" + copy(name) + "'")
-        }
-        return Ok(repo)
-    } catch (err) {
-        return Err("registry.get_repo: " + err)
+    var entry = lookup(name)?
+    var repo = field(entry, "repo")
+    if (strings.is_empty(repo)) {
+        return Err("registry: no repository for '" + copy(name) + "'")
     }
+    return Ok(repo)
 }
 
+/// The highest version of `name` that satisfies `spec`, spelled exactly as the
+/// index spells it so the git tag can be derived from it.
 fun find_best_version(view string name, view string spec) -> result[string, string] {
     var versions = get_versions(name)?
     return semver.best_match(versions, spec)
 }
 
-fun parse_version_array(view string json_array) -> array[string] {
-    var items = arrays.new()
-    try {
-        var inner = strings.trim(json_array)
-        if (strings.starts_with(inner, "[")) {
-            inner = strings.substring(inner, 1, strings.length(inner))
+/// The highest version in an entry, or "" when it lists none.
+fun latest_version(view string entry) -> string {
+    var versions = json.get(entry, "versions")
+    var count = json.length(versions)
+    var best = ""
+    for (var i = 0; i < count; i = i + 1) {
+        var candidate = text.unquote(json.at(versions, i))
+        if (strings.is_empty(semver.parse_version(candidate))) {
+            continue
         }
-        if (strings.ends_with(inner, "]")) {
-            inner = strings.substring(inner, 0, strings.length(inner) - 1)
+        if (strings.is_empty(best) || semver.compare_versions(candidate, best) > 0) {
+            best = candidate
         }
-        if (strings.is_empty(strings.trim(inner))) {
-            return items
+    }
+    return best
+}
+
+/// Entries whose name, description or keywords contain `query`,
+/// case-insensitively.
+fun search(view string query) -> result[array[string], string] {
+    var body = fetch()?
+    var packages = json.get(body, "packages")
+    var count = json.length(packages)
+    var needle = strings.lower(strings.trim(query))
+    var matches = arrays.new()
+    for (var i = 0; i < count; i = i + 1) {
+        var entry = json.at(packages, i)
+        if (matches_entry(entry, needle)) {
+            arrays.push(matches, entry)
         }
-        var parts = strings.split(inner, ",")
-        var count = arrays.length(parts)
-        for (var i = 0; i < count; i = i + 1) {
-            var part = strings.trim(arrays.get(parts, i))
-            if (strings.starts_with(part, "\"")) {
-                part = strings.substring(part, 1, strings.length(part))
-            }
-            if (strings.ends_with(part, "\"")) {
-                part = strings.substring(part, 0, strings.length(part) - 1)
-            }
-            if (!strings.is_empty(part)) {
-                arrays.push(items, part)
-            }
+    }
+    return Ok(matches)
+}
+
+fun matches_entry(view string entry, view string needle) -> bool {
+    if (strings.contains(strings.lower(package_name(entry)), needle)) {
+        return true
+    }
+    if (strings.contains(strings.lower(package_description(entry)), needle)) {
+        return true
+    }
+    var keywords = json.get(entry, "keywords")
+    var count = json.length(keywords)
+    for (var i = 0; i < count; i = i + 1) {
+        if (strings.contains(strings.lower(text.unquote(json.at(keywords, i))), needle)) {
+            return true
         }
-    } catch (_) {}
-    return items
+    }
+    return false
 }

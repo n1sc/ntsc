@@ -77,6 +77,10 @@ pub static MODULES: &[StdModule] = &[
             ("reverse", "strings.reverse(s) -> string"),
             ("repeat", "strings.repeat(s, n) -> string"),
             ("split", "strings.split(s, delim) -> string"),
+            (
+                "split_array",
+                "strings.split_array(s, delim) -> array[string]"
+            ),
             ("join", "strings.join(a, b, delim) -> string"),
             ("join_all", "strings.join_all(arr, sep) -> string"),
             ("char_at", "strings.char_at(s, i) -> string"),

@@ -176,6 +176,63 @@ pub extern "C" fn ntsc_sys_rm(path: i64) -> i8 {
     }
 }
 
+/// `sys.cp_all(src, dst)` — recursively copies the directory `src` to `dst`,
+/// creating `dst` and its parents. Symlinks are followed. Used to vendor a
+/// package tree into a project; `sys.cp` only copies a single file.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_sys_cp_all(src: i64, dst: i64) -> i8 {
+    let _block = crate::BlockGuard::enter();
+    let src = registry::get_string(src).unwrap_or_default();
+    let dst = registry::get_string(dst).unwrap_or_default();
+    match copy_tree(Path::new(&src), Path::new(&dst)) {
+        Ok(()) => 1,
+        Err(e) => {
+            let _ = fail("cp_all", format!("cannot copy '{src}' to '{dst}': {e}"));
+            0
+        }
+    }
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        // `metadata` follows symlinks, so a linked file or directory is
+        // copied by value rather than reproducing the link.
+        if fs::metadata(&from)?.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// `sys.rm_all(path)` — removes a file or a directory tree. Succeeds when the
+/// path does not exist, so it is safe to call before a fresh copy.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_sys_rm_all(path: i64) -> i8 {
+    let _block = crate::BlockGuard::enter();
+    let path = registry::get_string(path).unwrap_or_default();
+    let target = Path::new(&path);
+    let result = if target.is_dir() {
+        fs::remove_dir_all(target)
+    } else if target.exists() {
+        fs::remove_file(target)
+    } else {
+        return 1;
+    };
+    match result {
+        Ok(()) => 1,
+        Err(e) => {
+            let _ = fail("rm_all", format!("cannot remove '{path}': {e}"));
+            0
+        }
+    }
+}
+
 /// `sys.walk(path)` — recursively yields every file and directory under
 /// `path`. Returns newline-separated relative paths, with directories
 /// ending with `/`.
@@ -273,6 +330,32 @@ mod tests {
         let s = registry::get_string(id).unwrap_or_default();
         let _ = registry::take_string(id);
         s
+    }
+
+    #[test]
+    fn cp_all_copies_a_tree_and_rm_all_removes_it() {
+        let root = std::env::temp_dir().join(format!("ntsc-sys-test-{}", std::process::id()));
+        let src = root.join("src");
+        let dst = root.join("dst");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(src.join("nested")).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        fs::write(src.join("nested/b.txt"), "b").unwrap();
+
+        assert_eq!(
+            ntsc_sys_cp_all(put(src.to_str().unwrap()), put(dst.to_str().unwrap())),
+            1
+        );
+        assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "a");
+        assert_eq!(fs::read_to_string(dst.join("nested/b.txt")).unwrap(), "b");
+
+        assert_eq!(ntsc_sys_rm_all(put(dst.to_str().unwrap())), 1);
+        assert!(!dst.exists());
+        // Removing a path that is already gone succeeds, so a fresh copy can
+        // always be preceded by a cleanup.
+        assert_eq!(ntsc_sys_rm_all(put(dst.to_str().unwrap())), 1);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

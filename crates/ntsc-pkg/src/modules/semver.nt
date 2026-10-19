@@ -2,81 +2,173 @@ use strings
 use arrays
 use fmt
 
-fun parse_version(view string s) -> string {
-    var trimmed = strings.trim(s)
-    if (strings.is_empty(trimmed)) {
-        return ""
+/// Strip whitespace, a leading `v`, and build metadata (`+sha`).
+fun normalize(view string s) -> string {
+    var text = strings.trim(s)
+    if (strings.starts_with(text, "v") || strings.starts_with(text, "V")) {
+        text = strings.substring(text, 1, strings.length(text))
     }
-    var parts = strings.split(trimmed, ".")
-    var count = arrays.length(parts)
-    if (count < 1 || count > 3) {
-        return ""
+    var plus = strings.index_of(text, "+", 0)
+    if (plus >= 0) {
+        text = strings.substring(text, 0, plus)
     }
-    var major = parse_int_component(arrays.get(parts, 0))
-    var minor = 0
-    var patch = 0
-    if (count >= 2) { minor = parse_int_component(arrays.get(parts, 1)) }
-    if (count >= 3) { patch = parse_int_component(arrays.get(parts, 2)) }
-    return fmt.i64_to_str(major) + "." + fmt.i64_to_str(minor) + "." + fmt.i64_to_str(patch)
+    return text
 }
 
-fun parse_int_component(view string s) -> int {
+/// The `x.y.z` part of a version, without any prerelease suffix.
+fun core_of(view string s) -> string {
+    var text = normalize(s)
+    var dash = strings.index_of(text, "-", 0)
+    if (dash >= 0) {
+        return strings.substring(text, 0, dash)
+    }
+    return text
+}
+
+/// The part after `-`, or "" for a release version.
+fun prerelease_of(view string s) -> string {
+    var text = normalize(s)
+    var dash = strings.index_of(text, "-", 0)
+    if (dash >= 0) {
+        return strings.substring(text, dash + 1, strings.length(text))
+    }
+    return ""
+}
+
+fun is_numeric(view string s) -> bool {
+    return !strings.is_empty(s) && strings.is_digit(s)
+}
+
+fun parse_component(view string s) -> int {
     try {
-        var num = strings.trim(s)
-        if (strings.is_empty(num)) {
-            return 0
-        }
-        return fmt.to_int(num)
+        return fmt.to_int(strings.trim(s))
     } catch (_) {
         return 0
     }
 }
 
-fun version_to_parts(view string v) -> array[string] {
-    return strings.split(v, ".")
+/// `1.2` -> `1.2.0`, or "" when the text is not a version at all.
+fun parse_version(view string s) -> string {
+    var core = core_of(s)
+    if (strings.is_empty(core)) {
+        return ""
+    }
+    var parts = strings.split_array(core, ".")
+    var count = arrays.length(parts)
+    if (count < 1 || count > 3) {
+        return ""
+    }
+    for (var i = 0; i < count; i = i + 1) {
+        if (!is_numeric(arrays.get(parts, i))) {
+            return ""
+        }
+    }
+    var major = parse_component(arrays.get(parts, 0))
+    var minor = 0
+    var patch = 0
+    if (count >= 2) { minor = parse_component(arrays.get(parts, 1)) }
+    if (count >= 3) { patch = parse_component(arrays.get(parts, 2)) }
+    return fmt.i64_to_str(major) + "." + fmt.i64_to_str(minor) + "." + fmt.i64_to_str(patch)
 }
 
 fun version_major(view string v) -> int {
-    var parts = strings.split(v, ".")
+    var parts = strings.split_array(core_of(v), ".")
     if (arrays.length(parts) >= 1) {
-        return parse_int_component(arrays.get(parts, 0))
+        return parse_component(arrays.get(parts, 0))
     }
     return 0
 }
 
 fun version_minor(view string v) -> int {
-    var parts = strings.split(v, ".")
+    var parts = strings.split_array(core_of(v), ".")
     if (arrays.length(parts) >= 2) {
-        return parse_int_component(arrays.get(parts, 1))
+        return parse_component(arrays.get(parts, 1))
     }
     return 0
 }
 
 fun version_patch(view string v) -> int {
-    var parts = strings.split(v, ".")
+    var parts = strings.split_array(core_of(v), ".")
     if (arrays.length(parts) >= 3) {
-        return parse_int_component(arrays.get(parts, 2))
+        return parse_component(arrays.get(parts, 2))
     }
     return 0
 }
 
-fun compare_versions(view string a, view string b) -> int {
-    var a_maj = version_major(a)
-    var b_maj = version_major(b)
-    if (a_maj != b_maj) { return a_maj - b_maj }
-    var a_min = version_minor(a)
-    var b_min = version_minor(b)
-    if (a_min != b_min) { return a_min - b_min }
-    var a_pat = version_patch(a)
-    var b_pat = version_patch(b)
-    return a_pat - b_pat
+/// Byte-wise text order; the language has no string comparison operator.
+fun compare_text(view string x, view string y) -> int {
+    var count = strings.length(x)
+    if (strings.length(y) < count) {
+        count = strings.length(y)
+    }
+    for (var i = 0; i < count; i = i + 1) {
+        var a = strings.char_code(x, i)
+        var b = strings.char_code(y, i)
+        if (a != b) {
+            return a - b
+        }
+    }
+    return strings.length(x) - strings.length(y)
 }
 
-fun satisfies(view string version, view string spec) -> bool {
-    var parts = strings.split(strings.trim(spec), ",")
-    var count = arrays.length(parts)
+/// Numeric identifiers compare numerically and rank below alphanumeric ones,
+/// as semver requires.
+fun compare_identifier(view string x, view string y) -> int {
+    var x_numeric = is_numeric(x)
+    var y_numeric = is_numeric(y)
+    if (x_numeric && y_numeric) {
+        return parse_component(x) - parse_component(y)
+    }
+    if (x_numeric) { return -1 }
+    if (y_numeric) { return 1 }
+    return compare_text(x, y)
+}
+
+fun compare_prerelease(view string x, view string y) -> int {
+    if (strings.is_empty(x) && strings.is_empty(y)) { return 0 }
+    if (strings.is_empty(x)) { return 1 }
+    if (strings.is_empty(y)) { return -1 }
+    var left = strings.split_array(x, ".")
+    var right = strings.split_array(y, ".")
+    var count = arrays.length(left)
+    if (arrays.length(right) < count) {
+        count = arrays.length(right)
+    }
     for (var i = 0; i < count; i = i + 1) {
-        if (!single_satisfies(version, strings.trim(arrays.get(parts, i)))) {
+        var diff = compare_identifier(arrays.get(left, i), arrays.get(right, i))
+        if (diff != 0) {
+            return diff
+        }
+    }
+    return arrays.length(left) - arrays.length(right)
+}
+
+fun compare_versions(view string a, view string b) -> int {
+    var major_diff = version_major(a) - version_major(b)
+    if (major_diff != 0) { return major_diff }
+    var minor_diff = version_minor(a) - version_minor(b)
+    if (minor_diff != 0) { return minor_diff }
+    var patch_diff = version_patch(a) - version_patch(b)
+    if (patch_diff != 0) { return patch_diff }
+    return compare_prerelease(prerelease_of(a), prerelease_of(b))
+}
+
+/// A comma-separated range such as `>=1.2.0, <2.0.0`; every clause must hold.
+fun satisfies(view string version, view string spec) -> bool {
+    var text = strings.trim(spec)
+    var prerelease = prerelease_of(version)
+    if (strings.is_empty(text) || text == "*") {
+        return strings.is_empty(prerelease)
+    }
+    // A prerelease only matches a range that names one, so `2.0.0-beta.1`
+    // never sneaks into `>=1.0.0, <2.0.0`.
+    if (!strings.is_empty(prerelease) && !strings.contains(text, "-")) {
+        return false
+    }
+    var clauses = strings.split_array(text, ",")
+    var count = arrays.length(clauses)
+    for (var i = 0; i < count; i = i + 1) {
+        if (!single_satisfies(version, strings.trim(arrays.get(clauses, i)))) {
             return false
         }
     }
@@ -84,55 +176,108 @@ fun satisfies(view string version, view string spec) -> bool {
 }
 
 fun single_satisfies(view string version, view string spec) -> bool {
-    if (strings.is_empty(spec)) { return true }
-
-    if (strings.starts_with(spec, ">=")) {
-        var target = parse_version(strings.substring(spec, 2, strings.length(spec)))
-        if (strings.is_empty(target)) { return false }
-        return compare_versions(version, target) >= 0
+    if (strings.is_empty(spec) || spec == "*" || spec == "x" || spec == "X") {
+        return true
     }
-    if (strings.starts_with(spec, ">")) {
-        var target = parse_version(strings.substring(spec, 1, strings.length(spec)))
-        if (strings.is_empty(target)) { return false }
-        return compare_versions(version, target) > 0
+    if (strings.starts_with(spec, "^")) {
+        return caret_satisfies(version, strings.substring(spec, 1, strings.length(spec)))
+    }
+    if (strings.starts_with(spec, "~")) {
+        return tilde_satisfies(version, strings.substring(spec, 1, strings.length(spec)))
+    }
+    if (strings.starts_with(spec, ">=")) {
+        var floor = strings.substring(spec, 2, strings.length(spec))
+        if (strings.is_empty(parse_version(floor))) { return false }
+        return compare_versions(version, normalize(floor)) >= 0
     }
     if (strings.starts_with(spec, "<=")) {
-        var target = parse_version(strings.substring(spec, 2, strings.length(spec)))
-        if (strings.is_empty(target)) { return false }
-        return compare_versions(version, target) <= 0
+        var ceiling = strings.substring(spec, 2, strings.length(spec))
+        if (strings.is_empty(parse_version(ceiling))) { return false }
+        return compare_versions(version, normalize(ceiling)) <= 0
+    }
+    if (strings.starts_with(spec, ">")) {
+        var floor = strings.substring(spec, 1, strings.length(spec))
+        if (strings.is_empty(parse_version(floor))) { return false }
+        return compare_versions(version, normalize(floor)) > 0
     }
     if (strings.starts_with(spec, "<")) {
-        var target = parse_version(strings.substring(spec, 1, strings.length(spec)))
-        if (strings.is_empty(target)) { return false }
-        return compare_versions(version, target) < 0
+        var ceiling = strings.substring(spec, 1, strings.length(spec))
+        if (strings.is_empty(parse_version(ceiling))) { return false }
+        return compare_versions(version, normalize(ceiling)) < 0
     }
-
-    var target = parse_version(spec)
-    if (strings.is_empty(target)) { return false }
-    return compare_versions(version, target) == 0
+    if (strings.starts_with(spec, "=")) {
+        return partial_satisfies(version, strings.substring(spec, 1, strings.length(spec)))
+    }
+    return partial_satisfies(version, spec)
 }
 
-fun best_match(array[string] versions, view string spec) -> result[string, string] {
-    var has_best = false
+/// A bare version is exact when it names a patch, a minor range when it names
+/// `x.y`, and a major range when it names only `x`.
+fun partial_satisfies(view string version, view string spec) -> bool {
+    var target = parse_version(spec)
+    if (strings.is_empty(target)) {
+        return false
+    }
+    if (!strings.is_empty(prerelease_of(spec))) {
+        return compare_versions(version, normalize(spec)) == 0
+    }
+    var parts = strings.split_array(core_of(spec), ".")
+    var count = arrays.length(parts)
+    if (count >= 3) {
+        return compare_versions(version, target) == 0
+    }
+    if (count == 2) {
+        return version_major(version) == version_major(target) && version_minor(version) == version_minor(target)
+    }
+    return version_major(version) == version_major(target)
+}
+
+/// `^1.2.3` -> `>=1.2.3, <2.0.0`; below 1.0.0 the leftmost non-zero component
+/// is the one that may not change.
+fun caret_satisfies(view string version, view string spec) -> bool {
+    var target = parse_version(spec)
+    if (strings.is_empty(target)) { return false }
+    if (compare_versions(version, normalize(spec)) < 0) { return false }
+    var parts = strings.split_array(core_of(spec), ".")
+    var count = arrays.length(parts)
+    if (count == 1) {
+        return version_major(version) == version_major(target)
+    }
+    if (version_major(target) > 0) {
+        return version_major(version) == version_major(target)
+    }
+    if (count == 2 || version_minor(target) > 0) {
+        return version_minor(version) == version_minor(target)
+    }
+    return version_patch(version) == version_patch(target)
+}
+
+/// `~1.2.3` -> `>=1.2.3, <1.3.0`; `~1` keeps the major version.
+fun tilde_satisfies(view string version, view string spec) -> bool {
+    var target = parse_version(spec)
+    if (strings.is_empty(target)) { return false }
+    if (compare_versions(version, normalize(spec)) < 0) { return false }
+    var parts = strings.split_array(core_of(spec), ".")
+    if (arrays.length(parts) == 1) {
+        return version_major(version) == version_major(target)
+    }
+    return version_major(version) == version_major(target) && version_minor(version) == version_minor(target)
+}
+
+/// The highest satisfying version, returned exactly as the caller spelled it.
+fun best_match(view array[string] versions, view string spec) -> result[string, string] {
     var best = ""
     var count = arrays.length(versions)
     for (var i = 0; i < count; i = i + 1) {
-        var v = parse_version(arrays.get(versions, i))
-        if (strings.is_empty(v)) { continue }
-        if (satisfies(v, spec)) {
-            if (!has_best) {
-                has_best = true
-                best = v
-            } else {
-                if (compare_versions(v, best) > 0) {
-                    best = v
-                }
-            }
+        var candidate = strings.trim(arrays.get(versions, i))
+        if (strings.is_empty(parse_version(candidate))) { continue }
+        if (!satisfies(candidate, spec)) { continue }
+        if (strings.is_empty(best) || compare_versions(candidate, best) > 0) {
+            best = candidate
         }
     }
-
-    if (has_best) {
-        return Ok(best)
+    if (strings.is_empty(best)) {
+        return Err("semver: no version satisfies '" + copy(spec) + "'")
     }
-    return Err("semver: no version satisfies '" + copy(spec) + "'")
+    return Ok(best)
 }

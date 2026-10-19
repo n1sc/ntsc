@@ -1,122 +1,101 @@
-use "toml_utils" as toml_utils
+use "lockfile" as lockfile
 use "registry" as registry
+use "semver" as semver
+use "source" as source
+use "toml-utils" as toml_utils
 
 use arrays
 use collections
-use json
-use strings
-use os
 use paths
-use process
-use sys
+use strings
 
-fun resolve(view string toml_json) -> result[array[string], string] {
-    var deps = toml_utils.get_dependencies(toml_json)
-    if (deps == "{}") {
-        return Ok([])
-    }
-
-    var resolved = arrays.new()
-    var visited = collections.set_new()
-    var resolving = collections.set_new()
+/// Resolve every direct and transitive dependency into
+/// `name\tversion\trepo\tcheckout` records.
+///
+/// A version recorded in the lockfile is reused while it still satisfies the
+/// requirement, so a plain `install` reproduces the previous resolution and
+/// `update` (which passes an empty lockfile) picks the newest release.
+fun resolve(view string manifest_json, view string lock_json) -> result[array[string], string] {
+    var plan = arrays.new()
+    var chosen = collections.set_new()
     var queue = arrays.new()
 
-    var keys = json.keys(deps)
-    if (strings.is_empty(keys)) {
-        return Ok(resolved)
-    }
-
-    var key_list = strings.split(keys, "\n")
-    var count = arrays.length(key_list)
+    var deps = toml_utils.get_dependencies(manifest_json)
+    var names = toml_utils.dependency_names(deps)
+    var count = arrays.length(names)
     for (var i = 0; i < count; i = i + 1) {
-        var name = strings.trim(arrays.get(key_list, i))
-        if (strings.is_empty(name)) { continue }
-        var spec = json.get(deps, name)
-        if (strings.is_empty(spec) || spec == "nil") {
+        var name = arrays.get(names, i)
+        var spec = toml_utils.get_dependency(deps, name)
+        if (strings.is_empty(spec)) {
             spec = "*"
         }
-        arrays.push(queue, name + "\t" + spec)
+        arrays.push(queue, copy(name) + "\t" + copy(spec))
     }
 
-    while (arrays.length(queue) > 0) {
-        var entry = arrays.get(queue, 0)
-        arrays.remove(queue, 0)
-        var parts = strings.split(entry, "\t")
-        var name = arrays.get(parts, 0)
+    var cursor = 0
+    while (cursor < arrays.length(queue)) {
+        var entry = arrays.get(queue, cursor)
+        cursor = cursor + 1
+        var fields = strings.split_array(entry, "\t")
+        var name = arrays.get(fields, 0)
         var spec = "*"
-        if (arrays.length(parts) >= 2) {
-            spec = arrays.get(parts, 1)
+        if (arrays.length(fields) >= 2) {
+            spec = arrays.get(fields, 1)
         }
 
-        if (collections.set_has(visited, name)) { continue }
-        if (collections.set_has(resolving, name)) {
-            return Err("resolve: circular dependency: " + copy(name))
-        }
-
-        collections.set_add(resolving, name)
-
-        var version = registry.find_best_version(name, spec)?
-        var source_result = registry.get_repo(name)?
-        var source = "git+" + source_result + "#v" + version
-
-        arrays.push(resolved, copy(name) + "@" + version + "|" + source)
-
-        collections.set_add(visited, name)
-        collections.set_remove(resolving, name)
-
-        var sub_deps = get_sub_deps(name, version)
-        var dep_count = arrays.length(sub_deps)
-        for (var j = 0; j < dep_count; j = j + 1) {
-            var sub_name = arrays.get(sub_deps, j)
-            if (!collections.set_has(visited, sub_name)) {
-                arrays.push(queue, sub_name + "\t*")
+        if (collections.set_has(chosen, name)) {
+            var pinned = planned_version(plan, name)
+            if (!semver.satisfies(pinned, spec)) {
+                var message = "dependency conflict: '" + copy(name) + "' is pinned to " + copy(pinned)
+                message = message + ", which does not satisfy '" + copy(spec) + "'"
+                return Err(message)
             }
+            continue
+        }
+
+        var version = lockfile.locked_version(lock_json, name)
+        if (strings.is_empty(version) || !semver.satisfies(version, spec)) {
+            version = registry.find_best_version(name, spec)?
+        }
+        var repo = registry.get_repo(name)?
+        var checkout = source.checkout(name, version, repo)?
+
+        arrays.push(plan, copy(name) + "\t" + copy(version) + "\t" + copy(repo) + "\t" + copy(checkout))
+        collections.set_add(chosen, name)
+
+        var sub_deps = sub_dependencies(checkout)
+        var sub_names = toml_utils.dependency_names(sub_deps)
+        var sub_count = arrays.length(sub_names)
+        for (var j = 0; j < sub_count; j = j + 1) {
+            var sub_name = arrays.get(sub_names, j)
+            var sub_spec = toml_utils.get_dependency(sub_deps, sub_name)
+            if (strings.is_empty(sub_spec)) {
+                sub_spec = "*"
+            }
+            arrays.push(queue, copy(sub_name) + "\t" + copy(sub_spec))
         }
     }
 
-    return Ok(resolved)
+    return Ok(plan)
 }
 
-fun get_sub_deps(view string name, view string version) -> array[string] {
-    var result[string, string] repo = registry.get_repo(name)
-    match (repo) {
-        case Err(_) => return []
-        case Ok(repo_url) => {
-            var temp_dir = os.temp_dir()
-            var clone_path = paths.join(temp_dir, "ntsc-pkg-" + copy(name))
+/// The dependencies declared by an already-checked-out package.
+fun sub_dependencies(view string checkout) -> string {
+    var manifest = paths.join(checkout, "neutron.toml")
+    var result[string, string] parsed = toml_utils.read_toml(manifest)
+    match (parsed) {
+        case Ok(json) => return toml_utils.get_dependencies(json)
+        case Err(_) => return "{}"
+    }
+}
 
-            try {
-                process.exec("git clone --quiet --branch v" + copy(version) + " --depth 1 " + repo_url + " " + clone_path)
-            } catch (_) {
-                return []
-            }
-
-            var pkg_toml_path = paths.join(clone_path, "neutron.toml")
-            if (!sys.exists(pkg_toml_path)) {
-                return []
-            }
-
-            var result[string, string] pkg_toml = toml_utils.read_toml(pkg_toml_path)
-            match (pkg_toml) {
-                case Ok(toml_json) => {
-                    var sub_deps = toml_utils.get_dependencies(toml_json)
-                    var keys = json.keys(sub_deps)
-                    if (strings.is_empty(keys)) {
-                        return []
-                    }
-                    var items = arrays.new()
-                    var key_list = strings.split(keys, "\n")
-                    var count = arrays.length(key_list)
-                    for (var i = 0; i < count; i = i + 1) {
-                        var key = strings.trim(arrays.get(key_list, i))
-                        if (!strings.is_empty(key)) {
-                            arrays.push(items, key)
-                        }
-                    }
-                    return items
-                }
-                case Err(_) => return []
-            }
+fun planned_version(view array[string] plan, view string name) -> string {
+    var count = arrays.length(plan)
+    for (var i = 0; i < count; i = i + 1) {
+        var fields = strings.split_array(arrays.get(plan, i), "\t")
+        if (arrays.get(fields, 0) == name) {
+            return arrays.get(fields, 1)
         }
     }
+    return ""
 }

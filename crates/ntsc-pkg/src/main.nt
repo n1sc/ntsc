@@ -1,83 +1,105 @@
 use "modules/install" as installer
 use "modules/registry" as registry
-use "modules/toml_utils" as toml_utils
-use "modules/semver" as semver
 
 use sys
 use strings
 use arrays
-use json
-use fmt
-use paths
 
 fun main() -> int {
     var args = sys.args()
     var command = ""
-    var extra = ""
+    var first = ""
 
     if (arrays.length(args) >= 2) {
         command = arrays.get(args, 1)
     }
     if (arrays.length(args) >= 3) {
-        extra = arrays.get(args, 2)
+        first = arrays.get(args, 2)
     }
 
     match (command) {
         case "install" => {
-            if (strings.is_empty(extra)) {
-                var result[bool, string] res = installer.install(sys.cwd())
-                match (res) {
-                    case Ok(_) => return 0
-                    case Err(e) => {
-                        say("error: " + e)
-                        return 1
-                    }
-                }
-            } else {
-                add_dep(extra)
-                return 0
+            if (strings.is_empty(first)) {
+                return report(installer.install(sys.cwd()))
             }
+            return report(installer.add(sys.cwd(), first))
         }
         case "remove" => {
-            if (strings.is_empty(extra)) {
+            if (strings.is_empty(first)) {
                 say("usage: ntsc pkg remove <name>")
                 return 1
             }
-            var result[bool, string] res = installer.remove(sys.cwd(), extra)
-            match (res) {
-                case Ok(_) => return 0
-                case Err(e) => {
-                    say("error: " + e)
-                    return 1
-                }
-            }
+            return report(installer.remove(sys.cwd(), first))
         }
-        case "update" => {
-            var result[bool, string] res = installer.update(sys.cwd())
-            match (res) {
-                case Ok(_) => return 0
-                case Err(e) => {
-                    say("error: " + e)
-                    return 1
-                }
-            }
+        case "update" => return report(installer.update(sys.cwd()))
+        case "list" => return report(installer.list_installed(sys.cwd()))
+        case "search" => return search(first)
+        case "help" => {
+            usage()
+            return 0
         }
-        case "list" => {
-            var result[bool, string] res = installer.list_installed(sys.cwd())
-            match (res) {
-                case Ok(_) => return 0
-                case Err(e) => {
-                    say("error: " + e)
-                    return 1
-                }
-            }
+        case "--help" => {
+            usage()
+            return 0
         }
-        case "search" => {
-            search(extra)
+        case "-h" => {
+            usage()
+            return 0
+        }
+        case "" => {
+            usage()
             return 0
         }
         default => {
+            say("error: unknown command '" + copy(command) + "'")
+            say("")
             usage()
+            return 1
+        }
+    }
+}
+
+fun report(result[bool, string] outcome) -> int {
+    match (outcome) {
+        case Ok(_) => return 0
+        case Err(e) => {
+            say("error: " + e)
+            return 1
+        }
+    }
+}
+
+fun search(view string query) -> int {
+    if (strings.is_empty(query)) {
+        say("usage: ntsc pkg search <query>")
+        return 1
+    }
+
+    var result[array[string], string] found = registry.search(query)
+    match (found) {
+        case Err(e) => {
+            say("error: " + e)
+            return 1
+        }
+        case Ok(entries) => {
+            var count = arrays.length(entries)
+            if (count == 0) {
+                say("no packages matching '" + copy(query) + "'")
+                return 0
+            }
+            for (var i = 0; i < count; i = i + 1) {
+                var entry = arrays.get(entries, i)
+                var version = registry.latest_version(entry)
+                var label = registry.package_name(entry)
+                if (!strings.is_empty(version)) {
+                    label = label + " " + version
+                }
+                say("  " + label)
+                var description = registry.package_description(entry)
+                if (!strings.is_empty(description)) {
+                    say("    " + description)
+                }
+            }
             return 0
         }
     }
@@ -87,97 +109,15 @@ fun usage() {
     say("ntsc pkg - Neutron package manager")
     say("")
     say("commands:")
-    say("  install              install all dependencies")
-    say("  install <name>       add and install a package")
-    say("  remove <name>        remove a dependency")
-    say("  update               update all dependencies")
-    say("  list                 list installed packages")
-    say("  search <query>       search for packages")
-    say("  help                 show this help")
-}
-
-fun add_dep(string name) {
-    var toml_path = paths.join(sys.cwd(), "neutron.toml")
-    var result[string, string] toml_json = toml_utils.read_toml(toml_path)
-    match (toml_json) {
-        case Err(e) => {
-            say("error: " + e)
-            return
-        }
-        case Ok(json) => {
-            var deps = toml_utils.get_dependencies(json)
-            var result[string, string] version = registry.find_best_version(name, "*")
-            match (version) {
-                case Ok(v) => {
-                    var next_major = semver.version_major(v) + 1
-                    var spec = ">=" + v + ", <" + fmt.i64_to_str(next_major) + ".0.0"
-                    var updates = arrays.new()
-                    var keys = json.keys(deps)
-                    if (!strings.is_empty(keys)) {
-                        var key_list = strings.split(keys, "\n")
-                        var count = arrays.length(key_list)
-                        for (var i = 0; i < count; i = i + 1) {
-                            var k = strings.trim(arrays.get(key_list, i))
-                            if (!strings.is_empty(k)) {
-                                var v2 = json.get(deps, k)
-                                arrays.push(updates, k + "=" + v2)
-                            }
-                        }
-                    }
-                    arrays.push(updates, name + "=" + spec)
-                    var new_deps = installer.rebuild_deps_from_updates(updates)
-                    var new_toml = installer.rebuild_toml(json, new_deps)
-                    sys.write(toml_path, new_toml)
-                    say("added " + name + " " + spec)
-                    installer.install(sys.cwd())
-                }
-                case Err(e) => {
-                    say("error: " + e)
-                }
-            }
-        }
-    }
-}
-
-fun search(string query) {
-    if (strings.is_empty(query)) {
-        say("usage: ntsc pkg search <query>")
-        return
-    }
-
-    var result[string, string] reg = registry.fetch()
-    match (reg) {
-        case Err(e) => {
-            say("error: " + e)
-            return
-        }
-        case Ok(json) => {
-            var packages = json.get(json, "package")
-            if (strings.is_empty(packages) || packages == "nil") {
-                say("no packages found")
-                return
-            }
-            var keys = json.keys(packages)
-            if (strings.is_empty(keys)) {
-                say("no packages found")
-                return
-            }
-            var key_list = strings.split(keys, "\n")
-            var count = arrays.length(key_list)
-            var found = 0
-            for (var i = 0; i < count; i = i + 1) {
-                var pkg_name = strings.trim(arrays.get(key_list, i))
-                if (strings.is_empty(pkg_name)) { continue }
-                if (strings.contains(strings.lower(pkg_name), strings.lower(query))) {
-                    var pkg = json.get(packages, pkg_name)
-                    var desc = json.get(pkg, "description")
-                    say("  " + pkg_name + " - " + desc)
-                    found++
-                }
-            }
-            if (found == 0) {
-                say("no packages matching '" + query + "'")
-            }
-        }
-    }
+    say("  install                install the dependencies in neutron.toml")
+    say("  install <name>         add a package at its latest version")
+    say("  install <name>@<req>   add a package with an explicit requirement")
+    say("  remove <name>          drop a dependency and unvendor it")
+    say("  update                 re-resolve to the newest allowed versions")
+    say("  list                   list the packages in neutron.lock")
+    say("  search <query>         search the registry")
+    say("  help                   show this help")
+    say("")
+    say("packages are vendored into .ntsc/<name> and imported by name:")
+    say("  use \"json\"")
 }

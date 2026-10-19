@@ -1,263 +1,189 @@
-use "toml_utils" as toml_utils
 use "lockfile" as lockfile
 use "registry" as registry
 use "resolve" as resolver
-use "semver" as semver
+use "source" as source
+use "toml-utils" as toml_utils
 
-use paths
 use arrays
+use crypto
+use fmt
+use paths
 use strings
 use sys
-use os
-use crypto
-use json
-use toml
-use fmt
 
-fun install(string project_dir) -> result[bool, string] {
+/// Install the manifest's dependencies, reusing the lockfile where it still
+/// satisfies the declared requirements.
+fun install(view string project_dir) -> result[bool, string] {
+    var manifest = read_manifest(project_dir)?
+    var lock_json = lockfile.read_lockfile(lock_path(project_dir))?
+    return apply(project_dir, manifest, lock_json)
+}
+
+/// Re-resolve from scratch and pick the newest satisfying version.
+fun update(view string project_dir) -> result[bool, string] {
+    var manifest = read_manifest(project_dir)?
+    return apply(project_dir, manifest, "{}")
+}
+
+/// Add `name` (optionally `name@requirement`) to the manifest and install it.
+fun add(view string project_dir, view string request) -> result[bool, string] {
+    var name = copy(request)
+    var requirement = "*"
+    var at = strings.index_of(request, "@", 0)
+    if (at > 0) {
+        name = strings.substring(request, 0, at)
+        requirement = strings.substring(request, at + 1, strings.length(request))
+    }
+    if (!source.is_safe_name(name)) {
+        return Err("install: invalid package name '" + copy(name) + "'")
+    }
+
+    var version = registry.find_best_version(name, requirement)?
+    var pin = "^" + copy(version)
+    if (requirement != "*") {
+        pin = copy(requirement)
+    }
+
     var toml_path = paths.join(project_dir, "neutron.toml")
-    var toml_json = toml_utils.read_toml(toml_path)?
-
-    var lockfile_path = paths.join(project_dir, "neutron.lock")
-    var lockfile_json = lockfile.read_lockfile(lockfile_path)?
-
-    var resolved = resolver.resolve(toml_json)?
-
-    var count = arrays.length(resolved)
-    for (var i = 0; i < count; i = i + 1) {
-        var entry = arrays.get(resolved, i)
-        var parts = strings.split(entry, "|")
-        var name_version = arrays.get(parts, 0)
-        var source = ""
-        if (arrays.length(parts) >= 2) {
-            source = arrays.get(parts, 1)
-        }
-        var nv_parts = strings.split(name_version, "@")
-        var pkg_name = arrays.get(nv_parts, 0)
-        var version = ""
-        if (arrays.length(nv_parts) >= 2) {
-            version = arrays.get(nv_parts, 1)
-        }
-        install_package(pkg_name, version, source, copy(lockfile_json))?
-    }
-
-    lockfile.write_lockfile(lockfile_path, lockfile_json)?
-    say("installed " + fmt.i64_to_str(count) + " packages")
-    return Ok(true)
+    toml_utils.set_dependency(toml_path, name, pin)?
+    say("added " + copy(name) + " = \"" + pin + "\"")
+    return install(project_dir)
 }
 
-fun install_package(view string pkg_name, view string version, view string source, string lockfile_json) -> result[bool, string] {
-    var cache_dir = get_cache_dir()
-    var pkg_dir = paths.join(cache_dir, copy(pkg_name) + "@" + copy(version))
-
-    if (sys.exists(pkg_dir)) {
-        say("  " + copy(pkg_name) + "@" + copy(version) + " (cached)")
-        return Ok(true)
-    }
-
-    say("  " + copy(pkg_name) + "@" + copy(version) + " downloading...")
-
-    var repo = registry.get_repo(pkg_name)?
-
-    try {
-        sys.mkdir(cache_dir)
-        process.exec("git clone --quiet --branch v" + copy(version) + " --depth 1 " + repo + " " + pkg_dir)
-    } catch (err) {
-        return Err("install: failed to clone " + copy(pkg_name) + ": " + err)
-    }
-
-    var integrity = compute_integrity(pkg_dir)
-
-    lockfile.set_package(lockfile_json, pkg_name, version, source, integrity)?
-
-    say("  " + copy(pkg_name) + "@" + copy(version) + " installed")
-    return Ok(true)
-}
-
-fun get_cache_dir() -> string {
-    var home = os.getenv("HOME")
-    if (strings.is_empty(home)) {
-        home = os.getenv("USERPROFILE")
-    }
-    if (strings.is_empty(home)) {
-        home = os.temp_dir()
-    }
-    return paths.join(home, ".ntsc/packages")
-}
-
-fun compute_integrity(view string dir) -> string {
-    var hash_input = ""
-    var files = sys.walk(dir)
-    var file_list = strings.split(strings.trim(files), "\n")
-    var count = arrays.length(file_list)
-    for (var i = 0; i < count; i = i + 1) {
-        var file = strings.trim(arrays.get(file_list, i))
-        if (strings.is_empty(file)) { continue }
-        if (strings.contains(file, ".git")) { continue }
-        try {
-            var content = sys.read(paths.join(dir, file))
-            hash_input = hash_input + file + content
-        } catch (_) {}
-    }
-    return crypto.sha256(hash_input)
-}
-
-fun remove(string project_dir, view string name) -> result[bool, string] {
+fun remove(view string project_dir, view string name) -> result[bool, string] {
     var toml_path = paths.join(project_dir, "neutron.toml")
-    var toml_json = toml_utils.read_toml(toml_path)?
-
-    var deps = toml_utils.get_dependencies(toml_json)
-    var keys = json.keys(deps)
-    if (strings.is_empty(keys)) {
-        return Err("remove: no dependencies found")
-    }
-
-    if (!strings.contains(keys, name)) {
-        return Err("remove: package '" + copy(name) + "' not in dependencies")
-    }
-
-    var new_deps = rebuild_json_without(deps, name)
-    var new_toml = rebuild_toml(toml_json, new_deps)
-    sys.write(toml_path, new_toml)
-
+    toml_utils.remove_dependency(toml_path, name)?
     say("removed " + copy(name))
-    return Ok(true)
+    return install(project_dir)
 }
 
-fun rebuild_json_without(view string json_str, view string skip_key) -> string {
-    var keys = json.keys(json_str)
-    if (strings.is_empty(keys)) { return "{}" }
-    var key_list = strings.split(keys, "\n")
-    var count = arrays.length(key_list)
-    var parts = arrays.new()
-    for (var i = 0; i < count; i = i + 1) {
-        var k = strings.trim(arrays.get(key_list, i))
-        if (strings.is_empty(k)) { continue }
-        if (k == skip_key) { continue }
-        var v = json.get(json_str, k)
-        arrays.push(parts, quote(k) + ": " + quote(v))
-    }
-    if (arrays.length(parts) == 0) { return "{}" }
-    return "{" + arrays.join(parts, ", ") + "}"
-}
-
-fun update(string project_dir) -> result[bool, string] {
-    var toml_path = paths.join(project_dir, "neutron.toml")
-    var toml_json = toml_utils.read_toml(toml_path)?
-
-    var deps = toml_utils.get_dependencies(toml_json)
-    var keys = json.keys(deps)
-    if (strings.is_empty(keys)) {
-        say("no dependencies to update")
-        return Ok(true)
-    }
-
-    var updates = arrays.new()
-    var key_list = strings.split(keys, "\n")
-    var count = arrays.length(key_list)
-    for (var i = 0; i < count; i = i + 1) {
-        var dep_name = strings.trim(arrays.get(key_list, i))
-        if (strings.is_empty(dep_name)) { continue }
-
-        var spec = json.get(deps, dep_name)
-        if (strings.is_empty(spec) || spec == "nil") { spec = "*" }
-
-        var result[string, string] version = registry.find_best_version(dep_name, spec)
-        match (version) {
-            case Ok(v) => {
-                var next_major = semver.version_major(v) + 1
-                var new_spec = ">=" + v + ", <" + fmt.i64_to_str(next_major) + ".0.0"
-                arrays.push(updates, dep_name + "=" + new_spec)
-            }
-            case Err(_) => {
-                arrays.push(updates, dep_name + "=" + spec)
-            }
-        }
-    }
-
-    var new_deps = rebuild_deps_from_updates(updates)
-    var new_toml = rebuild_toml(toml_json, new_deps)
-    sys.write(toml_path, new_toml)
-
-    install(project_dir)?
-    return Ok(true)
-}
-
-fun rebuild_deps_from_updates(array[string] updates) -> string {
-    var count = arrays.length(updates)
-    var parts = arrays.new()
-    for (var i = 0; i < count; i = i + 1) {
-        var entry = arrays.get(updates, i)
-        var eq = strings.index_of(entry, "=", 0)
-        if (eq < 0) { continue }
-        var k = strings.substring(entry, 0, eq)
-        var v = strings.substring(entry, eq + 1, strings.length(entry))
-        arrays.push(parts, quote(k) + ": " + quote(v))
-    }
-    if (arrays.length(parts) == 0) { return "{}" }
-    return "{" + arrays.join(parts, ", ") + "}"
-}
-
-fun list_installed(string project_dir) -> result[bool, string] {
-    var lockfile_path = paths.join(project_dir, "neutron.lock")
-    if (!sys.exists(lockfile_path)) {
-        say("no packages installed (no neutron.lock)")
-        return Ok(true)
-    }
-
-    var lockfile_json = lockfile.read_lockfile(lockfile_path)?
-    var packages = lockfile.list_packages(lockfile_json)
-    var count = arrays.length(packages)
-
+fun list_installed(view string project_dir) -> result[bool, string] {
+    var lock_json = lockfile.read_lockfile(lock_path(project_dir))?
+    var names = lockfile.list_packages(lock_json)
+    var count = arrays.length(names)
     if (count == 0) {
         say("no packages installed")
         return Ok(true)
     }
-
     for (var i = 0; i < count; i = i + 1) {
-        var pkg_name = arrays.get(packages, i)
-        var pkg = lockfile.get_package(lockfile_json, pkg_name)
-        var version = json.get(pkg, "version")
-        say("  " + pkg_name + " " + version)
+        var name = arrays.get(names, i)
+        say("  " + copy(name) + " " + lockfile.locked_version(lock_json, name))
     }
-    say(fmt.i64_to_str(count) + " packages installed")
+    say(fmt.i64_to_str(count) + " package(s) installed")
     return Ok(true)
 }
 
-fun rebuild_toml(view string toml_json, view string new_deps) -> string {
-    try {
-        var pkg = json.get(toml_json, "package")
-        var name = json.get(pkg, "name")
-        var target = json.get(pkg, "target")
-        var entry = json.get(pkg, "entry")
-        var output = json.get(pkg, "output")
-
-        var out = "[package]\n"
-        if (!strings.is_empty(name) && name != "nil") { out = out + "name = " + quote(name) + "\n" }
-        if (!strings.is_empty(target) && target != "nil") { out = out + "target = " + quote(target) + "\n" }
-        if (!strings.is_empty(entry) && entry != "nil") { out = out + "entry = " + quote(entry) + "\n" }
-        if (!strings.is_empty(output) && output != "nil") { out = out + "output = " + quote(output) + "\n" }
-
-        var dep_keys = json.keys(new_deps)
-        if (!strings.is_empty(dep_keys)) {
-            out = out + "\n[dependencies]\n"
-            var key_list = strings.split(dep_keys, "\n")
-            var count = arrays.length(key_list)
-            for (var i = 0; i < count; i = i + 1) {
-                var key = strings.trim(arrays.get(key_list, i))
-                if (!strings.is_empty(key)) {
-                    var val = json.get(new_deps, key)
-                    out = out + key + " = " + quote(val) + "\n"
-                }
-            }
-        }
-
-        return out
-    } catch (_) {
-        return toml.stringify(toml_json)
+fun read_manifest(view string project_dir) -> result[string, string] {
+    var toml_path = paths.join(project_dir, "neutron.toml")
+    if (!sys.exists(toml_path)) {
+        return Err("no neutron.toml in " + copy(project_dir))
     }
+    return toml_utils.read_toml(toml_path)
 }
 
-fun quote(view string s) -> string {
-    return "\"" + strings.replace(s, "\"", "\\\"") + "\""
+fun lock_path(view string project_dir) -> string {
+    return paths.join(project_dir, "neutron.lock")
+}
+
+fun apply(view string project_dir, view string manifest, view string lock_json) -> result[bool, string] {
+    var plan = resolver.resolve(manifest, lock_json)?
+    var vendor_root = paths.join(project_dir, ".ntsc")
+    var entries = arrays.new()
+    var count = arrays.length(plan)
+
+    if (count == 0) {
+        say("no dependencies to install")
+        prune_vendor(vendor_root, plan)
+        lockfile.write_lockfile(lock_path(project_dir), entries)?
+        return Ok(true)
+    }
+
+    try {
+        sys.mkdir(vendor_root)
+    } catch (err) {
+        return Err("install: cannot create " + copy(vendor_root) + ": " + err)
+    }
+    write_gitignore(vendor_root)
+
+    for (var i = 0; i < count; i = i + 1) {
+        var fields = strings.split_array(arrays.get(plan, i), "\t")
+        var name = arrays.get(fields, 0)
+        var version = arrays.get(fields, 1)
+        var repo = arrays.get(fields, 2)
+        var checkout = arrays.get(fields, 3)
+        var target = paths.join(vendor_root, name)
+
+        sys.rm_all(target)
+        if (!sys.cp_all(checkout, target)) {
+            return Err("install: cannot copy '" + copy(name) + "' into " + copy(vendor_root))
+        }
+        sys.rm_all(paths.join(target, ".git"))
+
+        var integrity = compute_integrity(target)
+        var record = copy(name) + "\t" + copy(version) + "\t" + copy(repo) + "\t" + "sha256:" + integrity
+        arrays.push(entries, record)
+        say("  " + copy(name) + " " + copy(version))
+    }
+
+    prune_vendor(vendor_root, plan)
+    lockfile.write_lockfile(lock_path(project_dir), entries)?
+    say("installed " + fmt.i64_to_str(count) + " package(s)")
+    return Ok(true)
+}
+
+/// The vendored tree is reproducible from `neutron.lock`, so it stays out of
+/// version control.
+fun write_gitignore(view string vendor_root) {
+    try {
+        sys.write(paths.join(vendor_root, ".gitignore"), "*\n")
+    } catch (_) {}
+}
+
+/// Remove vendored packages that the new resolution no longer contains.
+fun prune_vendor(view string vendor_root, view array[string] plan) {
+    if (!sys.exists(vendor_root)) {
+        return
+    }
+    try {
+        var listing = strings.split_array(sys.listdir(vendor_root), "\n")
+        var count = arrays.length(listing)
+        for (var i = 0; i < count; i = i + 1) {
+            var name = arrays.get(listing, i)
+            if (strings.is_empty(name) || strings.starts_with(name, ".")) {
+                continue
+            }
+            if (!is_planned(plan, name)) {
+                sys.rm_all(paths.join(vendor_root, name))
+            }
+        }
+    } catch (_) {}
+}
+
+fun is_planned(view array[string] plan, view string name) -> bool {
+    var count = arrays.length(plan)
+    for (var i = 0; i < count; i = i + 1) {
+        var fields = strings.split_array(arrays.get(plan, i), "\t")
+        if (arrays.get(fields, 0) == name) {
+            return true
+        }
+    }
+    return false
+}
+
+/// A content hash of the vendored tree, recorded in the lockfile so a changed
+/// checkout is visible.
+fun compute_integrity(view string dir) -> string {
+    var hash_input = ""
+    var files = strings.split_array(sys.walk(dir), "\n")
+    var count = arrays.length(files)
+    for (var i = 0; i < count; i = i + 1) {
+        var file = arrays.get(files, i)
+        if (strings.is_empty(file) || strings.ends_with(file, "/")) {
+            continue
+        }
+        try {
+            hash_input = hash_input + copy(file) + sys.read(paths.join(dir, file))
+        } catch (_) {}
+    }
+    return crypto.sha256(hash_input)
 }

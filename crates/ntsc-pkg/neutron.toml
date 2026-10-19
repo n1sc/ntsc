@@ -1,3 +1,9 @@
 [package]
 entry = "src/main.nt"
 output = "ntsc-pkg"
+
+# ntsc-pkg consumes its own registry: the vendored tree in `.ntsc/` is
+# committed because the manager cannot fetch this dependency before it is
+# built. Refresh it with `ntsc pkg install` and force-add changes.
+[dependencies]
+toml-utils = "^1.0.0"

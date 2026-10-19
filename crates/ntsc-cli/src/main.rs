@@ -925,7 +925,9 @@ fn cmd_pkg(args: &[String]) -> Result<(), CliError> {
 
     if !pkg.is_file() {
         return Err(CliError::Plain(format!(
-            "cannot find the package manager beside ntsc: {}",
+            "cannot find the package manager beside ntsc: {}\n\
+             reinstall ntsc, or run `arq install` from a source checkout, which \
+             builds ntsc-pkg and installs it beside the compiler",
             pkg.display()
         )));
     }
