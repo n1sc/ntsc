@@ -106,6 +106,25 @@ fun lib_value() -> int {
 File imports cannot escape the project root: a path resolving outside the
 entry file's directory (for example through `../`) is rejected.
 
+### Installed packages
+
+`ntsc pkg` vendors dependencies into `.ntsc/<name>/` at the project root, and
+a quoted import without a path separator or `.nt` suffix names one of them:
+
+```ntsc
+use "slug"
+
+fun main() {
+    say(slugify("Hello, World!"))
+}
+```
+
+The compiler looks for `.ntsc/slug/lib.nt`, or `.ntsc/slug/src/lib.nt` when
+the package keeps its sources under `src/`. Packages are ordinary file
+imports once resolved, so they merge into the same namespace and can
+themselves import their own files. The [Packages](packages.md) chapter covers
+installation, version requirements, and the lockfile.
+
 The compiler loads the whole closure of files, resolves names across the
 merged program, and compiles it as one unit. Declaration order does not
 matter: `lib.nt` can call a function defined later in the same file, and
@@ -152,5 +171,5 @@ Move the `Counter` class from the previous chapter into `src/counter.nt`.
 Import it from `src/main.nt` with `use "counter.nt"` and run the same program.
 The output should be unchanged.
 
-Next: [Error handling](error-handling.md) handles operations that cannot
-always succeed, such as reading a file or parsing a number.
+Next: [Packages](packages.md) installs modules published by other people and
+shows how to publish your own.

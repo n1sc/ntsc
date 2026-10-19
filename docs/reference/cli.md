@@ -27,6 +27,7 @@ Flags may appear before or after the command.
 | `ntsc cargo doc <crate> [--no-open]` | Generate Neutron-facing HTML docs for a Rust adaptor; print a terminal summary and open the page unless `--no-open` is given. Hyphenated package names use underscore namespaces in Neutron. |
 | `ntsc cargo coverage [<crate>]` | Report export-manifest coverage for all direct Rust adaptors, or for one named crate. |
 | `ntsc cargo …` | Manage Rust crate dependencies; the generated adaptors follow [the autogen standard](rust-autogen.md). |
+| `ntsc pkg <command>` | Install, update, remove, list, and search project dependencies. See [Packages](../guide/packages.md). |
 | `ntsc version` / `--version` / `-V` | Print detailed version info (version, LLVM revision, host triple, build profile, git commit) and exit. |
 | `ntsc --help` / `-h` | Print usage. |
 
@@ -78,6 +79,17 @@ output = "hello"
 
 Missing or duplicate keys are reported as `neutron.toml errors`.
 
+### Dependencies
+
+A `[dependencies]` table maps package names to version requirements. `ntsc
+pkg` reads and edits this table; the [Packages](../guide/packages.md) chapter
+explains the requirement syntax:
+
+```toml
+[dependencies]
+slug = "^1.2.0"
+```
+
 ### Experimental features
 
 An `[experimental]` section opts the project into unstable language
@@ -93,6 +105,28 @@ rust_modules = true
 Building a program that uses `use @crate` without the toggle fails before
 resolution or codegen with an error explaining how to opt in. Experimental
 features may change or be removed in any release.
+
+## Packages
+
+`ntsc pkg` is a separate executable, `ntsc-pkg`, installed beside the
+compiler by `arq install` and the release packages. `ntsc pkg` forwards its
+arguments to it.
+
+| Command | Description |
+| --- | --- |
+| `ntsc pkg install` | Install the manifest's dependencies, reusing `neutron.lock` where it still satisfies the requirements. |
+| `ntsc pkg install <name>` | Add `<name> = "^<latest>"` to the manifest and install. |
+| `ntsc pkg install <name>@<req>` | Add `<name>` with an explicit requirement. |
+| `ntsc pkg remove <name>` | Remove the dependency and unvendor it, along with anything only it required. |
+| `ntsc pkg update` | Ignore the lockfile and re-resolve to the newest allowed versions. |
+| `ntsc pkg list` | Print the packages recorded in `neutron.lock`. |
+| `ntsc pkg search <query>` | Search the registry by name, description, and keywords. |
+| `ntsc pkg help` | Print the subcommand summary. |
+
+Installed packages are copied into `.ntsc/<name>/` at the project root, with
+a generated `.ntsc/.gitignore` containing `*`. `neutron.lock` records each
+resolved version, its source repository, and a SHA-256 of the vendored tree.
+Source checkouts are cached under `~/.ntsc/packages/<name>@<version>`.
 
 ## Diagnostics
 
@@ -128,6 +162,7 @@ Errors aim to point at the fix, not just the problem:
 | --- | --- |
 | `LLVM_SYS_221_PREFIX` | Location of an LLVM 22 installation. |
 | `NTSC_MAX_ERRORS` | Maximum diagnostics shown per run; `0` is unlimited. |
+| `NTSC_REGISTRY` | Package registry index URL; defaults to `https://ntsc.yasakei.dev/v1/registry`. |
 | `CLICOLOR_FORCE`, `NO_COLOR`, `CLICOLOR`, `TERM` | Diagnostic color control. |
 
 ## The runtime library

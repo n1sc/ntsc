@@ -58,6 +58,7 @@ sum of squares: 30
 | **Classes, enums, `match`** | Structured programming with pattern matching and guards. |
 | **Generics & traits** | Monomorphized generics with trait bounds, `dyn Trait` vtable dispatch, and associated types. |
 | **Built-in tests** | `test` blocks discovered and run by `ntsc test`. |
+| **Package manager** | `ntsc pkg` installs lockfile-pinned, vendored dependencies from the [NTSC registry](https://github.com/n1sc/registry). |
 | **Async & concurrency** | `async fun` coroutines, goroutines, and message-passing channels. |
 | **C interop** | `extern "C"` declarations called from `unsafe` blocks, linked through `neutron.toml`. |
 | **Native performance** | LLVM backend; release builds run `mem2reg`, `instcombine`, `simplifycfg`, `sccp`, `dce`, and `gvn`, and escape analysis keeps non-escaping objects on the stack. |
@@ -83,6 +84,7 @@ sum of squares: 30
 | [Arrays and iterators](docs/guide/arrays-and-iterators.md) | |
 | [Error handling](docs/guide/error-handling.md) | |
 | [Modules](docs/guide/modules.md) | |
+| [Packages](docs/guide/packages.md) | |
 | [Concurrency](docs/guide/concurrency.md) | |
 | [Testing](docs/guide/testing.md) | |
 | [Unsafe and pointers](docs/guide/unsafe-and-pointers.md) | |
@@ -148,7 +150,12 @@ output = "hello"
 $ ntsc run               # debug build
 $ ntsc run --release     # optimized build
 $ ntsc test              # run the test blocks
+$ ntsc pkg install slug  # add a dependency from the registry
 ```
+
+Dependencies are recorded in `neutron.lock` and vendored into `.ntsc/`; the
+[Packages](docs/guide/packages.md) chapter covers requirements, publishing,
+and mirrors.
 
 ### Command-line interface
 

@@ -12,10 +12,10 @@ the compiler itself; the setup chapter explains that step.
 
 ## How to use this guide
 
-The first eleven chapters take you from an empty project to a small program
-with functions, data, imports, error handling, and tests. Each chapter names
-what you will learn and finishes with a small exercise and a next step.
-Advanced topics come after that foundation.
+The first twelve chapters take you from an empty project to a small program
+with functions, data, imports, dependencies, error handling, and tests. Each
+chapter names what you will learn and finishes with a small exercise and a
+next step. Advanced topics come after that foundation.
 
 - Run terminal commands in your project directory unless a step says otherwise.
 - A complete example with `fun main()` can replace `src/main.nt`.
@@ -61,6 +61,7 @@ alive and how to organize, recover from errors in, and test a larger program.
 | [Ownership](guide/ownership.md) | Keep one owner, transfer values with moves, and borrow with views. |
 | [Classes and enums](guide/classes.md) | Model your own data with fields, methods, constructors, and named cases. |
 | [Modules and imports](guide/modules.md) | Use the standard library and split a project into source files. |
+| [Packages](guide/packages.md) | Install registry dependencies, pin versions with a lockfile, and publish your own module. |
 | [Error handling](guide/error-handling.md) | Recover with try/catch, return results, and clean up after failures. |
 | [Testing](guide/testing.md) | Write assertions and run repeatable checks with ntsc test. |
 
@@ -130,5 +131,7 @@ The language currently provides:
 - HTTP: range downloads, file downloads with progress, concurrent downloads.
 - Crypto: SHA-256/384/224/512, MD5, HMAC, file hashing, hash verification.
 - A test runner driven by `test` blocks.
+- A package manager with lockfile-pinned, vendored dependencies resolved
+  from a community registry.
 - Debug-mode leak detection and a release-mode LLVM optimization pipeline.
 - Cross-platform support for Linux, macOS, and Windows.
