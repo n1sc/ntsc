@@ -761,6 +761,12 @@ pub(crate) fn expr_is_fresh<'ctx>(
                                 && prop == "args"
                                 && matches!(tv.ntsc_type, Ty::Array(_)))
 
+                            // `strings.split_array` materializes a fresh
+                            // string array from its source string.
+                            || (name.lexeme() == "strings"
+                                && prop == "split_array"
+                                && matches!(tv.ntsc_type, Ty::Array(_)))
+
                             // `chan.new(cap)` hands over the channel's first
                             // reference, so its destination adopts it.
                             || (name.lexeme() == "chan"

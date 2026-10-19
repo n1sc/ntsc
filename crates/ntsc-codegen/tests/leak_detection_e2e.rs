@@ -1191,3 +1191,36 @@ fun main() -> int {
         "repeated joins must not accumulate scratch handles, stderr was: {stderr:?}"
     );
 }
+
+/// Regression: `strings.split_array` results were never dropped — the
+/// freshness table did not know the call materializes a fresh array, so the
+/// array and every element copy leaked, and the runtime leaked the original
+/// handle of each part on top. A debug build must come out clean.
+#[test]
+fn split_array_result_is_reclaimed() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rewrite_dir = workspace.parent().unwrap().parent().unwrap();
+
+    let source = r#"use strings
+use arrays
+fun main() -> int {
+    var parts = strings.split_array("ntsc,compiler,runtime", ",")
+    for (var int i = 0; i < arrays.length(parts); i = i + 1) {
+        say(arrays.get(parts, i))
+    }
+    return 0
+}
+"#;
+    let (ok, stdout, stderr) = compile_run(
+        rewrite_dir,
+        "split_array_reclaimed",
+        source,
+        inkwell::OptimizationLevel::None,
+    );
+    assert!(ok, "binary must exit 0, stderr was: {stderr:?}");
+    assert_eq!(stdout, "ntsc\ncompiler\nruntime\n");
+    assert!(
+        !stderr.contains("NTSC-W0002"),
+        "the split result and its parts must be reclaimed, stderr was: {stderr:?}"
+    );
+}

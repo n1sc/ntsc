@@ -586,6 +586,7 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_strings_replace", i64_ty, i64_ty, i64_ty, i64_ty);
     declare!("ntsc_strings_replace_first", i64_ty, i64_ty, i64_ty, i64_ty);
     declare!("ntsc_strings_split", i64_ty, i64_ty, i64_ty);
+    declare!("ntsc_strings_split_array", i64_ty, i64_ty, i64_ty);
     declare!("ntsc_strings_join", i64_ty, i64_ty, i64_ty, i64_ty);
     declare!("ntsc_strings_join_all", i64_ty, i64_ty, i64_ty);
     declare!("ntsc_strings_repeat", i64_ty, i64_ty, i64_ty);
@@ -611,6 +612,8 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_sys_mkdir", i8_ty, i64_ty);
     declare!("ntsc_sys_rm", i8_ty, i64_ty);
     declare!("ntsc_sys_cp", i8_ty, i64_ty, i64_ty);
+    declare!("ntsc_sys_cp_all", i8_ty, i64_ty, i64_ty);
+    declare!("ntsc_sys_rm_all", i8_ty, i64_ty);
     declare!("ntsc_sys_sleep", void_ty, f64_ty);
     declare!("ntsc_sys_walk", i64_ty, i64_ty);
     declare!("ntsc_sys_symlink", i8_ty, i64_ty, i64_ty);

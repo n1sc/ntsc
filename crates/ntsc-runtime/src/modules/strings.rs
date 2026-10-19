@@ -24,6 +24,33 @@ pub extern "C" fn ntsc_strings_join(a: i64, b: i64, delim: i64) -> i64 {
     registry::put_string(format!("{a}{delim}{b}"))
 }
 
+/// `strings.split_array(s, delim)` — like `split`, but returns a real
+/// `array[string]` handle instead of a newline-joined string, so callers can
+/// iterate with `arrays.length` / `arrays.at` without re-tokenising.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_strings_split_array(s: i64, delim: i64) -> i64 {
+    let s = registry::get_string(s).unwrap_or_default();
+    let delim = registry::get_string(delim).unwrap_or_default();
+    let parts: Vec<&str> = if delim.is_empty() {
+        s.split("").filter(|c| !c.is_empty()).collect()
+    } else {
+        s.split(&delim).collect()
+    };
+    let items = registry::array_new(registry::PTR_SIZE as i64, 0, 1);
+    for part in parts {
+        let temp = registry::put_string(part.to_string());
+        if !registry::array_push(items, temp) {
+            crate::ntsc_string_drop(temp);
+            break;
+        }
+        // `array_push` deep-copies string elements into handles the array
+        // owns, so the original temp must be reclaimed here or every part
+        // leaks.
+        crate::ntsc_string_drop(temp);
+    }
+    items
+}
+
 /// `strings.join_all(arr, sep)` — the elements of a string array joined by
 /// `sep`, the inverse of `strings.split`. Non-string elements read as their
 /// decimal form, so a mixed array still joins instead of failing.
@@ -272,6 +299,22 @@ mod tests {
         let s = registry::get_string(id).unwrap_or_default();
         let _ = registry::take_string(id);
         s
+    }
+
+    #[test]
+    fn split_array_returns_an_iterable_string_array() {
+        let arr = ntsc_strings_split_array(put("a,b,,c"), put(","));
+        assert_eq!(registry::array_len(arr), 4);
+        let first = registry::array_get(arr, 0).expect("first element");
+        assert_eq!(read(first), "a");
+        let empty = registry::array_get(arr, 2).expect("empty element");
+        assert_eq!(read(empty), "");
+    }
+
+    #[test]
+    fn split_array_on_empty_delimiter_splits_characters() {
+        let arr = ntsc_strings_split_array(put("abc"), put(""));
+        assert_eq!(registry::array_len(arr), 3);
     }
 
     #[test]
