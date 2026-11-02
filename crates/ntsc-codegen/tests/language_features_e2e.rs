@@ -435,3 +435,30 @@ fun main() {
         "block\ninner\niter 1\niter 2\nthrow-cleanup\ncaught boom\nearly-cleanup\nearly\ntop\n"
     );
 }
+
+/// Raw pointers can now be offset, retyped, and null-initialized inside
+/// `unsafe`; all three operate on the machine address.
+#[test]
+fn raw_pointers_support_offset_cast_and_null() {
+    let source = r#"use memory
+
+fun main() {
+    var int x = 41
+    var &mut int r = &mut x
+    unsafe {
+        var *mut int p = memory.raw_address(r)
+        var *mut int q = memory.pointer_offset(p, 0)
+        *q = *q + 1
+        say("value " + *p)
+        var *const int c = memory.pointer_cast(p)
+        say("cast " + *c)
+        var *mut int none = memory.null_address()
+        var *const string empty = memory.null_address()
+        say("nulls ok")
+    }
+}
+"#;
+    let (ok, stdout, stderr) = compile_run("pointer_ops", source);
+    assert!(ok, "program failed: {stderr}");
+    assert_eq!(stdout, "value 42\ncast 42\nnulls ok\n");
+}

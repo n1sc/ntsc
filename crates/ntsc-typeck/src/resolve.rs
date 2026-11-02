@@ -3679,6 +3679,102 @@ impl TypeChecker {
                     }
                 });
             }
+            if property.lexeme() == "null_address" {
+                if self.unsafe_depth == 0 {
+                    self.errors.push(TypeError {
+                        code: None,
+                        help: None,
+                        message: "`memory.null_address` requires an `unsafe` block".into(),
+                        span: callee.span(),
+                    });
+                }
+                if !arguments.is_empty() {
+                    self.errors.push(TypeError {
+                        code: None,
+                        help: None,
+                        message: format!(
+                            "memory.null_address expects 0 argument(s), got {}",
+                            arguments.len()
+                        ),
+                        span: callee.span(),
+                    });
+                }
+                // The pointee is unknown until assignment, and a null pointer
+                // is valid for both const and mut targets.
+                return Some(Ty::RawPointer(Box::new(Ty::Any), true));
+            }
+            if property.lexeme() == "pointer_cast" {
+                if self.unsafe_depth == 0 {
+                    self.errors.push(TypeError {
+                        code: None,
+                        help: None,
+                        message: "`memory.pointer_cast` requires an `unsafe` block".into(),
+                        span: callee.span(),
+                    });
+                }
+                if arguments.len() != 1 {
+                    self.errors.push(TypeError {
+                        code: None,
+                        help: None,
+                        message: format!(
+                            "memory.pointer_cast expects 1 argument(s), got {}",
+                            arguments.len()
+                        ),
+                        span: callee.span(),
+                    });
+                    return Some(Ty::RawPointer(Box::new(Ty::Any), true));
+                }
+                let argument_ty = self.check_expression(&arguments[0]).unwrap_or(Ty::Any);
+                if !matches!(argument_ty, Ty::RawPointer(..)) {
+                    self.errors.push(TypeError {
+                        code: None,
+                        help: None,
+                        message: format!(
+                            "memory.pointer_cast expects a raw pointer, got `{argument_ty}`"
+                        ),
+                        span: arguments[0].span(),
+                    });
+                }
+                return Some(Ty::RawPointer(Box::new(Ty::Any), true));
+            }
+            if property.lexeme() == "pointer_offset" {
+                if self.unsafe_depth == 0 {
+                    self.errors.push(TypeError {
+                        code: None,
+                        help: None,
+                        message: "`memory.pointer_offset` requires an `unsafe` block".into(),
+                        span: callee.span(),
+                    });
+                }
+                if arguments.len() != 2 {
+                    self.errors.push(TypeError {
+                        code: None,
+                        help: None,
+                        message: format!(
+                            "memory.pointer_offset expects 2 argument(s), got {}",
+                            arguments.len()
+                        ),
+                        span: callee.span(),
+                    });
+                    return Some(Ty::RawPointer(Box::new(Ty::Any), true));
+                }
+                let argument_ty = self.check_expression(&arguments[0]).unwrap_or(Ty::Any);
+                self.check_expression(&arguments[1]);
+                return Some(match argument_ty {
+                    Ty::RawPointer(inner, mutable) => Ty::RawPointer(inner, mutable),
+                    other => {
+                        self.errors.push(TypeError {
+                            code: None,
+                            help: None,
+                            message: format!(
+                                "memory.pointer_offset expects a raw pointer, got `{other}`"
+                            ),
+                            span: arguments[0].span(),
+                        });
+                        Ty::RawPointer(Box::new(Ty::Any), true)
+                    }
+                });
+            }
             let (params, result) = match property.lexeme() {
                 "alloc" => (vec![Ty::Int], Ty::Pointer),
                 "offset" => (vec![Ty::Pointer, Ty::Int], Ty::Pointer),

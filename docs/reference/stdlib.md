@@ -609,7 +609,15 @@ a plain load or store.
 
 `memory.raw_address(reference)` is the typed-pointer escape hatch: it converts
 `&T` to `*const T` and `&mut T` to `*mut T`. It is only allowed inside an
-`unsafe` block, and the resulting pointer keeps its pointee type. See
+`unsafe` block, and the resulting pointer keeps its pointee type.
+
+| Function | Returns | Behavior |
+| --- | --- | --- |
+| `memory.null_address()` | raw pointer | A null pointer, assignable to any `*const T` or `*mut T`. |
+| `memory.pointer_cast(p)` | raw pointer | The same address with an unknown pointee type. |
+| `memory.pointer_offset(p, n)` | raw pointer | The address `n` elements past `p`, keeping `p`'s pointee type. |
+
+All three require an `unsafe` block. See
 [Pointers and references](language.md#pointers-and-references).
 
 ## Process

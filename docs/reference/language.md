@@ -1015,10 +1015,11 @@ a `view mut` parameter.
 
 ## Known limitations
 
-- Raw pointers cannot be cast between pointee types, constructed as null, or
-  offset arithmetically; they exist only to reach a referent's storage.
 - A raw pointer is not borrow-checked. Inside `unsafe`, keeping one past its
   referent's lifetime is the caller's responsibility.
+- `memory.null_address()`, `memory.pointer_cast(p)`, and
+  `memory.pointer_offset(p, n)` are the only ways to build, retype, or move a
+  raw pointer; all three require `unsafe`.
 - `unsafe` does not change behavior at runtime; it gates raw-pointer
   operations at type-check time.
 - String escapes (`\n`, `\t`, `\r`, `\0`, `\\`, `\"`, `\'`, `\$`) are processed

@@ -160,15 +160,26 @@ Inside `unsafe`, the programmer must uphold these invariants:
 Violating these rules is undefined behavior. The compiler does not insert
 runtime checks inside `unsafe`.
 
+## Pointer operations
+
+Inside `unsafe`, three builtins work on the machine address:
+
+| Call | Result | Meaning |
+| --- | --- | --- |
+| `memory.null_address()` | raw pointer | A null pointer; assign it to any `*const T` or `*mut T`. |
+| `memory.pointer_cast(p)` | raw pointer | The same address with an unknown pointee; assign it to any raw pointer type. |
+| `memory.pointer_offset(p, n)` | same type as `p` | The address `n` elements past `p`. |
+
+The type checker treats the first two as `*mut any`, so the declared variable
+supplies the pointee type. Offsetting and dereferencing stay the caller's
+responsibility: the compiler inserts no bounds check inside `unsafe`.
+
 ## Limitations
 
-- Raw pointers cannot be constructed as null.
-- Raw pointers cannot be offset arithmetically.
-- Raw pointers cannot be cast between pointee types.
 - `unsafe` does not change runtime behavior — it only gates compile-time
   checks.
-- `super` is lexed but not usable in expressions (not related to `unsafe`,
-  but listed here as a known limitation).
+- A raw pointer is not tracked by the ownership checker; keeping one past its
+  referent's lifetime is undefined behavior.
 
 ## When to use `unsafe`
 

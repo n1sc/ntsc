@@ -853,6 +853,76 @@ pub(crate) fn emit_call<'ctx>(
         };
     }
 
+    // Raw-pointer arithmetic and retyping. All three are gated on `unsafe`
+    // by the type checker and operate on the machine address directly.
+    if let Expr::Member { object, property } = callee
+        && let Expr::Variable { name } = object.as_ref()
+        && name.lexeme() == "memory"
+    {
+        match property.lexeme() {
+            "null_address" => {
+                return Ok(TypedValue::new(
+                    fn_ctx
+                        .context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                        .into(),
+                    Ty::RawPointer(Box::new(Ty::Any), true),
+                ));
+            }
+            "pointer_cast" => {
+                let argument = arguments.first().ok_or_else(|| {
+                    crate::CodegenError::LLVMError("memory.pointer_cast expects 1 argument".into())
+                })?;
+                let value = emit_expression(fn_ctx, argument)?;
+                return Ok(TypedValue::new(
+                    value.value,
+                    Ty::RawPointer(Box::new(Ty::Any), true),
+                ));
+            }
+            "pointer_offset" => {
+                let target = arguments.first().ok_or_else(|| {
+                    crate::CodegenError::LLVMError(
+                        "memory.pointer_offset expects 2 arguments".into(),
+                    )
+                })?;
+                let offset = arguments.get(1).ok_or_else(|| {
+                    crate::CodegenError::LLVMError(
+                        "memory.pointer_offset expects 2 arguments".into(),
+                    )
+                })?;
+                let value = emit_expression(fn_ctx, target)?;
+                let index = emit_expression(fn_ctx, offset)?;
+                let index = coerce_to_i64(fn_ctx, index.value)?;
+                let (inner, mutable) = match &value.ntsc_type {
+                    Ty::RawPointer(inner, mutable) => (inner.clone(), *mutable),
+                    other => {
+                        return Err(crate::CodegenError::LLVMError(format!(
+                            "memory.pointer_offset expects a raw pointer, got `{other}`"
+                        )));
+                    }
+                };
+                let pointee = ty_to_llvm(&inner, fn_ctx.context);
+                // SAFETY: `pointee` is the type the pointer was created
+                // for and `index` is an i64 GEP operand, so the computed
+                // address stays inside the same allocation type.
+                let offset_value = unsafe {
+                    fn_ctx.builder.build_gep(
+                        pointee,
+                        value.value.into_pointer_value(),
+                        &[index],
+                        "pointer_offset",
+                    )?
+                };
+                return Ok(TypedValue::new(
+                    offset_value.into(),
+                    Ty::RawPointer(inner, mutable),
+                ));
+            }
+            _ => {}
+        }
+    }
+
     if let Expr::Variable { name } = callee {
         let name_str = name.lexeme();
 
