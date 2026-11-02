@@ -8,7 +8,10 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Wrap,
+};
 use ratatui::{DefaultTerminal, Frame};
 
 use super::{ACCENT, ACCENT2, BG, BORDER, HIGHLIGHT, MUTED, TEXT, key, panel};
@@ -213,6 +216,13 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &DocsState) {
             format!("  {}/{}", state.filtered.len(), state.docs.len()),
             Style::default().fg(MUTED),
         ),
+        Span::styled(
+            match state.current() {
+                Some(_) => format!("  {}%", reading_percent(state)),
+                None => String::new(),
+            },
+            Style::default().fg(MUTED),
+        ),
     ]);
     let hint = if state.searching {
         "typing…"
@@ -302,6 +312,31 @@ fn draw_page(frame: &mut Frame, area: Rect, state: &mut DocsState) {
             .scroll((state.scroll, 0)),
         area,
     );
+    draw_scrollbar(frame, inner, state);
+}
+
+fn draw_scrollbar(frame: &mut Frame, area: Rect, state: &DocsState) {
+    if state.max_scroll == 0 || area.width == 0 || area.height == 0 {
+        return;
+    }
+    let mut scrollbar =
+        ScrollbarState::new(state.max_scroll as usize).position(state.scroll as usize);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .style(Style::default().fg(BORDER))
+            .thumb_style(Style::default().fg(ACCENT))
+            .begin_symbol(None)
+            .end_symbol(None),
+        area,
+        &mut scrollbar,
+    );
+}
+
+fn reading_percent(state: &DocsState) -> u16 {
+    if state.max_scroll == 0 {
+        return 100;
+    }
+    (state.scroll as u32 * 100 / state.max_scroll as u32) as u16
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, state: &DocsState) {
@@ -974,5 +1009,18 @@ mod tests {
             .find(|span| span.content == "entry")
             .unwrap();
         assert_eq!(key.style.fg, Some(CODE_TYPE));
+    }
+
+    #[test]
+    fn reading_position_reflects_the_scroll_offset() {
+        let mut state = DocsState::new(Vec::new(), None);
+        assert_eq!(reading_percent(&state), 100);
+        state.max_scroll = 200;
+        state.scroll = 0;
+        assert_eq!(reading_percent(&state), 0);
+        state.scroll = 50;
+        assert_eq!(reading_percent(&state), 25);
+        state.scroll = 200;
+        assert_eq!(reading_percent(&state), 100);
     }
 }
