@@ -658,6 +658,23 @@ thread_local! {
     static ENUM_MEMBER_VALUES: RefCell<HashMap<String, i32>> = RefCell::new(HashMap::new());
 }
 
+/// Declared enum variants in declaration order: the variant name and its
+/// payload types.
+pub(crate) type EnumPayloads = Vec<(String, Vec<Ty>)>;
+
+thread_local! {
+    /// Payload-carrying enum name → its variants with their payload types.
+    ///
+    /// Only enums with at least one payload variant are recorded here; a
+    /// plain enum stays an `int` constant and never allocates a cell.
+    static ENUM_PAYLOADS: RefCell<HashMap<String, EnumPayloads>> = RefCell::new(HashMap::new());
+}
+
+thread_local! {
+    /// Bare enum variant name → the payload-carrying enum that declares it.
+    static ENUM_VARIANT_OWNERS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
 thread_local! {
     /// `static const` variable name → declared type.
     ///
@@ -1387,6 +1404,7 @@ pub(crate) mod class;
 pub(crate) mod control;
 pub(crate) mod drop;
 pub(crate) mod dyn_obj;
+pub(crate) mod enum_cell;
 pub(crate) mod escape;
 pub(crate) mod exception;
 pub(crate) mod expr;

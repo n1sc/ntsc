@@ -286,16 +286,23 @@ impl Resolver {
                 self.resolve_expression(expression);
                 for case in cases {
                     match &case.pattern {
-                        // The binder scopes to the arm body; the raw call
-                        // form in `value` is not resolved as an expression.
+                        // Bindings scope to the arm body; the raw call form
+                        // in `value` is not resolved as an expression.
                         Some(pattern) => {
-                            if let Some(binding) = &pattern.binding {
+                            let bindings: Vec<_> = pattern
+                                .bindings
+                                .iter()
+                                .filter(|binding| binding.lexeme() != "_")
+                                .collect();
+                            if bindings.is_empty() {
+                                self.resolve_statement(&case.body);
+                            } else {
                                 self.in_scope(|resolver| {
-                                    resolver.define(binding.lexeme(), binding.span);
+                                    for binding in bindings {
+                                        resolver.define(binding.lexeme(), binding.span);
+                                    }
                                     resolver.resolve_statement(&case.body);
                                 });
-                            } else {
-                                self.resolve_statement(&case.body);
                             }
                         }
                         None => {

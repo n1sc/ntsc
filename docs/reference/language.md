@@ -494,11 +494,37 @@ Supported operator methods: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`,
 ```
 enum Name {
     Member,
-    Other = value
+    Other = value,
+    Payload(int, string)
 }
 ```
 
-Members may carry an explicit value.
+Members may carry an explicit value. A member declared with a parenthesised
+type list carries data instead: such an enum is no longer an `int`, its
+variants are built as `Name.Variant(...)` (or `Variant(...)` when the name is
+unambiguous), and `match` destructures them.
+
+```ntsc
+enum Shape {
+    Circle(float)
+    Rect(float, float)
+    Empty
+}
+
+fun describe(Shape s) -> string {
+    match (s) {
+        case Shape.Circle(r) => return "circle " + r
+        case Shape.Rect(w, h) => return "rect " + w + "x" + h
+        case Shape.Empty => return "empty"
+    }
+    return "?"
+}
+```
+
+`_` ignores a payload slot: `case Shape.Rect(_, h)`. A payload-carrying enum
+value is an owned heap value — `copy` deep-copies it, and its heap payloads are
+released when the last owner goes away. Enums that declare no payloads stay
+`int` constants.
 
 ## Statements
 

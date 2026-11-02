@@ -185,6 +185,31 @@ match (dir) {
 }
 ```
 
+A case can also carry data. Declaring a parenthesised type list turns the
+enum into a tagged value instead of an `int`, and each case is built by
+calling it:
+
+```ntsc
+enum Shape {
+    Circle(float)
+    Rect(float, float)
+    Empty
+}
+
+fun describe(Shape shape) -> string {
+    match (shape) {
+        case Shape.Circle(r) => return "circle of radius " + r
+        case Shape.Rect(w, h) => return "rect " + w + "x" + h
+        case Shape.Empty => return "empty"
+    }
+    return "?"
+}
+```
+
+Binding names in a `case` are scoped to that arm, and `_` ignores a slot you do
+not need (`case Shape.Rect(_, h)`). Payload-carrying values are owned: pass
+them by value, and use `copy` when you need an independent duplicate.
+
 See [Syntax and control flow](syntax-and-control-flow.md) for the full pattern
 syntax available in `case` arms.
 

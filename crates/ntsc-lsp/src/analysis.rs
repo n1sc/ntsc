@@ -1232,7 +1232,10 @@ impl Indexer {
                         Some(pattern) => {
                             let range = stmt_subtree_range(&case.body);
                             self.push_scope(range, None);
-                            if let Some(binding) = &pattern.binding {
+                            for binding in &pattern.bindings {
+                                if binding.lexeme() == "_" {
+                                    continue;
+                                }
                                 let range = self.current_range();
                                 let parent = self.current_owner();
                                 self.declare(

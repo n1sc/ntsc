@@ -514,9 +514,17 @@ fn shift_stmt(stmt: &mut Stmt, base: usize) {
             } in cases
             {
                 shift_expr(value, base);
-                if let Some(MatchPattern { variant, binding }) = pattern {
+                if let Some(MatchPattern {
+                    qualifier,
+                    variant,
+                    bindings,
+                }) = pattern
+                {
+                    if let Some(qualifier) = qualifier {
+                        shift_span(&mut qualifier.span, base);
+                    }
                     shift_span(&mut variant.span, base);
-                    if let Some(binding) = binding {
+                    for binding in bindings {
                         shift_span(&mut binding.span, base);
                     }
                 }

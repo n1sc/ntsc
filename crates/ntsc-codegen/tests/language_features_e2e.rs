@@ -311,6 +311,162 @@ fun main() {
 }
 
 #[test]
+fn enum_payloads_construct_and_destructure() {
+    let source = r#"enum Shape {
+    Circle(float)
+    Rect(float, float)
+    Empty
+}
+
+fun describe(Shape shape) -> string {
+    match (shape) {
+        case Shape.Circle(r) => { return "circle " + r }
+        case Shape.Rect(w, h) => { return "rect " + w + "x" + h }
+        case Shape.Empty => { return "empty" }
+    }
+    return "?"
+}
+
+fun main() {
+    say(describe(Shape.Circle(2.5)))
+    say(describe(Shape.Rect(2.0, 3.0)))
+    say(describe(Shape.Empty))
+}
+"#;
+    let (ok, stdout, stderr) = compile_run("enum_payloads", source);
+    assert!(ok, "program failed: {stderr}");
+    assert_eq!(stdout, "circle 2.5\nrect 2x3\nempty\n");
+}
+
+#[test]
+fn enum_payload_bindings_can_be_used_and_nested() {
+    let source = r#"enum Node {
+    Leaf(int)
+    Pair(int, int)
+}
+
+fun total(Node node) -> int {
+    match (node) {
+        case Node.Leaf(v) => { return v }
+        case Node.Pair(a, b) => { return a + b }
+    }
+    return 0
+}
+
+fun main() {
+    var Node n = Node.Pair(4, 5)
+    var Node dup = copy(n)
+    say("total " + total(n))
+    say("again " + total(dup))
+}
+"#;
+    let (ok, stdout, stderr) = compile_run("enum_payload_bindings", source);
+    assert!(ok, "program failed: {stderr}");
+    assert_eq!(stdout, "total 9\nagain 9\n");
+}
+
+#[test]
+fn enum_payloads_own_heap_values() {
+    let source = r#"enum Message {
+    Text(string)
+    Code(int, string)
+}
+
+fun render(Message m) -> string {
+    match (m) {
+        case Message.Text(t) => { return "text:" + t }
+        case Message.Code(c, t) => { return "code:" + c + ":" + t }
+    }
+    return "?"
+}
+
+fun main() {
+    var Message first = Message.Text("hello")
+    var Message second = copy(first)
+    say(render(first))
+    say(render(second))
+    say(render(Message.Code(7, "seven")))
+}
+"#;
+    let (ok, stdout, stderr) = compile_run("enum_payload_heap", source);
+    assert!(ok, "program failed: {stderr}");
+    assert_eq!(stdout, "text:hello\ntext:hello\ncode:7:seven\n");
+}
+
+#[test]
+fn enum_payload_type_is_checked() {
+    let message = compile_error(
+        "enum_payload_bad_type",
+        r#"enum Shape {
+    Circle(float)
+}
+
+fun main() {
+    var Shape s = Shape.Circle("big")
+}
+"#,
+    );
+    assert!(
+        message.contains("payload 1 has type `float`, got `string`"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn enum_payload_errors_are_explained() {
+    let missing_call = compile_error(
+        "enum_payload_missing_call",
+        r#"enum Shape {
+    Circle(float)
+}
+
+fun main() {
+    var Shape s = Shape.Circle
+}
+"#,
+    );
+    assert!(
+        missing_call.contains("carries 1 payload value(s)"),
+        "unexpected error: {missing_call}"
+    );
+
+    let wrong_arity = compile_error(
+        "enum_payload_wrong_arity",
+        r#"enum Shape {
+    Rect(float, float)
+}
+
+fun main() {
+    var Shape s = Shape.Rect(1.0)
+}
+"#,
+    );
+    assert!(
+        wrong_arity.contains("expects 2 argument(s), got 1"),
+        "unexpected error: {wrong_arity}"
+    );
+
+    let unknown_variant = compile_error(
+        "enum_payload_unknown_variant",
+        r#"enum Shape {
+    Circle(float)
+}
+
+fun main() {
+    var Shape s = Shape.Circle(1.0)
+    match (s) {
+        case Shape.Triangle(x) => { say(x) }
+    }
+}
+"#,
+    );
+    assert!(
+        unknown_variant.contains("has no variant `Triangle`"),
+        "unexpected error: {unknown_variant}"
+    );
+}
+
+#[test]
 fn plain_enum_still_works() {
     let source = r#"enum Color {
     Red

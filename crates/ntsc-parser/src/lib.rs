@@ -2008,11 +2008,11 @@ impl<'src> Parser<'src> {
             } else {
                 let case_token = self.advance();
                 let value = self.parse_expression()?;
-                // `Ok(v)` / `Err(e)` arm heads become variant patterns that
-                // destructure the scrutinee and bind the payload. Only the
-                // builtin result variants are recognized syntactically, so
-                // ordinary call-valued cases keep their old meaning.
-                let pattern = match_pattern_head(&value);
+                // A variant-shaped head (`Ok(v)`, `Shape.Circle(r)`) becomes a
+                // pattern candidate. Type checking decides against the
+                // scrutinee's type whether the arm destructures; otherwise
+                // the raw `value` is compared as an ordinary expression.
+                let pattern = ntsc_ast::stmt::variant_head(&value);
                 let guard = if self.check(&TokenKind::If) {
                     self.advance();
                     Some(self.parse_expression()?)
@@ -3010,40 +3010,6 @@ pub fn parse(tokens: &[Token]) -> Result<ntsc_ast::stmt::Program, Vec<ParseError
 /// with every error encountered. See [`Parser::parse_recovering`].
 pub fn parse_recovering(tokens: &[Token]) -> (ntsc_ast::stmt::Program, Vec<ParseError>) {
     Parser::parse_recovering(tokens)
-}
-
-/// Recognize a match arm head of the shape `Ok(binder)` or `Err(binder)` as
-/// a variant pattern. The binder may be `_` to ignore the payload. Bare
-/// `Ok` / `Err` without arguments stays a plain value case, matching the
-/// pre-pattern behavior.
-fn match_pattern_head(value: &Expr) -> Option<ntsc_ast::stmt::MatchPattern> {
-    let Expr::Call {
-        callee, arguments, ..
-    } = value
-    else {
-        return None;
-    };
-    if arguments.len() != 1 {
-        return None;
-    }
-    let Expr::Variable { name: variant } = &**callee else {
-        return None;
-    };
-    if !matches!(variant.lexeme(), "Ok" | "Err") {
-        return None;
-    }
-    let Some(Expr::Variable { name: binding }) = arguments.first() else {
-        return None;
-    };
-    let binding = if binding.lexeme() == "_" {
-        None
-    } else {
-        Some(binding.clone())
-    };
-    Some(ntsc_ast::stmt::MatchPattern {
-        variant: variant.clone(),
-        binding,
-    })
 }
 
 fn mangle_applied_type(base: &str, arguments: &[TypeAnnotation]) -> String {

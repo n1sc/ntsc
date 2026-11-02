@@ -200,6 +200,9 @@ pub fn emit_module(
         }
     });
 
+    ENUM_PAYLOADS.with(|map| map.borrow_mut().clear());
+    ENUM_VARIANT_OWNERS.with(|map| map.borrow_mut().clear());
+
     ENUM_VALUES.with(|map| {
         let mut enums = map.borrow_mut();
         enums.clear();
@@ -208,6 +211,33 @@ pub fn emit_module(
             global_members.clear();
             for stmt in &program.statements {
                 if let ntsc_ast::stmt::Stmt::Enum { name, members, .. } = stmt {
+                    let payloads: Vec<(String, Vec<Ty>)> = members
+                        .iter()
+                        .map(|member| {
+                            (
+                                member.name.lexeme().to_string(),
+                                member
+                                    .data_types
+                                    .iter()
+                                    .map(|annotation| {
+                                        type_annotation_to_ty(&Some(annotation.clone()))
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect();
+                    if payloads.iter().any(|(_, payload)| !payload.is_empty()) {
+                        ENUM_PAYLOADS.with(|map| {
+                            map.borrow_mut()
+                                .insert(name.lexeme().to_string(), payloads.clone());
+                        });
+                        ENUM_VARIANT_OWNERS.with(|map| {
+                            let mut owners = map.borrow_mut();
+                            for (variant, _) in &payloads {
+                                owners.insert(variant.clone(), name.lexeme().to_string());
+                            }
+                        });
+                    }
                     let mut next = 0_i32;
                     let mut members_map = HashMap::new();
                     for member in members {

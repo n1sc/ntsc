@@ -287,8 +287,10 @@ fn local_class_types(
             }
             Stmt::Match { cases, .. } => {
                 for case in cases {
-                    if let Some(name) = case.pattern.as_ref().and_then(|p| p.binding.as_ref()) {
-                        record(name);
+                    if let Some(pattern) = &case.pattern {
+                        for name in &pattern.bindings {
+                            record(name);
+                        }
                     }
                 }
             }

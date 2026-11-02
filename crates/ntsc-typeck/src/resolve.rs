@@ -255,6 +255,10 @@ struct ClassInfo {
     operator_returns: HashMap<String, Ty>,
 }
 
+/// Declared enum variants in declaration order: the variant name and its
+/// payload types.
+type EnumVariants = Vec<(String, Vec<Ty>)>;
+
 /// The type checker state.
 struct TypeChecker {
     symbols: SymbolTable,
@@ -281,8 +285,13 @@ struct TypeChecker {
 
     unsafe_depth: usize,
 
-    /// Names of enum members, which resolve to `int` constants.
-    enum_members: HashSet<String>,
+    /// Every enum variant name mapped to the enum that declares it. A
+    /// variant of a payload-carrying enum is a value of that enum's type; a
+    /// variant of a plain enum is an `int` constant.
+    enum_members: HashMap<String, String>,
+
+    /// Declared enum shapes: variant names with their payload types.
+    enums: HashMap<String, EnumVariants>,
 
     /// Names of `static const` variables; they are immutable and require a
     /// compile-time constant initializer.
@@ -352,7 +361,8 @@ impl TypeChecker {
             async_depth: 0,
             current_fn_name: None,
             unsafe_depth: 0,
-            enum_members: HashSet::new(),
+            enum_members: HashMap::new(),
+            enums: HashMap::new(),
             consts: HashSet::new(),
             capture_bases: Vec::new(),
             classes: HashMap::new(),
@@ -452,14 +462,34 @@ impl TypeChecker {
             }
         }
 
-        // Register enum member names as `int` constants so bare references
-        // (`case North`) type-check.
-        for stmt in &program.statements {
-            if let Stmt::Enum { members, .. } = stmt {
-                for member in members {
-                    self.enum_members.insert(member.name.lexeme().to_string());
-                }
+        // Register enum variants so bare references (`case North`) and
+        // payload construction (`Shape.Circle(1.0)`) type-check.
+        let declared_enums: Vec<(String, EnumVariants)> = program
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::Enum { name, members, .. } => Some((
+                    name.lexeme().to_string(),
+                    members
+                        .iter()
+                        .map(|member| {
+                            let payload = member
+                                .data_types
+                                .iter()
+                                .map(|annotation| self.resolve_annotation(Some(annotation)))
+                                .collect();
+                            (member.name.lexeme().to_string(), payload)
+                        })
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .collect();
+        for (enum_name, variants) in declared_enums {
+            for (variant, _) in &variants {
+                self.enum_members.insert(variant.clone(), enum_name.clone());
             }
+            self.enums.insert(enum_name, variants);
         }
 
         self.collect_class_members(program);
@@ -702,13 +732,124 @@ impl TypeChecker {
     }
 
     /// The declared type of a member read, or `Ty::Any` when it is not known.
+    /// The type of a value of `enum_name`: an `int` tag for a plain enum,
+    /// the enum's own type when it carries payloads.
+    fn enum_value_ty(&self, enum_name: &str) -> Ty {
+        let carries_payload = self
+            .enums
+            .get(enum_name)
+            .is_some_and(|variants| variants.iter().any(|(_, payload)| !payload.is_empty()));
+        if carries_payload {
+            Ty::Class(enum_name.to_string())
+        } else {
+            Ty::Int
+        }
+    }
+
+    /// The payload types of `variant` in `enum_name`, if it declares one.
+    fn enum_variant_payload(&self, enum_name: &str, variant: &str) -> Option<&[Ty]> {
+        self.enums.get(enum_name).and_then(|variants| {
+            variants
+                .iter()
+                .find(|(name, _)| name == variant)
+                .map(|(_, payload)| payload.as_slice())
+        })
+    }
+
     fn member_ty(&mut self, object: &Expr, property: &Token) -> Ty {
         let object_ty = self.check_expression(object);
+        if let Some(Ty::Class(enum_name)) = &object_ty {
+            let enum_name = enum_name.clone();
+            let value_ty = self.enum_value_ty(&enum_name);
+            if matches!(value_ty, Ty::Class(_)) {
+                let arity = self
+                    .enum_variant_payload(&enum_name, property.lexeme())
+                    .map(<[Ty]>::len);
+                if let Some(arity) = arity {
+                    if arity > 0 {
+                        self.errors.push(TypeError {
+                            code: None,
+                            help: Some(format!(
+                                "call it with {arity} argument(s): `{enum_name}.{}(...)`",
+                                property.lexeme()
+                            )),
+                            message: format!(
+                                "enum variant `{enum_name}.{}` carries {arity} payload value(s)",
+                                property.lexeme()
+                            ),
+                            span: property.span,
+                        });
+                    }
+                    return value_ty;
+                }
+            }
+        }
         object_ty
             .as_ref()
             .and_then(base_class_name)
             .and_then(|class| self.class_field_ty(class, property.lexeme()))
             .unwrap_or(Ty::Any)
+    }
+
+    /// Check `Shape.Circle(1.0)` (or a bare `Circle(1.0)`) as a payload
+    /// construction. Returns `None` when the callee does not name a variant
+    /// of a payload-carrying enum, leaving the call to normal dispatch.
+    fn check_enum_construction(&mut self, callee: &Expr, arguments: &[Expr]) -> Option<Ty> {
+        let (enum_name, variant) = match callee {
+            Expr::Member { object, property } => {
+                let Expr::Variable { name } = &**object else {
+                    return None;
+                };
+                (name.lexeme().to_string(), property.clone())
+            }
+            Expr::Variable { name } => {
+                // A declared function or builtin shadows a same-named variant.
+                if self.symbols.lookup_depth(name.lexeme()).is_some() {
+                    return None;
+                }
+                let owner = self.enum_members.get(name.lexeme())?.clone();
+                (owner, name.clone())
+            }
+            _ => return None,
+        };
+        let value_ty = self.enum_value_ty(&enum_name);
+        if !matches!(value_ty, Ty::Class(_)) {
+            return None;
+        }
+        let payload = self
+            .enum_variant_payload(&enum_name, variant.lexeme())?
+            .to_vec();
+        if payload.len() != arguments.len() {
+            self.errors.push(TypeError {
+                code: None,
+                help: None,
+                message: format!(
+                    "enum variant `{enum_name}.{}` expects {} argument(s), got {}",
+                    variant.lexeme(),
+                    payload.len(),
+                    arguments.len()
+                ),
+                span: callee.span(),
+            });
+        }
+        for (index, argument) in arguments.iter().enumerate() {
+            let argument_ty = self.check_expression(argument);
+            if let (Some(expected), Some(actual)) = (payload.get(index), argument_ty.as_ref())
+                && !expected.is_assignable_from(actual)
+            {
+                self.errors.push(TypeError {
+                    code: None,
+                    help: None,
+                    message: format!(
+                        "enum variant `{enum_name}.{}` payload {} has type `{expected}`, got `{actual}`",
+                        variant.lexeme(),
+                        index + 1
+                    ),
+                    span: argument.span(),
+                });
+            }
+        }
+        Some(value_ty)
     }
 
     /// Look up the declared return type of an operator method on `class_name`,
@@ -734,19 +875,68 @@ impl TypeChecker {
     }
 
     /// Check a destructuring match arm: the variant must exist on the
-    /// scrutinee's type (result cells expose `Ok` / `Err`), and the binder
-    /// is scoped to the arm body with the payload's type.
+    /// scrutinee's type (result cells expose `Ok` / `Err`, payload enums
+    /// expose their declared cases), and each binder is scoped to the arm
+    /// body with its payload's type.
+    ///
+    /// Returns `false` when the head is not a variant of the scrutinee's
+    /// type, so the caller can compare `case.value` as a plain expression
+    /// instead.
     fn check_pattern_case(
         &mut self,
         case: &MatchCase,
         pattern: &MatchPattern,
         scrutinee_ty: Option<Ty>,
-    ) {
+    ) -> bool {
         let variant = pattern.variant.lexeme();
-        let payload_ty = match (&scrutinee_ty, variant) {
-            (Some(Ty::Result { ok, err: _ }), "Ok") => Some((**ok).clone()),
-            (Some(Ty::Result { ok: _, err }), "Err") => Some((**err).clone()),
-            (Some(other), _) => {
+        let binders: Option<Vec<Ty>> = match &scrutinee_ty {
+            Some(Ty::Result { ok, err }) => match (variant, &pattern.qualifier) {
+                ("Ok", None) => Some(vec![(**ok).clone()]),
+                ("Err", None) => Some(vec![(**err).clone()]),
+                _ if pattern.bindings.is_empty() => return false,
+                _ => {
+                    self.errors.push(TypeError {
+                        code: None,
+                        help: None,
+                        message: format!(
+                            "`{}` has no variant `{variant}` to match here",
+                            scrutinee_ty.as_ref().map(Ty::to_string).unwrap_or_default()
+                        ),
+                        span: pattern.variant.span,
+                    });
+                    None
+                }
+            },
+            Some(Ty::Class(name)) if matches!(self.enum_value_ty(name), Ty::Class(_)) => {
+                let name = name.clone();
+                if let Some(qualifier) = &pattern.qualifier
+                    && qualifier.lexeme() != name
+                {
+                    return false;
+                }
+                match self
+                    .enum_variant_payload(&name, variant)
+                    .map(<[Ty]>::to_vec)
+                {
+                    Some(payload) => Some(payload),
+                    None if pattern.qualifier.is_some() || !pattern.bindings.is_empty() => {
+                        self.errors.push(TypeError {
+                            code: None,
+                            help: None,
+                            message: format!("`{name}` has no variant `{variant}` to match here"),
+                            span: pattern.variant.span,
+                        });
+                        None
+                    }
+                    None => return false,
+                }
+            }
+            // A bare name is only a variant head for a result scrutinee; any
+            // other bare or member head stays an ordinary value case.
+            Some(other) => {
+                if pattern.bindings.is_empty() {
+                    return false;
+                }
                 self.errors.push(TypeError {
                     code: None,
                     help: None,
@@ -755,30 +945,51 @@ impl TypeChecker {
                 });
                 None
             }
-            // Scrutinee type unknown (earlier errors): accept either
-            // variant and let the binder stay unchecked.
-            (None, "Ok" | "Err") => None,
-            (None, _) => {
-                return;
+            // Scrutinee type unknown (earlier errors): accept the result
+            // variants and let the binders stay unchecked.
+            None if pattern.qualifier.is_none() && matches!(variant, "Ok" | "Err") => {
+                Some(vec![Ty::Any])
             }
+            None => return false,
         };
 
-        if let Some(binding) = &pattern.binding {
-            self.symbols.push_scope();
-            let binder_ty = payload_ty.unwrap_or(Ty::Any);
-            if let Err(msg) = self.symbols.define(binding.lexeme(), binder_ty) {
+        if let Some(binders) = &binders
+            && binders.len() != pattern.bindings.len()
+        {
+            self.errors.push(TypeError {
+                code: None,
+                help: None,
+                message: format!(
+                    "variant `{variant}` binds {} value(s), got {}",
+                    binders.len(),
+                    pattern.bindings.len()
+                ),
+                span: pattern.variant.span,
+            });
+        }
+
+        self.symbols.push_scope();
+        for (index, binding) in pattern.bindings.iter().enumerate() {
+            if binding.lexeme() == "_" {
+                continue;
+            }
+            let binder_ty = binders
+                .as_ref()
+                .and_then(|types| types.get(index))
+                .cloned()
+                .unwrap_or(Ty::Any);
+            if let Err(message) = self.symbols.define(binding.lexeme(), binder_ty) {
                 self.errors.push(TypeError {
                     code: None,
                     help: None,
-                    message: msg,
+                    message,
                     span: binding.span,
                 });
             }
-            self.check_statement(&case.body);
-            self.symbols.pop_scope();
-        } else {
-            self.check_statement(&case.body);
         }
+        self.check_statement(&case.body);
+        self.symbols.pop_scope();
+        true
     }
 
     fn check_statement(&mut self, stmt: &Stmt) {
@@ -1099,14 +1310,15 @@ impl TypeChecker {
             } => {
                 let scrutinee_ty = self.check_expression(expression);
                 for case in cases {
-                    match &case.pattern {
+                    let handled = match &case.pattern {
                         Some(pattern) => {
                             self.check_pattern_case(case, pattern, scrutinee_ty.clone())
                         }
-                        None => {
-                            let _ = self.check_expression(&case.value);
-                            self.check_statement(&case.body);
-                        }
+                        None => false,
+                    };
+                    if !handled {
+                        let _ = self.check_expression(&case.value);
+                        self.check_statement(&case.body);
                     }
                 }
                 if let Some(default) = default_case {
@@ -2175,8 +2387,8 @@ impl TypeChecker {
                         if lex == "_" {
                             return Some(Ty::Any);
                         }
-                        if self.enum_members.contains(lex) {
-                            return Some(Ty::Int);
+                        if let Some(enum_name) = self.enum_members.get(lex) {
+                            return Some(self.enum_value_ty(enum_name));
                         }
                         self.errors.push(TypeError {
                             code: None,
@@ -2256,8 +2468,8 @@ impl TypeChecker {
                     }
                     Some(declared.clone())
                 } else {
-                    if self.enum_members.contains(name.lexeme()) {
-                        return Some(Ty::Int);
+                    if let Some(enum_name) = self.enum_members.get(name.lexeme()) {
+                        return Some(self.enum_value_ty(enum_name));
                     }
                     self.errors.push(TypeError {
                         code: None,
@@ -3550,6 +3762,10 @@ impl TypeChecker {
     }
 
     fn check_call(&mut self, callee: &Expr, arguments: &[Expr]) -> Option<Ty> {
+        if let Some(value_ty) = self.check_enum_construction(callee, arguments) {
+            return Some(value_ty);
+        }
+
         let is_ffi_call =
             matches!(callee, Expr::Variable { name } if self.ffi_functions.contains(name.lexeme()));
         if let Expr::Variable { name } = callee

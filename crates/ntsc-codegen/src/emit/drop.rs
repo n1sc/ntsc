@@ -274,6 +274,12 @@ pub(crate) fn emit_drop_value<'ctx>(
         return Ok(());
     }
 
+    if let Ty::Class(name) = &val.ntsc_type
+        && super::enum_cell::is_payload_enum(name)
+    {
+        return super::enum_cell::emit_drop_enum_value(fn_ctx, name, val);
+    }
+
     if let Ty::Class(name) = &val.ntsc_type {
         // The instance struct itself is left in place: stack-allocated
         // objects must never be freed, and a heap object may be aliased
@@ -659,6 +665,12 @@ pub(crate) fn expr_is_fresh<'ctx>(
         // receiver is dropped, so their consumers adopt the resulting value.
         // A field read through a live slot or a returned view stays borrowed.
         Expr::Member { object, .. } => {
+            // `Shape.Empty` builds a fresh cell holding a unit variant.
+            if let Expr::Variable { name } = object.as_ref()
+                && super::enum_cell::is_payload_enum(name.lexeme())
+            {
+                return true;
+            }
             let Some(receiver_ty) = member_receiver_type(fn_ctx, object) else {
                 return false;
             };
@@ -709,9 +721,17 @@ pub(crate) fn expr_is_fresh<'ctx>(
             // the callee's body has been emitted yet: a forward reference
             // (callee defined later in the module) is still a fresh call.
             Expr::Variable { name } => {
-                is_user_function(name.lexeme()) || is_class_type(name.lexeme())
+                is_user_function(name.lexeme())
+                    || is_class_type(name.lexeme())
+                    || super::enum_cell::is_variant_name(name.lexeme())
             }
             Expr::Member { object, property } => {
+                // `Shape.Circle(1.0)` / `Shape.Empty` build a fresh cell.
+                if let Expr::Variable { name } = object.as_ref()
+                    && super::enum_cell::is_payload_enum(name.lexeme())
+                {
+                    return true;
+                }
                 let prop = property.lexeme();
                 match object.as_ref() {
                     Expr::Variable { name } if name.lexeme() == "arrays" => {
@@ -895,7 +915,15 @@ pub(crate) fn prepare_call_args<'ctx>(
             continue;
         }
 
-        if matches!(val.ntsc_type, Ty::Class(_)) && !matches!(param_ty, Some(Ty::View(..))) {
+        // A payload enum is an owned heap cell, not a shared class instance,
+        // so it passes by value like a result or option handle.
+        let payload_enum =
+            matches!(&val.ntsc_type, Ty::Class(name) if super::enum_cell::is_payload_enum(name));
+
+        if matches!(val.ntsc_type, Ty::Class(_))
+            && !payload_enum
+            && !matches!(param_ty, Some(Ty::View(..)))
+        {
             // A class instance must not be passed by value: the pointer
             // would be copied and both sides would treat it as their own.
             let class_name = if let Ty::Class(name) = &val.ntsc_type {
@@ -1034,6 +1062,9 @@ pub(crate) fn copy_owned_value<'ctx>(
             clone_string_value(fn_ctx, val)?,
             val.ntsc_type.clone(),
         )),
+        Ty::Class(name) if super::enum_cell::is_payload_enum(name) => {
+            super::enum_cell::emit_copy_enum_value(fn_ctx, name, val)
+        }
         // A view borrows its value: materialize an independent owned copy
         // from the inner type. Aliasing the borrowed handle would let the
         // copy's drop reclaim the original out from under its owner.

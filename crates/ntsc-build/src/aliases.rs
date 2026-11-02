@@ -293,21 +293,26 @@ impl Rewriter<'_> {
                     .into_iter()
                     .map(|c| {
                         let mut pat = c.pattern;
-                        if let Some(p) = &mut pat
-                            && let Some(binding) = &p.binding
-                        {
-                            let b = binding.clone();
-                            self.scopes
-                                .last_mut()
-                                .unwrap()
-                                .insert(b.lexeme().to_string());
-                            let _ = b;
+                        if let Some(p) = &mut pat {
+                            // Binders are locals: they must not be rewritten
+                            // as module-level aliases.
+                            for binding in &p.bindings {
+                                self.scopes
+                                    .last_mut()
+                                    .unwrap()
+                                    .insert(binding.lexeme().to_string());
+                            }
                         }
                         ntsc_ast::stmt::MatchCase {
                             value: self.expr(c.value),
                             pattern: pat.map(|p| ntsc_ast::stmt::MatchPattern {
+                                qualifier: p.qualifier.as_ref().map(|q| self.id_token(q, false)),
                                 variant: self.id_token(&p.variant, false),
-                                binding: p.binding.map(|b| self.id_token(&b, true)),
+                                bindings: p
+                                    .bindings
+                                    .into_iter()
+                                    .map(|b| self.id_token(&b, true))
+                                    .collect(),
                             }),
                             guard: c.guard.map(|g| self.expr(g)),
                             body: self.stmt_push(c.body),

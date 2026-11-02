@@ -416,32 +416,34 @@ pub(crate) fn emit_match<'ctx>(
     let expr_val = emit_expression(fn_ctx, expression)?;
     let current_fn = fn_ctx.function;
 
-    // Variant patterns (`Ok(v)` / `Err(e)`) dispatch on the result cell's
-    // tag and bind the payload for the arm body.
-    let scrutinee = match &expr_val.ntsc_type {
-        Ty::Result { ok, err } => Some(((**ok).clone(), (**err).clone())),
-        _ => None,
-    };
+    // Variant patterns dispatch on the scrutinee's tag and bind its payload
+    // for the arm body: result cells expose `Ok` / `Err`, and a
+    // payload-carrying enum exposes its declared cases.
     if cases.iter().any(|case| case.pattern.is_some()) {
         if fn_ctx.future_base.is_some() {
             return Err(crate::CodegenError::LLVMError(
                 "match variant patterns are not supported inside async functions yet".into(),
             ));
         }
-        let Some((ok_ty, err_ty)) = scrutinee else {
-            return Err(crate::CodegenError::LLVMError(
-                "match variant patterns require a `result[.., ..]` scrutinee".into(),
-            ));
-        };
-        return emit_match_with_patterns(
-            fn_ctx,
-            expression,
-            cases,
-            default_case,
-            expr_val,
-            ok_ty,
-            err_ty,
-        );
+        let scrutinee_ty = expr_val.ntsc_type.clone();
+        match &scrutinee_ty {
+            Ty::Result { ok, err } => {
+                return emit_match_with_patterns(
+                    fn_ctx,
+                    expression,
+                    cases,
+                    default_case,
+                    expr_val,
+                    (**ok).clone(),
+                    (**err).clone(),
+                );
+            }
+            Ty::Class(name) if super::enum_cell::is_payload_enum(name) => {
+                let name = name.clone();
+                return emit_match_enum(fn_ctx, expression, cases, default_case, expr_val, &name);
+            }
+            _ => {}
+        }
     }
 
     let merge_bb = fn_ctx.context.append_basic_block(current_fn, "match.merge");
@@ -734,6 +736,195 @@ fn emit_match_with_patterns<'ctx>(
     Ok(())
 }
 
+/// How one arm of an enum match selects its variant.
+enum EnumArm {
+    Wildcard,
+    Tag(i64),
+}
+
+/// Lower a match whose scrutinee is a payload-carrying enum. Each variant
+/// arm tests the cell's tag, binds the active payload words (heap payloads
+/// are deep-copied so the arm's binder owns its value while the scrutinee
+/// keeps its own), runs an optional guard, then executes the body. Arms that
+/// cannot match an enum value are skipped. A fresh (temporary) scrutinee is
+/// dropped on the fall-through path; an owned one stays alive for its
+/// variable.
+fn emit_match_enum<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    expression: &Expr,
+    cases: &[ntsc_ast::stmt::MatchCase],
+    default_case: &Option<Box<Stmt>>,
+    expr_val: TypedValue<'ctx>,
+    enum_name: &str,
+) -> Result<(), crate::CodegenError> {
+    let current_fn = fn_ctx.function;
+    let cell = super::enum_cell::cell_pointer(fn_ctx, expr_val.value)?;
+    let fresh_scrutinee = expr_is_fresh(fn_ctx, expression, &expr_val);
+
+    let merge_bb = fn_ctx.context.append_basic_block(current_fn, "match.merge");
+
+    for (i, case) in cases.iter().enumerate() {
+        let arm = match &case.pattern {
+            Some(pattern) => {
+                match super::enum_cell::variant_tag(enum_name, pattern.variant.lexeme()) {
+                    Some(tag) => EnumArm::Tag(tag),
+                    None => continue,
+                }
+            }
+            None => {
+                let is_wildcard = matches!(
+                    &case.value,
+                    Expr::Variable { name } if name.lexeme() == "_"
+                );
+                if is_wildcard {
+                    EnumArm::Wildcard
+                } else {
+                    continue;
+                }
+            }
+        };
+
+        let case_bb = fn_ctx
+            .context
+            .append_basic_block(current_fn, &format!("match.case{i}"));
+        let next_bb = fn_ctx
+            .context
+            .append_basic_block(current_fn, &format!("match.next{i}"));
+
+        match arm {
+            EnumArm::Tag(tag) => {
+                let actual = super::enum_cell::enum_tag(fn_ctx, enum_name, cell)?;
+                let matched = fn_ctx.builder.build_int_compare(
+                    IntPredicate::EQ,
+                    actual,
+                    fn_ctx.context.i64_type().const_int(tag as u64, false),
+                    "matchtag",
+                )?;
+                fn_ctx
+                    .builder
+                    .build_conditional_branch(matched, case_bb, next_bb)?;
+            }
+            EnumArm::Wildcard => {
+                fn_ctx
+                    .builder
+                    .build_unconditional_branch(case_bb)
+                    .map_err(|e| crate::CodegenError::LLVMError(format!("match: {e}")))?;
+            }
+        }
+
+        fn_ctx.builder.position_at_end(case_bb);
+        let outer_scope = fn_ctx.begin_block_scope();
+        if let Some(pattern) = &case.pattern {
+            bind_enum_payloads(fn_ctx, cell, enum_name, pattern)?;
+        }
+
+        // The arm's guard runs after its binders are in scope; a false guard
+        // falls through to the next arm.
+        if let Some(guard) = &case.guard {
+            let guard_val = emit_expression(fn_ctx, guard)?;
+            let guard_cond = match guard_val.value {
+                BasicValueEnum::IntValue(i) if guard_val.ntsc_type == Ty::Bool => i,
+                _ => {
+                    return Err(crate::CodegenError::LLVMError(format!(
+                        "match guard must be `bool`, got `{}`",
+                        guard_val.ntsc_type
+                    )));
+                }
+            };
+            let body_bb = fn_ctx
+                .context
+                .append_basic_block(current_fn, &format!("match.armbody{i}"));
+            fn_ctx
+                .builder
+                .build_conditional_branch(guard_cond, body_bb, next_bb)?;
+            fn_ctx.builder.position_at_end(body_bb);
+        }
+
+        emit_statement_in_function(fn_ctx, &case.body)?;
+        fn_ctx.end_block_scope(outer_scope)?;
+        branch_to_merge_releasing_enum(fn_ctx, fresh_scrutinee, &expr_val, enum_name, merge_bb)?;
+
+        fn_ctx.builder.position_at_end(next_bb);
+    }
+
+    if let Some(default) = default_case {
+        emit_statement_in_function(fn_ctx, default)?;
+    }
+
+    branch_to_merge_releasing_enum(fn_ctx, fresh_scrutinee, &expr_val, enum_name, merge_bb)?;
+
+    fn_ctx.builder.position_at_end(merge_bb);
+    Ok(())
+}
+
+/// Bind an enum arm's payload words to its binders. Heap payloads are
+/// deep-copied so the binder owns its value independently of the cell;
+/// scalars move by value. `_` skips a slot.
+fn bind_enum_payloads<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    cell: PointerValue<'ctx>,
+    enum_name: &str,
+    pattern: &ntsc_ast::stmt::MatchPattern,
+) -> Result<(), crate::CodegenError> {
+    let Some(payload) = super::enum_cell::variant_payloads(enum_name, pattern.variant.lexeme())
+    else {
+        return Ok(());
+    };
+    for (index, binding) in pattern.bindings.iter().enumerate() {
+        if binding.lexeme() == "_" {
+            continue;
+        }
+        let Some(payload_ty) = payload.get(index) else {
+            continue;
+        };
+        let loaded = super::enum_cell::load_payload(fn_ctx, enum_name, cell, index, payload_ty)?;
+        let owned = if payload_is_heap(payload_ty) {
+            emit_copy_value(fn_ctx, TypedValue::new(loaded, payload_ty.clone()))?.value
+        } else {
+            loaded
+        };
+        let ptr = fn_ctx.alloca(binding.lexeme(), payload_ty)?;
+        // The entry slot backs this binding on every pass of an enclosing
+        // loop; release the previous copy before rebinding.
+        if fn_ctx.future_base.is_none() {
+            emit_drop_slot_value(fn_ctx, ptr, payload_ty)?;
+        }
+        fn_ctx.builder.build_store(ptr, owned)?;
+        fn_ctx.define_var(binding.lexeme(), ptr, payload_ty.clone());
+        fn_ctx.mark_owned_if_heap(binding.lexeme(), payload_ty);
+    }
+    Ok(())
+}
+
+/// Branch to the match's merge block, first releasing a fresh temporary
+/// enum scrutinee cell.
+fn branch_to_merge_releasing_enum<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    fresh_scrutinee: bool,
+    expr_val: &TypedValue<'ctx>,
+    enum_name: &str,
+    merge_bb: inkwell::basic_block::BasicBlock<'ctx>,
+) -> Result<(), crate::CodegenError> {
+    let terminated = fn_ctx
+        .builder
+        .get_insert_block()
+        .is_none_or(|block| block.get_terminator().is_some());
+    if fresh_scrutinee && !terminated {
+        super::enum_cell::emit_drop_enum_value(fn_ctx, enum_name, expr_val)?;
+    }
+    if fn_ctx
+        .builder
+        .get_insert_block()
+        .is_none_or(|block| block.get_terminator().is_none())
+    {
+        fn_ctx
+            .builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| crate::CodegenError::LLVMError(format!("match: {e}")))?;
+    }
+    Ok(())
+}
+
 /// Branch to the match's merge block, first releasing a fresh temporary
 /// scrutinee cell. Every path into the merge block funnels through here so
 /// a matched arm cannot leave the cell behind; paths ending in `return` or
@@ -771,9 +962,12 @@ fn bind_pattern_payload<'ctx>(
     ok_ty: &Ty,
     err_ty: &Ty,
 ) -> Result<(), crate::CodegenError> {
-    let Some(binding) = &pattern.binding else {
+    let Some(binding) = pattern.bindings.first() else {
         return Ok(());
     };
+    if binding.lexeme() == "_" {
+        return Ok(());
+    }
     let want_ok = pattern.variant.lexeme() == "Ok";
     let payload_ty = if want_ok {
         ok_ty.clone()

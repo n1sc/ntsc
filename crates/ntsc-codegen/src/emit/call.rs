@@ -819,12 +819,48 @@ fn rust_member_call_target(callee: &Expr) -> Option<(String, String, String)> {
     Some((crate_name, bridge_name, path))
 }
 
+/// The payload-carrying enum variant a call head constructs, if any.
+fn enum_call_target<'ctx>(
+    fn_ctx: &FunctionContext<'ctx, '_>,
+    callee: &Expr,
+) -> Option<(String, String)> {
+    match callee {
+        Expr::Member { object, property } => {
+            let Expr::Variable { name } = &**object else {
+                return None;
+            };
+            let enum_name = name.lexeme();
+            if !super::enum_cell::is_payload_enum(enum_name) {
+                return None;
+            }
+            super::enum_cell::variant_payloads(enum_name, property.lexeme())?;
+            Some((enum_name.to_string(), property.lexeme().to_string()))
+        }
+        Expr::Variable { name } => {
+            if fn_ctx.module.get_function(name.lexeme()).is_some() {
+                return None;
+            }
+            let enum_name =
+                super::ENUM_VARIANT_OWNERS.with(|map| map.borrow().get(name.lexeme()).cloned())?;
+            Some((enum_name, name.lexeme().to_string()))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn emit_call<'ctx>(
     fn_ctx: &mut FunctionContext<'ctx, '_>,
     callee: &Expr,
     arguments: &[Expr],
 ) -> Result<TypedValue<'ctx>, crate::CodegenError> {
     let arguments = flatten_call_arguments(arguments);
+
+    // `Shape.Circle(1.0)` / `Circle(1.0)` constructs a payload enum cell.
+    // A declared function of the same name shadows a bare variant.
+    if let Some((enum_name, variant)) = enum_call_target(fn_ctx, callee) {
+        let values = emit_call_arguments(fn_ctx, &arguments)?;
+        return super::enum_cell::box_enum_value(fn_ctx, &enum_name, &variant, &arguments, &values);
+    }
 
     // `memory.raw_address(reference)` reinterprets a checked reference as a
     // raw pointer. Both are the same machine address, so this only changes

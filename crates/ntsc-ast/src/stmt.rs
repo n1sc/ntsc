@@ -257,23 +257,65 @@ pub struct ElifBranch {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchCase {
     pub value: Expr,
-    /// Present when the arm head is a variant pattern like `Ok(v)` or
-    /// `Err(e)`: the arm destructures an enum-like value and binds its
-    /// payload to `binding` for the arm body. `value` still holds the raw
-    /// parsed call form so generic AST consumers keep working, but checking
-    /// and lowering branch on this field instead.
+    /// Present when the arm head has variant shape, e.g. `Ok(v)`,
+    /// `Shape.Circle(r)`, or `Shape.Empty`. Whether the arm really
+    /// destructures is decided against the scrutinee's type: when it does
+    /// not, `value` is checked and compared as an ordinary expression.
     pub pattern: Option<MatchPattern>,
     pub guard: Option<Expr>,
     pub body: Stmt,
     pub case_span: Span,
 }
 
-/// A destructuring match arm head: `VariantName` or `VariantName(binder)`.
-/// A `_` binder matches the variant while ignoring its payload.
+/// A variant-shaped match arm head: `Variant`, `Variant(a, b)`,
+/// `Enum.Variant`, or `Enum.Variant(a, b)`. A `_` binding matches the
+/// variant while ignoring that payload slot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchPattern {
+    /// The enum name in `Enum.Variant` form; `None` for a bare variant.
+    pub qualifier: Option<Token>,
     pub variant: Token,
-    pub binding: Option<Token>,
+    pub bindings: Vec<Token>,
+}
+
+/// Recognize the syntactic shape of a variant head. This only reports
+/// shape: a bare name, a member access, or a call whose callee is one of
+/// those and whose arguments are all names. Type checking decides whether
+/// the head names a variant of the scrutinee's type.
+pub fn variant_head(value: &Expr) -> Option<MatchPattern> {
+    match value {
+        Expr::Variable { name } if name.lexeme() != "_" => Some(MatchPattern {
+            qualifier: None,
+            variant: name.clone(),
+            bindings: Vec::new(),
+        }),
+        Expr::Member { object, property } => {
+            let Expr::Variable { name } = &**object else {
+                return None;
+            };
+            Some(MatchPattern {
+                qualifier: Some(name.clone()),
+                variant: property.clone(),
+                bindings: Vec::new(),
+            })
+        }
+        Expr::Call {
+            callee, arguments, ..
+        } => {
+            let mut head = variant_head(callee)?;
+            if !head.bindings.is_empty() {
+                return None;
+            }
+            for argument in arguments {
+                let Expr::Variable { name } = argument else {
+                    return None;
+                };
+                head.bindings.push(name.clone());
+            }
+            Some(head)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

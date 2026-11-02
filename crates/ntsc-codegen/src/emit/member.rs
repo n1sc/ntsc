@@ -393,6 +393,21 @@ pub(crate) fn emit_member_access<'ctx>(
     obj_val: &TypedValue<'ctx>,
     property: &ntsc_ast::token::Token,
 ) -> Result<TypedValue<'ctx>, crate::CodegenError> {
+    if let Ty::Class(name) = &obj_val.ntsc_type
+        && super::enum_cell::is_payload_enum(name)
+        && let Some(payload) = super::enum_cell::variant_payloads(name, property.lexeme())
+    {
+        if !payload.is_empty() {
+            return Err(crate::CodegenError::LLVMError(format!(
+                "enum variant `{name}.{}` carries {} payload value(s); call it with `{name}.{}(...)`",
+                property.lexeme(),
+                payload.len(),
+                property.lexeme()
+            )));
+        }
+        return super::enum_cell::box_enum_value(fn_ctx, name, property.lexeme(), &[], &[]);
+    }
+
     if let Ty::Class(name) = &obj_val.ntsc_type {
         let value = ENUM_VALUES.with(|map| {
             map.borrow()

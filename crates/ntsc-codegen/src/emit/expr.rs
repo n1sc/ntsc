@@ -1337,6 +1337,9 @@ pub(crate) fn emit_copy_value<'ctx>(
         // Tuples are stack-allocated value types — no deep copy needed.
         Ty::Tuple(_) => return Ok(tv),
         Ty::Class(name) => {
+            if super::enum_cell::is_payload_enum(name) {
+                return super::enum_cell::emit_copy_enum_value(fn_ctx, name, &tv);
+            }
             let name = name.clone();
             return emit_copy_class_value(fn_ctx, &name, tv);
         }
