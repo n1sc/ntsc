@@ -165,14 +165,17 @@ pub(crate) const COMMANDS: &[CommandDoc] = &[
     },
     CommandDoc {
         name: "docs",
-        usage: "ntsc docs [page]",
+        usage: "ntsc docs [--list | --print <page>] [page]",
         summary: "Browse the documentation",
         details: &[
             "Reads docs/ from the checkout when available, otherwise the embedded copy.",
             "With a page name or path, opens that page.",
             "When stdout is not a terminal, prints the index or the page body.",
         ],
-        options: &[],
+        options: &[
+            ("--list", "Print the page index and exit"),
+            ("--print <page>", "Print one page body and exit"),
+        ],
     },
     CommandDoc {
         name: "version",
@@ -237,7 +240,7 @@ fn main() {
 
     let result = match command {
         Command::Help(target) => print_help(target.as_deref()),
-        Command::Docs(page) => cmd_docs(page.as_deref()),
+        Command::Docs { page, mode } => cmd_docs(page.as_deref(), mode),
         Command::Version => {
             print_version();
             Ok(())
@@ -341,9 +344,19 @@ fn report(error: CliError, json: bool) {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocsMode {
+    Browse,
+    List,
+    Print,
+}
+
 enum Command {
     Help(Option<String>),
-    Docs(Option<String>),
+    Docs {
+        page: Option<String>,
+        mode: DocsMode,
+    },
     Version,
     Init(Option<String>),
     Build,
@@ -365,6 +378,8 @@ fn parse_args() -> Result<(Command, CliOptions), String> {
     let mut command: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
     let mut forwarded: Vec<String> = Vec::new();
+    let mut list_docs = false;
+    let mut print_doc = false;
 
     for arg in args {
         if let Some(name) = command.as_deref() {
@@ -378,6 +393,19 @@ fn parse_args() -> Result<(Command, CliOptions), String> {
                 }
                 forwarded.push(arg);
                 continue;
+            }
+            if name == "docs" {
+                match arg.as_str() {
+                    "--list" => {
+                        list_docs = true;
+                        continue;
+                    }
+                    "--print" => {
+                        print_doc = true;
+                        continue;
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -418,7 +446,24 @@ fn parse_args() -> Result<(Command, CliOptions), String> {
             Command::Version
         }
         "init" => Command::Init(positional.into_iter().next()),
-        "docs" => Command::Docs(positional.into_iter().next()),
+        "docs" => {
+            let mode = match (list_docs, print_doc) {
+                (true, true) => {
+                    return Err("docs accepts only one of --list or --print".to_string());
+                }
+                (true, false) => DocsMode::List,
+                (false, true) => DocsMode::Print,
+                (false, false) => DocsMode::Browse,
+            };
+            let page = positional.into_iter().next();
+            if mode == DocsMode::Print && page.is_none() {
+                return Err("docs --print needs a page name".to_string());
+            }
+            if mode == DocsMode::List && page.is_some() {
+                return Err("docs --list takes no page name".to_string());
+            }
+            Command::Docs { page, mode }
+        }
         "build" => Command::Build,
         "test" => Command::Test,
         "run" => Command::Run,
@@ -653,7 +698,7 @@ impl BuildMode {
 
 /// Open the built-in documentation browser, or print docs when stdout is
 /// not a terminal.
-fn cmd_docs(page: Option<&str>) -> Result<(), CliError> {
+fn cmd_docs(page: Option<&str>, mode: DocsMode) -> Result<(), CliError> {
     let pages = docs::load_docs();
     if pages.is_empty() {
         return Err(CliError::Plain(
@@ -673,18 +718,36 @@ fn cmd_docs(page: Option<&str>) -> Result<(), CliError> {
         None => None,
     };
 
+    if mode == DocsMode::List {
+        return print_doc_index(&pages);
+    }
+
+    if mode == DocsMode::Print {
+        let index =
+            index.ok_or_else(|| CliError::Plain("docs --print needs a page name".into()))?;
+        io::stdout()
+            .lock()
+            .write_all(pages[index].body.as_bytes())?;
+        return Ok(());
+    }
+
     if ui::interactive_available() {
         return ui::docs::run_docs(pages, index).map_err(CliError::from);
     }
 
-    let mut out = io::stdout().lock();
     match index {
-        Some(index) => out.write_all(pages[index].body.as_bytes())?,
-        None => {
-            for doc in &pages {
-                writeln!(out, "{:<44} {}", doc.title, doc.path)?;
-            }
-        }
+        Some(index) => io::stdout()
+            .lock()
+            .write_all(pages[index].body.as_bytes())?,
+        None => print_doc_index(&pages)?,
+    }
+    Ok(())
+}
+
+fn print_doc_index(pages: &[docs::DocPage]) -> Result<(), CliError> {
+    let mut out = io::stdout().lock();
+    for doc in pages {
+        writeln!(out, "{:<44} {}", doc.title, doc.path)?;
     }
     Ok(())
 }

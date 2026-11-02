@@ -23,7 +23,7 @@ Flags may appear before or after the command.
 | `ntsc clean --cache [--dry-run] [--max-age <days>] [--force-rebuild]` | Prune stale global Rust adaptor caches. |
 | `ntsc clean --tmp [--dry-run]` | Remove stale `/tmp/ntsc_*` compiler scratch trees. |
 | `ntsc watch` | Rebuild whenever a source file or `neutron.toml` changes. |
-| `ntsc docs [page]` | Browse the embedded documentation with search, or print a page when stdout is not a terminal. |
+| `ntsc docs [page]` | Browse the embedded documentation with search; `--list` prints the index and `--print <page>` writes one page to stdout. |
 | `ntsc graph` | Print the module dependency graph as DOT. |
 | `ntsc cargo doc <crate> [--no-open]` | Generate Neutron-facing HTML docs for a Rust adaptor; print a terminal summary and open the page unless `--no-open` is given. Hyphenated package names use underscore namespaces in Neutron. |
 | `ntsc cargo coverage [<crate>]` | Report export-manifest coverage for all direct Rust adaptors, or for one named crate. |
@@ -92,6 +92,8 @@ Press `/` to search, `Enter` to keep the filter, `Esc` to clear it,
 scroll, and `q` to quit. `ntsc docs <page>` opens a page
 directly by title, path, or path without `.md`. When stdout is not a terminal,
 `ntsc docs` prints the page index and `ntsc docs <page>` prints the raw page.
+`ntsc docs --list` and `ntsc docs --print <page>` select that output
+explicitly, so they work in a terminal and in scripts alike.
 
 ## The build manifest
 
