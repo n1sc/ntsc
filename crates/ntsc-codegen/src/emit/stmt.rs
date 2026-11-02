@@ -26,6 +26,7 @@ pub(crate) fn emit_statement_in_function<'ctx>(
         return super::async_sm::emit_go_program_spawn(fn_ctx, stmt);
     }
     match stmt {
+        Stmt::Private { statement } => return emit_statement_in_function(fn_ctx, statement),
         Stmt::Say { expression, .. } => {
             emit_say_call(fn_ctx, expression)?;
         }

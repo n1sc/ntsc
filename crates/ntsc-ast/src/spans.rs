@@ -577,6 +577,7 @@ fn shift_stmt(stmt: &mut Stmt, base: usize) {
             shift_stmt(statement, base)
         }
         Stmt::Quiet { body, .. } => shift_stmt(body, base),
+        Stmt::Private { statement } => shift_stmt(statement, base),
         Stmt::Destructure {
             names, initializer, ..
         } => {

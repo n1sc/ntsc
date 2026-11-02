@@ -130,6 +130,7 @@ impl Linter {
 
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
+            Stmt::Private { statement } => self.check_stmt(statement),
             Stmt::Var {
                 name, initializer, ..
             } => {

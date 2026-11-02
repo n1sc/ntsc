@@ -199,6 +199,7 @@ impl<'src> Lexer<'src> {
             RawToken::Defer => Token::new(TokenKind::Defer, span),
             RawToken::Unsafe => Token::new(TokenKind::Unsafe, span),
             RawToken::Quiet => Token::new(TokenKind::Quiet, span),
+            RawToken::Private => Token::new(TokenKind::Private, span),
             RawToken::Enum => Token::new(TokenKind::Enum, span),
             RawToken::Type => Token::new(TokenKind::Type, span),
             RawToken::Trait => Token::new(TokenKind::Trait, span),

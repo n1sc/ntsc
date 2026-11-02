@@ -101,6 +101,7 @@ pub enum TokenKind {
     Unsafe,
 
     Quiet,
+    Private,
     Enum,
     Type,
     Trait,
@@ -202,6 +203,7 @@ impl TokenKind {
             TokenKind::Defer => Some("defer"),
             TokenKind::Unsafe => Some("unsafe"),
             TokenKind::Quiet => Some("quiet"),
+            TokenKind::Private => Some("private"),
             TokenKind::Enum => Some("enum"),
             TokenKind::Type => Some("type"),
             TokenKind::Trait => Some("trait"),

@@ -130,6 +130,7 @@ impl Resolver {
 
     fn resolve_statement(&mut self, statement: &Stmt) {
         match statement {
+            Stmt::Private { statement } => self.resolve_statement(statement),
             Stmt::Expression { expression } | Stmt::Throw { value: expression } => {
                 self.resolve_expression(expression);
             }

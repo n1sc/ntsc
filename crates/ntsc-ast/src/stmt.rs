@@ -206,6 +206,13 @@ pub enum Stmt {
         alias: Option<Token>,
     },
 
+    /// `private fun ...`, `private class ...` — the declaration is visible
+    /// only inside its own source file. The module loader records the name
+    /// and removes this wrapper before the rest of the compiler runs.
+    Private {
+        statement: Box<Stmt>,
+    },
+
     Enum {
         name: Token,
         generic_params: Vec<GenericParam>,
@@ -245,6 +252,26 @@ pub enum Stmt {
         name: Token,
         body: Vec<Stmt>,
     },
+}
+
+/// The name a top-level declaration introduces, if `stmt` is one that
+/// declares a symbol. Used by module visibility to find the name behind a
+/// `private` wrapper.
+pub fn declaration_name(stmt: &Stmt) -> Option<&Token> {
+    match stmt {
+        Stmt::Function { name, .. }
+        | Stmt::AsyncFunction { name, .. }
+        | Stmt::Class { name, .. }
+        | Stmt::Enum { name, .. }
+        | Stmt::TypeAlias { name, .. }
+        | Stmt::Trait { name, .. } => Some(name),
+        Stmt::Var {
+            name,
+            is_static: true,
+            ..
+        } => Some(name),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -994,6 +994,7 @@ impl TypeChecker {
 
     fn check_statement(&mut self, stmt: &Stmt) {
         match stmt {
+            Stmt::Private { statement } => self.check_statement(statement),
             Stmt::Function {
                 name,
                 params,

@@ -195,6 +195,8 @@ pub(crate) enum RawToken {
     Unsafe,
     #[token("quiet")]
     Quiet,
+    #[token("private")]
+    Private,
     #[token("enum")]
     Enum,
     #[token("type")]

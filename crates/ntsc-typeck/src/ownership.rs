@@ -775,6 +775,7 @@ impl OwnershipChecker {
     fn check_stmt(&mut self, stmt: &Stmt) {
         self.clear_statement_views();
         match stmt {
+            Stmt::Private { statement } => self.check_stmt(statement),
             Stmt::Var {
                 name,
                 type_annotation,
@@ -2214,6 +2215,7 @@ fn deep_stmt_uses(stmt: &Stmt) -> HashSet<String> {
 
 pub(crate) fn collect_stmt_uses(stmt: &Stmt, uses: &mut HashSet<String>) {
     match stmt {
+        Stmt::Private { statement } => collect_stmt_uses(statement, uses),
         Stmt::Var { initializer, .. } => {
             if let Some(init) = initializer {
                 collect_expr_uses(init, uses);

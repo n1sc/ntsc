@@ -578,6 +578,7 @@ impl Indexer {
     /// name-resolution order.
     fn declare_top_level(&mut self, stmt: &Stmt) {
         match stmt {
+            Stmt::Private { statement } => self.declare_top_level(statement),
             Stmt::Function {
                 name,
                 params,
@@ -849,6 +850,7 @@ impl Indexer {
             self.struct_ranges.push(subtree);
         }
         match stmt {
+            Stmt::Private { statement } => self.walk_stmt(statement, in_class),
             Stmt::Expression { expression } => self.walk_expr(expression),
             Stmt::Say { expression, .. } => self.walk_expr(expression),
             Stmt::Throw { value } => self.walk_expr(value),
@@ -1665,6 +1667,7 @@ fn stmt_subtree_range(stmt: &Stmt) -> (usize, usize) {
 
 fn collect_stmt_spans(stmt: &Stmt, out: &mut Vec<Span>) {
     match stmt {
+        Stmt::Private { statement } => collect_stmt_spans(statement, out),
         Stmt::Expression { expression } | Stmt::Throw { value: expression } => {
             collect_expr_spans(expression, out);
         }

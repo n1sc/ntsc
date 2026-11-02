@@ -26,6 +26,19 @@ declaration  := var-declaration
 `main` is the entry point. It may omit a return type (implicit `void`) or
 return `int`.
 
+Top-level declarations are public: other files reach them by importing the
+file. Prefix a `fun`, `async fun`, `class`, `enum`, `type`, `trait`, or
+`static var` with `private` to keep it inside its own file:
+
+```ntsc
+private fun clamp(int n) -> int {
+    return n
+}
+```
+
+A private name cannot be called from another file, imported selectively, or
+reached through an import alias. `main` cannot be private.
+
 ## Lexical grammar
 
 ### Whitespace and comments
@@ -80,11 +93,11 @@ catch      chan       class      close      continue   copy
 default    do         elif       else       enum       false
 finally    for        from       fun        go         if
 in         int        match      mut        nil        or
-option     own        retry      return     unsafe     say
-shared     slice      static     string     super      test
-this       throw      true       try        use        var
-view       while      quiet      bool       float      array
-object     any        result
+option     own        private    retry      return     unsafe
+say        shared     slice      static     string     super
+test       this       throw      true       try        use
+var        view       while      quiet      bool       float
+array      object     any        result
 ```
 
 `&` and `*` are prefix operators that also form pointer type annotations
@@ -750,7 +763,8 @@ An identifier after `use` names a builtin module or an installed package (all
 builtin module names are predeclared, so builtin `use` is optional). A quoted
 path loads a source file relative to the including file; the `.nt` extension
 is inferred when omitted and the path must stay within the project root.
-See [Modules](../guide/modules.md).
+Selective and aliased imports only reach public declarations; a `private`
+symbol stays inside its own file. See [Modules](../guide/modules.md).
 
 ### Test
 

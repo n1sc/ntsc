@@ -138,6 +138,7 @@ pub(crate) fn expr_mentions_var(expr: &Expr, var: &str) -> bool {
 
 pub(crate) fn stmt_mentions_var(stmt: &Stmt, var: &str) -> bool {
     match stmt {
+        Stmt::Private { statement } => stmt_mentions_var(statement, var),
         Stmt::Expression { expression } | Stmt::Say { expression, .. } => {
             expr_mentions_var(expression, var)
         }
@@ -614,6 +615,7 @@ pub(crate) fn view_borrows_place(expr: &Expr, var: &str, kind: EscapeKind<'_>) -
 
 pub(crate) fn stmt_uses_var_safely(stmt: &Stmt, var: &str, kind: EscapeKind<'_>) -> bool {
     match stmt {
+        Stmt::Private { statement } => stmt_uses_var_safely(statement, var, kind),
         Stmt::Expression { expression } | Stmt::Say { expression, .. } => {
             expr_uses_var_safely(expression, var, ExprCtx::Data, kind)
         }

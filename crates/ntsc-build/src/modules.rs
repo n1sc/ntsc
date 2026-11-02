@@ -17,6 +17,7 @@ use ntsc_ast::stmt::{Program, Stmt};
 use ntsc_ast::token::{Token, TokenKind};
 use ntsc_ast::types::TypeAnnotation;
 use ntsc_diag::Diagnostic;
+use ntsc_diag::Label;
 use ntsc_diag::SourceBuffer;
 use ntsc_diag::codes;
 
@@ -44,6 +45,11 @@ pub enum ModuleLoadError {
 
     /// An imported file could not be resolved against the parsed closure.
     Internal(String),
+
+    /// One or more `private` declarations were referenced from another file.
+    /// Each diagnostic is already attributed to its source file and carries a
+    /// file-local span.
+    Visibility(Vec<Diagnostic>),
 }
 
 impl ModuleLoadError {
@@ -78,6 +84,7 @@ impl ModuleLoadError {
                 .with_code(codes::BUILD),
             ],
             Self::Internal(msg) => vec![Diagnostic::error(msg).with_code(codes::BUILD)],
+            Self::Visibility(errors) => errors,
         }
     }
 }
@@ -108,6 +115,7 @@ impl std::fmt::Display for ModuleLoadError {
                 path.display()
             ),
             Self::Internal(msg) => write!(f, "{msg}"),
+            Self::Visibility(errors) => write!(f, "{} visibility error(s)", errors.len()),
         }
     }
 }
@@ -507,7 +515,9 @@ struct ParsedModule {
 /// `graph.files` is post-order (imports before importer), so each
 /// module's statements are simply appended in that order and file-import
 /// `use` statements are dropped — their content already appears earlier
-/// in the list. Deduplication happened during discovery.
+/// in the list. Deduplication happened during discovery. `private`
+/// declarations are renamed to a file-scoped internal name, and references
+/// that cross a module boundary into a private name become diagnostics.
 ///
 /// Every module's byte offsets are shifted by a cumulative base so that
 /// merged spans are globally unique across files (line/column numbers
@@ -521,11 +531,57 @@ fn merge(
     let mut by_path: HashMap<PathBuf, &mut ParsedModule> =
         modules.iter_mut().map(|m| (m.path.clone(), m)).collect();
 
+    let root = graph
+        .entry
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| graph.entry.clone());
+
+    // First pass: strip `private` wrappers and collect the visibility tables
+    // every module is rewritten against.
+    let mut private: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    let mut private_owners: HashMap<String, PathBuf> = HashMap::new();
+    let mut public_names: HashSet<String> = HashSet::new();
+    for path in &graph.files {
+        let module = by_path.get_mut(path).ok_or_else(|| {
+            ModuleLoadError::Internal(format!(
+                "discovered module `{}` was not parsed",
+                path.display()
+            ))
+        })?;
+        let (statements, private_names) =
+            crate::aliases::split_visibility(std::mem::take(&mut module.program.statements));
+        module.program.statements = statements;
+
+        let own = crate::aliases::top_level_names(&module.program.statements);
+        // Public names of an aliased module are reachable as `alias.name`,
+        // not unqualified, so they do not mask another module's private name.
+        let unqualified = !graph.aliases.contains_key(path);
+        for name in &own {
+            if private_names.contains(name) {
+                private_owners
+                    .entry(name.clone())
+                    .or_insert_with(|| path.clone());
+            } else if unqualified {
+                public_names.insert(name.clone());
+            }
+        }
+        private.insert(path.clone(), private_names);
+    }
+
+    let display_names: HashMap<PathBuf, String> = graph
+        .files
+        .iter()
+        .map(|path| (path.clone(), display_module(&root, path)))
+        .collect();
+
     let mut statements = Vec::new();
     let mut origins = Vec::new();
     let mut bases = Vec::new();
     let mut base = 0usize;
-    for path in &graph.files {
+    let mut visibility_errors = Vec::new();
+
+    for (index, path) in graph.files.iter().enumerate() {
         let module = by_path.get_mut(path).ok_or_else(|| {
             ModuleLoadError::Internal(format!(
                 "discovered module `{}` was not parsed",
@@ -534,19 +590,45 @@ fn merge(
         })?;
         module.program.shift_spans(base);
 
-        // A file imported with `use "F" as arm` has its own symbols namespaced
-        // under `arm::`; bare imports keep their global names.
-        if let Some(alias) = graph.aliases.get(path) {
-            let own = crate::aliases::top_level_names(&module.program.statements);
-            module.program.statements = crate::aliases::namespaced(
-                std::mem::take(&mut module.program.statements),
-                alias,
-                &own,
-            );
-        }
+        let own = crate::aliases::top_level_names(&module.program.statements);
+        let module_private = private.get(path).cloned().unwrap_or_default();
+        let imported = module_imports(&module.program.statements);
+        let aliases = module_aliases(&module.program.statements, path, &root);
+        let renames = crate::aliases::renames(
+            &own,
+            &module_private,
+            graph.aliases.get(path).map(String::as_str),
+            index,
+        );
+        let visibility = crate::aliases::Visibility {
+            path,
+            aliases: &aliases,
+            private: &private,
+            private_owners: &private_owners,
+            public_names: &public_names,
+            imported: &imported,
+            display_names: &display_names,
+            span_base: base,
+        };
+        let (rewritten, errors) = crate::aliases::namespaced(
+            std::mem::take(&mut module.program.statements),
+            &renames,
+            &own,
+            &visibility,
+        );
+        module.program.statements = rewritten;
+        visibility_errors.extend(errors);
 
         for stmt in &module.program.statements {
             let stmt = external_package_use(stmt, path, &graph.edges, &graph.aliases);
+            visibility_errors.extend(check_selective_import(
+                &stmt,
+                path,
+                &root,
+                &private,
+                &display_names,
+                base,
+            ));
             // Bare file imports are dropped (their content is already part of
             // the flat program); aliased imports are preserved so the resolver
             // learns the namespace name.
@@ -570,7 +652,131 @@ fn merge(
         base += module.source.len() + 1;
     }
 
+    if !visibility_errors.is_empty() {
+        return Err(ModuleLoadError::Visibility(visibility_errors));
+    }
+
     Ok((Program { statements }, origins, bases))
+}
+
+/// How a module is named in visibility diagnostics: its path relative to the
+/// project root.
+fn display_module(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+/// Names a module imports selectively through `use (a, b) = from ...`.
+fn module_imports(statements: &[Stmt]) -> HashSet<String> {
+    let mut imported = HashSet::new();
+    for stmt in statements {
+        if let Stmt::Use {
+            imported_symbols, ..
+        } = stmt
+        {
+            imported.extend(
+                imported_symbols
+                    .iter()
+                    .map(|symbol| symbol.lexeme().to_string()),
+            );
+        }
+    }
+    imported
+}
+
+/// Aliases bound in one module: alias name -> imported module. Covers both
+/// `use "file.nt" as name` and vendored packages imported by bare name.
+fn module_aliases(statements: &[Stmt], importer: &Path, root: &Path) -> HashMap<String, PathBuf> {
+    let parent = importer.parent().unwrap_or(Path::new("."));
+    let mut aliases = HashMap::new();
+    for stmt in statements {
+        let Stmt::Use {
+            library,
+            is_file_path,
+            is_rust: false,
+            alias,
+            ..
+        } = stmt
+        else {
+            continue;
+        };
+        if *is_file_path {
+            if let Some(alias) = alias
+                && let Ok(target) = resolve_import(root, parent, library.lexeme())
+            {
+                aliases.insert(alias.lexeme().to_string(), target);
+            }
+        } else {
+            let name = alias
+                .as_ref()
+                .map_or_else(|| library.lexeme(), |name| name.lexeme());
+            if let Some(target) = vendored_import(root, library.lexeme()) {
+                aliases.insert(name.to_string(), target);
+            }
+        }
+    }
+    aliases
+}
+
+/// Report `use (a, b) = from "file"` when one of the names is private to the
+/// imported module.
+fn check_selective_import(
+    stmt: &Stmt,
+    importer: &Path,
+    root: &Path,
+    private: &HashMap<PathBuf, HashSet<String>>,
+    display_names: &HashMap<PathBuf, String>,
+    span_base: usize,
+) -> Vec<Diagnostic> {
+    let Stmt::Use {
+        is_file_path: true,
+        library,
+        imported_symbols,
+        ..
+    } = stmt
+    else {
+        return Vec::new();
+    };
+    if imported_symbols.is_empty() {
+        return Vec::new();
+    }
+    let parent = importer.parent().unwrap_or(Path::new("."));
+    let Ok(target) = resolve_import(root, parent, library.lexeme()) else {
+        return Vec::new();
+    };
+    let Some(private_names) = private.get(&target) else {
+        return Vec::new();
+    };
+    let display = display_names
+        .get(&target)
+        .cloned()
+        .unwrap_or_else(|| target.display().to_string());
+
+    imported_symbols
+        .iter()
+        .filter(|symbol| private_names.contains(symbol.lexeme()))
+        .map(|symbol| {
+            let span = Span::new(
+                symbol.span.start.saturating_sub(span_base),
+                symbol.span.end.saturating_sub(span_base),
+                symbol.span.line,
+                symbol.span.column,
+            );
+            Diagnostic::error(format!("`{}` is private to `{display}`", symbol.lexeme()))
+                .with_code(codes::BUILD)
+                .with_file(importer.display().to_string())
+                .with_label(Label::primary(
+                    span,
+                    format!("not visible outside `{display}`"),
+                ))
+                .with_help(format!(
+                    "remove `private` from `{}` in `{display}` to export it",
+                    symbol.lexeme()
+                ))
+        })
+        .collect()
 }
 
 /// Rewrite `use package` into the same namespaced file-import form used by
@@ -665,6 +871,7 @@ fn stmt_byte_range(stmt: &Stmt) -> (usize, usize) {
     let mut acc: (usize, usize) = (usize::MAX, 0);
 
     acc = match stmt {
+        Private { statement } => add_sub(statement, acc),
         Expression { expression } => add_expr(expression, acc),
         Say {
             expression,
@@ -1433,5 +1640,149 @@ mod tests {
         assert_eq!(parse.code.as_deref(), Some(codes::PARSE));
         assert_eq!(parse.labels.len(), 1);
         assert!(parse.file_path.is_some());
+    }
+
+    #[test]
+    fn private_declarations_stay_usable_inside_their_module() {
+        let project = TestProject::new();
+        project.write(
+            "src/main.nt",
+            "use \"lib.nt\"\n\nfun main() {\n    say(answer())\n}\n",
+        );
+        project.write(
+            "src/lib.nt",
+            "private fun helper() -> int {\n    return 41\n}\n\nfun answer() -> int {\n    return helper() + 1\n}\n",
+        );
+
+        let result = load_program(&project.dir.join("src/main.nt")).expect("loads");
+        let names: Vec<&str> = result
+            .program
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::Function { name, .. } => Some(name.lexeme()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(names.contains(&"answer"));
+        assert!(names.iter().any(|name| name.ends_with("::helper")));
+        assert!(!names.contains(&"helper"));
+    }
+
+    #[test]
+    fn private_declarations_are_not_visible_to_importers() {
+        let project = TestProject::new();
+        let main = project.write(
+            "src/main.nt",
+            "use \"lib.nt\"\n\nfun main() {\n    say(helper())\n}\n",
+        );
+        project.write(
+            "src/lib.nt",
+            "private fun helper() -> int {\n    return 41\n}\n",
+        );
+
+        let err =
+            load_program(&project.dir.join("src/main.nt")).expect_err("private access rejected");
+        let ModuleLoadError::Visibility(errors) = err else {
+            panic!("expected visibility error, got {err:?}");
+        };
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .message
+                .contains("`helper` is private to `lib.nt`")
+        );
+
+        let main_display = main.canonicalize().unwrap().display().to_string();
+        assert_eq!(errors[0].file_path.as_deref(), Some(main_display.as_str()));
+        let source = fs::read_to_string(&main).unwrap();
+        assert_eq!(
+            errors[0].labels[0].span.start,
+            source.find("helper()").unwrap()
+        );
+    }
+
+    #[test]
+    fn private_declarations_are_not_visible_through_an_alias() {
+        let project = TestProject::new();
+        project.write(
+            "src/main.nt",
+            "use \"lib.nt\" as lib\n\nfun main() {\n    say(lib.helper())\n}\n",
+        );
+        project.write(
+            "src/lib.nt",
+            "private fun helper() -> int {\n    return 41\n}\n",
+        );
+
+        let err =
+            load_program(&project.dir.join("src/main.nt")).expect_err("private access rejected");
+        let ModuleLoadError::Visibility(errors) = err else {
+            panic!("expected visibility error, got {err:?}");
+        };
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .message
+                .contains("`helper` is private to `lib.nt`")
+        );
+    }
+
+    #[test]
+    fn selective_import_of_a_private_symbol_is_rejected() {
+        let project = TestProject::new();
+        project.write(
+            "src/main.nt",
+            "use (helper) = from \"lib.nt\"\n\nfun main() {\n    say(helper())\n}\n",
+        );
+        project.write(
+            "src/lib.nt",
+            "private fun helper() -> int {\n    return 41\n}\n",
+        );
+
+        let err =
+            load_program(&project.dir.join("src/main.nt")).expect_err("private import rejected");
+        let ModuleLoadError::Visibility(errors) = err else {
+            panic!("expected visibility error, got {err:?}");
+        };
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .message
+                .contains("`helper` is private to `lib.nt`")
+        );
+    }
+
+    #[test]
+    fn a_public_name_elsewhere_keeps_unqualified_access_working() {
+        let project = TestProject::new();
+        project.write(
+            "src/main.nt",
+            "use \"a.nt\"\nuse \"b.nt\"\n\nfun main() {\n    say(util())\n}\n",
+        );
+        project.write("src/a.nt", "private fun util() -> int {\n    return 1\n}\n");
+        project.write("src/b.nt", "fun util() -> int {\n    return 2\n}\n");
+
+        load_program(&project.dir.join("src/main.nt")).expect("public name wins");
+    }
+    #[test]
+    fn an_aliased_public_name_does_not_mask_a_private_one() {
+        let project = TestProject::new();
+        project.write(
+            "src/main.nt",
+            "use \"a.nt\"\nuse \"b.nt\" as b\n\nfun main() {\n    say(helper())\n}\n",
+        );
+        project.write(
+            "src/a.nt",
+            "private fun helper() -> int {\n    return 1\n}\n",
+        );
+        project.write("src/b.nt", "fun helper() -> int {\n    return 2\n}\n");
+
+        let err =
+            load_program(&project.dir.join("src/main.nt")).expect_err("private access rejected");
+        let ModuleLoadError::Visibility(errors) = err else {
+            panic!("expected visibility error, got {err:?}");
+        };
+        assert!(errors[0].message.contains("`helper` is private to `a.nt`"));
     }
 }

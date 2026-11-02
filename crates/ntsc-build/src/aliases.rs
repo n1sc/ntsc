@@ -1,4 +1,5 @@
-//! Namespace a module's top-level symbols under an import alias.
+//! Namespace a module's top-level symbols under an import alias, and scope
+//! `private` declarations to their own file.
 //!
 //! `use "file.nt" as arm` turns every top-level declaration in `file.nt`
 //! into `arm::<name>`. References to those symbols *inside* the file are
@@ -7,18 +8,25 @@
 //! the file's own unqualified calls keep working because they are rewritten
 //! in place.
 //!
+//! Private declarations are renamed to a module-scoped internal name instead,
+//! so the same flat program cannot reach them from another file. While
+//! rewriting, free references to another module's private names are reported.
+//!
 //! References that must NOT be rewritten:
 //! - local variables, parameters, loop/catch/lambda bindings (they can shadow),
 //! - `this` and member/field access (`obj.x`, `obj.method()`),
 //! - stdlib module names and symbols imported from other files,
 //! - the identifiers inside `use` statements themselves.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use ntsc_ast::expr::Expr;
-use ntsc_ast::stmt::Stmt;
+use ntsc_ast::span::Span;
+use ntsc_ast::stmt::{Stmt, declaration_name};
 use ntsc_ast::token::Token;
 use ntsc_ast::types::TypeAnnotation;
+use ntsc_diag::{Diagnostic, Label, codes};
 
 /// Names of top-level declarations that free identifiers may reference.
 pub fn top_level_names(statements: &[Stmt]) -> HashSet<String> {
@@ -46,41 +54,209 @@ pub fn top_level_names(statements: &[Stmt]) -> HashSet<String> {
     names
 }
 
-/// Rewrite `statements` (a module's top-level body) so its own symbols are
-/// namespaced under `prefix`, returning the new statements.
-pub fn namespaced(statements: Vec<Stmt>, prefix: &str, own: &HashSet<String>) -> Vec<Stmt> {
-    let mut rewriter = Rewriter {
-        prefix,
-        own,
-        scopes: vec![HashSet::new()],
-    };
-    rewriter.stmts(statements)
+/// Program-wide visibility information a module is rewritten against.
+pub struct Visibility<'a> {
+    /// The module being rewritten.
+    pub path: &'a Path,
+
+    /// Aliases bound in this module: alias name -> imported module.
+    pub aliases: &'a HashMap<String, PathBuf>,
+
+    /// Private names declared by each module.
+    pub private: &'a HashMap<PathBuf, HashSet<String>>,
+
+    /// The module that declares each private name (first in load order).
+    pub private_owners: &'a HashMap<String, PathBuf>,
+
+    /// Every public top-level name in the program. A name that is public
+    /// anywhere is reachable unqualified, so it never triggers a privacy
+    /// error.
+    pub public_names: &'a HashSet<String>,
+
+    /// Names this module imports selectively. The import itself is reported
+    /// when it is private, so later uses of the name are not reported again.
+    pub imported: &'a HashSet<String>,
+
+    /// Human-readable name of each module, used in diagnostics.
+    pub display_names: &'a HashMap<PathBuf, String>,
+
+    /// Byte offset added to this module's spans during the merge. Error
+    /// spans are shifted back by it so they stay file-local.
+    pub span_base: usize,
 }
 
-struct Rewriter<'a> {
-    prefix: &'a str,
+/// Remove `private` wrappers from a module's top-level statements, returning
+/// the bare declarations and the set of names they make file-local.
+pub fn split_visibility(statements: Vec<Stmt>) -> (Vec<Stmt>, HashSet<String>) {
+    let mut private = HashSet::new();
+    let statements = statements
+        .into_iter()
+        .map(|stmt| {
+            let Stmt::Private { statement } = stmt else {
+                return stmt;
+            };
+            if let Some(name) = declaration_name(&statement) {
+                private.insert(name.lexeme().to_string());
+            }
+            *statement
+        })
+        .collect();
+    (statements, private)
+}
+
+/// The internal prefix private symbols are renamed under. It contains `$`,
+/// which no Neutron identifier can, so it can never collide with user code.
+const PRIVATE_PREFIX: &str = "$private";
+
+/// Compute the renames applied to one module's own top-level names: private
+/// symbols get a module-scoped internal name, public symbols of an aliased
+/// module get the alias namespace.
+pub fn renames(
+    own: &HashSet<String>,
+    private: &HashSet<String>,
+    alias: Option<&str>,
+    index: usize,
+) -> HashMap<String, String> {
+    own.iter()
+        .filter_map(|name| {
+            if private.contains(name) {
+                Some((name.clone(), format!("{PRIVATE_PREFIX}{index}::{name}")))
+            } else {
+                alias.map(|alias| (name.clone(), format!("{alias}::{name}")))
+            }
+        })
+        .collect()
+}
+
+/// Rewrite `statements` (a module's top-level body) so its own symbols are
+/// namespaced, returning the new statements and any visibility errors.
+pub fn namespaced(
+    statements: Vec<Stmt>,
+    renames: &HashMap<String, String>,
+    own: &HashSet<String>,
+    visibility: &Visibility<'_>,
+) -> (Vec<Stmt>, Vec<Diagnostic>) {
+    let mut rewriter = Rewriter {
+        renames,
+        own,
+        scopes: vec![HashSet::new()],
+        visibility,
+        errors: Vec::new(),
+    };
+    let statements = rewriter.stmts(statements);
+    (statements, rewriter.errors)
+}
+
+struct Rewriter<'a, 'v> {
+    renames: &'a HashMap<String, String>,
     own: &'a HashSet<String>,
     /// Lexical binding scopes; the innermost is last.
     scopes: Vec<HashSet<String>>,
+    visibility: &'v Visibility<'a>,
+    errors: Vec<Diagnostic>,
 }
 
-impl Rewriter<'_> {
-    fn rename(&self, lexeme: &str) -> String {
-        format!("{}::{lexeme}", self.prefix)
+impl Rewriter<'_, '_> {
+    fn is_shadowed(&self, name: &str) -> bool {
+        self.scopes.iter().rev().any(|scope| scope.contains(name))
     }
 
-    /// Should this free identifier be namespaced? It must be one of the
-    /// module's own top-level symbols and not shadowed by a local binding.
-    fn should_rename(&self, name: &str) -> bool {
-        self.own.contains(name) && !self.scopes.iter().rev().any(|scope| scope.contains(name))
-    }
-
-    fn id_token(&self, tok: &Token, bind: bool) -> Token {
+    fn id_token(&mut self, tok: &Token, bind: bool) -> Token {
+        if !bind {
+            self.check_private_reference(tok);
+        }
         let mut out = tok.clone();
-        if !bind && self.should_rename(tok.lexeme()) {
-            out.kind = ntsc_ast::token::TokenKind::Identifier(self.rename(tok.lexeme()));
+        if !bind
+            && !self.is_shadowed(tok.lexeme())
+            && let Some(renamed) = self.renames.get(tok.lexeme())
+        {
+            out.kind = ntsc_ast::token::TokenKind::Identifier(renamed.clone());
         }
         out
+    }
+
+    /// Report a free identifier that names another module's private symbol.
+    /// The module's own declarations and locals are allowed, and a name that
+    /// is public somewhere stays reachable through the flat namespace.
+    fn check_private_reference(&mut self, tok: &Token) {
+        let name = tok.lexeme();
+        if self.own.contains(name)
+            || self.is_shadowed(name)
+            || self.visibility.public_names.contains(name)
+            || self.visibility.imported.contains(name)
+        {
+            return;
+        }
+        let Some(owner) = self.visibility.private_owners.get(name) else {
+            return;
+        };
+        if owner == self.visibility.path {
+            return;
+        }
+        let display = self.display(owner);
+        self.errors.push(
+            Diagnostic::error(format!("`{name}` is private to `{display}`"))
+                .with_code(codes::BUILD)
+                .with_file(self.visibility.path.display().to_string())
+                .with_label(Label::primary(
+                    self.local_span(tok.span),
+                    format!("not visible outside `{display}`"),
+                ))
+                .with_help(format!(
+                    "remove `private` from `{name}` in `{display}` to export it"
+                )),
+        );
+    }
+
+    /// Report `alias.private_name`, which names a symbol through the alias of
+    /// the module that keeps it private.
+    fn check_alias_member(&mut self, object: &Expr, property: &Token) {
+        let Expr::Variable { name } = object else {
+            return;
+        };
+        if self.is_shadowed(name.lexeme()) {
+            return;
+        }
+        let Some(target) = self.visibility.aliases.get(name.lexeme()) else {
+            return;
+        };
+        let Some(private) = self.visibility.private.get(target) else {
+            return;
+        };
+        if !private.contains(property.lexeme()) {
+            return;
+        }
+        let display = self.display(target);
+        self.errors.push(
+            Diagnostic::error(format!("`{}` is private to `{display}`", property.lexeme()))
+                .with_code(codes::BUILD)
+                .with_file(self.visibility.path.display().to_string())
+                .with_label(Label::primary(
+                    self.local_span(property.span),
+                    format!("not visible outside `{display}`"),
+                ))
+                .with_help(format!(
+                    "remove `private` from `{}` in `{display}` to export it",
+                    property.lexeme()
+                )),
+        );
+    }
+
+    fn display(&self, path: &Path) -> String {
+        self.visibility
+            .display_names
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| path.display().to_string())
+    }
+
+    fn local_span(&self, span: Span) -> Span {
+        Span::new(
+            span.start.saturating_sub(self.visibility.span_base),
+            span.end.saturating_sub(self.visibility.span_base),
+            span.line,
+            span.column,
+        )
     }
 
     // ── statements ─────────────────────────────────────────────────
@@ -405,6 +581,10 @@ impl Rewriter<'_> {
             // A `use` statement is left untouched; rename applies only to the
             // module's own declarations.
             other @ Stmt::Use { .. } => other,
+            // Already stripped by `split_visibility`; recurse defensively.
+            Stmt::Private { statement } => Stmt::Private {
+                statement: Box::new(self.stmt_push(*statement)),
+            },
             Stmt::Enum {
                 mut name,
                 generic_params,
@@ -504,7 +684,7 @@ impl Rewriter<'_> {
         }
     }
 
-    fn id_token2(&self, tok: Token) -> Token {
+    fn id_token2(&mut self, tok: Token) -> Token {
         self.id_token(&tok, false)
     }
 
@@ -528,7 +708,7 @@ impl Rewriter<'_> {
             .collect()
     }
 
-    fn ty(&self, ty: TypeAnnotation) -> TypeAnnotation {
+    fn ty(&mut self, ty: TypeAnnotation) -> TypeAnnotation {
         match ty {
             TypeAnnotation::Named(t) => TypeAnnotation::Named(self.id_token2(t)),
             TypeAnnotation::Array(inner) => {
@@ -588,14 +768,20 @@ impl Rewriter<'_> {
                 open_span,
                 close_span,
             },
-            Expr::Member { object, property } => Expr::Member {
-                object: Box::new(self.member_object(*object)),
-                property: self.member_property(property),
-            },
-            Expr::OptionalMember { object, property } => Expr::OptionalMember {
-                object: Box::new(self.member_object(*object)),
-                property: self.member_property(property),
-            },
+            Expr::Member { object, property } => {
+                self.check_alias_member(&object, &property);
+                Expr::Member {
+                    object: Box::new(self.member_object(*object)),
+                    property: self.member_property(property),
+                }
+            }
+            Expr::OptionalMember { object, property } => {
+                self.check_alias_member(&object, &property);
+                Expr::OptionalMember {
+                    object: Box::new(self.member_object(*object)),
+                    property: self.member_property(property),
+                }
+            }
             Expr::Call {
                 callee,
                 paren,

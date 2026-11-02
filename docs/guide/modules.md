@@ -75,6 +75,48 @@ The [Packages](packages.md) chapter covers lockfiles, vendoring, and publishing.
 Symbols can be imported selectively from a module with
 `use (a, b) = from module`. The same form works with file paths.
 
+## Visibility
+
+Top-level declarations are public. Other files can call them after importing
+the file, whether the import is bare or aliased. Prefix a declaration with
+`private` to keep it inside its own file:
+
+```ntsc
+// src/cart.nt
+private fun clamp(int n) -> int {
+    if (n < 0) {
+        return 0
+    }
+    return n
+}
+
+fun total(int a, int b) -> int {
+    return clamp(a + b)
+}
+```
+
+`total` is public, so `main.nt` can call it; `clamp` is private, so `main.nt`
+cannot. The same rule applies to `async fun`, `class`, `enum`, `type`,
+`trait`, and `static var` declarations.
+
+A private symbol is invisible from every direction:
+
+```ntsc
+use "cart.nt"                 // bare import: `clamp` is not added
+use "cart.nt" as cart         // aliased: `cart.clamp` is rejected
+use (clamp) = from "cart.nt"  // selective: rejected
+```
+
+The compiler names the file that owns the symbol:
+
+```text
+error[NTSC-E0401]: `clamp` is private to `cart.nt`
+```
+
+A module can call its own private declarations freely. Because private names
+are scoped to the file, two modules may each define a private `helper`
+without colliding. `main` cannot be private: it is the program entry point.
+
 ## Loading other source files
 
 Here is a complete two-file example. In your existing project, make

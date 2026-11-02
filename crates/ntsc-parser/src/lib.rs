@@ -173,6 +173,7 @@ fn token_debug_name(kind: &TokenKind) -> &'static str {
         TokenKind::Defer => "defer",
         TokenKind::Unsafe => "unsafe",
         TokenKind::Quiet => "quiet",
+        TokenKind::Private => "private",
         TokenKind::Enum => "enum",
         TokenKind::Type => "type",
         TokenKind::Trait => "trait",
@@ -261,7 +262,12 @@ impl<'src> Parser<'src> {
                 parser.advance();
                 continue;
             }
-            match parser.parse_statement() {
+            let parsed = if parser.check(&TokenKind::Private) {
+                parser.parse_private_declaration()
+            } else {
+                parser.parse_statement()
+            };
+            match parsed {
                 Ok(stmt) => statements.push(stmt),
                 Err(err) => {
                     parser.errors.push(err);
@@ -433,6 +439,7 @@ impl<'src> Parser<'src> {
                     | TokenKind::Throw
                     | TokenKind::Unsafe
                     | TokenKind::Quiet
+                    | TokenKind::Private
                     | TokenKind::Enum
                     | TokenKind::Type
                     | TokenKind::Use
@@ -510,6 +517,10 @@ impl<'src> Parser<'src> {
             TokenKind::Unsafe => self.parse_unsafe_statement(),
             TokenKind::Defer => self.parse_defer_statement(),
             TokenKind::Quiet => self.parse_quiet_statement(),
+            TokenKind::Private => Err(ParseError {
+                message: "`private` is only allowed on top-level declarations".into(),
+                span: self.peek().span,
+            }),
             TokenKind::Return => self.parse_return_statement(),
             TokenKind::Break => self.parse_break_statement(),
             TokenKind::Continue => self.parse_continue_statement(),
@@ -520,6 +531,29 @@ impl<'src> Parser<'src> {
             TokenKind::Say => self.parse_say_statement(),
             _ => self.parse_expression_statement(),
         }
+    }
+
+    /// `private <declaration>` — only valid at file scope. The wrapper is
+    /// kept in the AST so the module loader can record the name before
+    /// stripping it.
+    fn parse_private_declaration(&mut self) -> Result<Stmt, ParseError> {
+        let keyword = self.advance();
+        let declaration = self.parse_statement()?;
+        let Some(name) = ntsc_ast::stmt::declaration_name(&declaration) else {
+            return Err(ParseError {
+                message: "`private` applies only to top-level `fun`, `async fun`, `class`, `enum`, `type`, `trait`, or `static var` declarations".into(),
+                span: keyword.span,
+            });
+        };
+        if name.lexeme() == "main" {
+            return Err(ParseError {
+                message: "`main` cannot be private; it is the program entry point".into(),
+                span: name.span,
+            });
+        }
+        Ok(Stmt::Private {
+            statement: Box::new(declaration),
+        })
     }
 
     fn parse_var_declaration(&mut self, is_static: bool) -> Result<Stmt, ParseError> {
@@ -4632,5 +4666,29 @@ while (true) {
             } => assert!(matches!(init, Expr::Ternary { .. })),
             other => panic!("expected Var, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parses_private_declaration() {
+        let prog = parse_source("private fun helper() -> int { return 1 }").unwrap();
+        assert!(matches!(&prog.statements[0], Stmt::Private { .. }));
+    }
+
+    #[test]
+    fn private_is_rejected_inside_a_block() {
+        let errs = parse_source("fun main() { private fun helper() {} }").unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("only allowed on top-level"))
+        );
+    }
+
+    #[test]
+    fn main_cannot_be_private() {
+        let errs = parse_source("private fun main() {}").unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("`main` cannot be private"))
+        );
     }
 }
