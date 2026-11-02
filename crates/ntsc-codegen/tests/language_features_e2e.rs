@@ -393,3 +393,45 @@ fn ternary_with_string_literal_branches() {
     assert!(ok, "program failed: {stderr}");
     assert_eq!(stdout, "yes\nno\na\n1\n");
 }
+
+/// `defer` runs its statement on every way out of the enclosing block:
+/// normal completion, `return`, `throw`, `break`, and `continue`, in
+/// reverse registration order.
+#[test]
+fn defer_runs_on_every_exit_path() {
+    let source = r#"fun early() -> string {
+    defer say("early-cleanup")
+    return "early"
+}
+
+fun main() {
+    defer say("top")
+    {
+        defer say("inner")
+        say("block")
+    }
+    var int i = 0
+    while (i < 2) {
+        i++
+        defer say("iter " + i)
+        if (i == 1) {
+            continue
+        }
+        break
+    }
+    try {
+        defer say("throw-cleanup")
+        throw "boom"
+    } catch (e) {
+        say("caught " + e)
+    }
+    say(early())
+}
+"#;
+    let (ok, stdout, stderr) = compile_run("defer_exits", source);
+    assert!(ok, "program failed: {stderr}");
+    assert_eq!(
+        stdout,
+        "block\ninner\niter 1\niter 2\nthrow-cleanup\ncaught boom\nearly-cleanup\nearly\ntop\n"
+    );
+}

@@ -96,6 +96,7 @@ pub enum TokenKind {
     Finally,
     Throw,
     Retry,
+    Defer,
 
     Unsafe,
 
@@ -198,6 +199,7 @@ impl TokenKind {
             TokenKind::Finally => Some("finally"),
             TokenKind::Throw => Some("throw"),
             TokenKind::Retry => Some("retry"),
+            TokenKind::Defer => Some("defer"),
             TokenKind::Unsafe => Some("unsafe"),
             TokenKind::Quiet => Some("quiet"),
             TokenKind::Enum => Some("enum"),

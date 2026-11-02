@@ -237,6 +237,7 @@ pub(crate) fn stmt_mentions_var(stmt: &Stmt, var: &str) -> bool {
         }
         Stmt::Unsafe { body } => stmt_mentions_var(body, var),
         Stmt::Quiet { body, .. } => stmt_mentions_var(body, var),
+        Stmt::Defer { statement, .. } => stmt_mentions_var(statement, var),
         Stmt::Destructure { initializer, .. } => expr_mentions_var(initializer, var),
         Stmt::TypeAlias { .. } => false,
         Stmt::ChanRecvFor { channel, body, .. } => {
@@ -739,6 +740,7 @@ pub(crate) fn stmt_uses_var_safely(stmt: &Stmt, var: &str, kind: EscapeKind<'_>)
         }
         Stmt::Unsafe { body } => stmt_uses_var_safely(body, var, kind),
         Stmt::Quiet { body, .. } => stmt_uses_var_safely(body, var, kind),
+        Stmt::Defer { statement, .. } => stmt_uses_var_safely(statement, var, kind),
         Stmt::Destructure { initializer, .. } => {
             expr_uses_var_safely(initializer, var, ExprCtx::Data, kind)
         }
@@ -978,6 +980,7 @@ fn stmt_field_drop_safe_ignoring_return(stmt: &Stmt, var: &str, kind: EscapeKind
         }
         Stmt::Unsafe { body } => stmt_field_drop_safe_ignoring_return(body, var, kind),
         Stmt::Quiet { body, .. } => stmt_field_drop_safe_ignoring_return(body, var, kind),
+        Stmt::Defer { statement, .. } => stmt_field_drop_safe_ignoring_return(statement, var, kind),
         other => stmt_uses_var_safely(other, var, kind),
     }
 }

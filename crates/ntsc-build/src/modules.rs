@@ -892,6 +892,7 @@ fn stmt_byte_range(stmt: &Stmt) -> (usize, usize) {
             acc
         }
         Unsafe { body } => add_sub(body, acc),
+        Defer { statement, .. } => add_sub(statement, acc),
         Quiet { body, .. } => add_sub(body, acc),
         Destructure {
             names, initializer, ..

@@ -58,8 +58,12 @@ pub(crate) fn emit_try_catch<'ctx>(
     // it always needs a propagation target. Register the handler for the
     // try body, then fall into it.
     fn_ctx.exception_targets.push(handler_bb);
+    fn_ctx
+        .exception_defer_depths
+        .push(fn_ctx.defer_scopes.len());
     emit_statement_in_function(fn_ctx, try_block)?;
     fn_ctx.exception_targets.pop();
+    fn_ctx.exception_defer_depths.pop();
 
     // Normal completion of the try body: the finally runs with a clean
     // pending slot.
@@ -277,8 +281,12 @@ pub(crate) fn emit_retry<'ctx>(
     // The loop's `break` exits the retry; `continue` starts the next
     // attempt. The attempt body runs with the failure handler registered.
     fn_ctx.exception_targets.push(failure_bb);
+    fn_ctx
+        .exception_defer_depths
+        .push(fn_ctx.defer_scopes.len());
     emit_statement_in_function(fn_ctx, body)?;
     fn_ctx.exception_targets.pop();
+    fn_ctx.exception_defer_depths.pop();
     if fn_ctx
         .builder
         .get_insert_block()

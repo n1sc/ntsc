@@ -186,6 +186,8 @@ pub(crate) enum RawToken {
     Throw,
     #[token("retry")]
     Retry,
+    #[token("defer")]
+    Defer,
     #[token("unsafe")]
     Unsafe,
     #[token("quiet")]

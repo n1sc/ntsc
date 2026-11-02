@@ -1085,6 +1085,7 @@ impl OwnershipChecker {
             | Stmt::ExternFunction { .. }
             | Stmt::ExternBlock { .. } => {}
             Stmt::Unsafe { body } => self.check_stmt(body),
+            Stmt::Defer { statement, .. } => self.check_stmt(statement),
             Stmt::Quiet { body, .. } => self.check_stmt(body),
             Stmt::Destructure {
                 initializer, names, ..
@@ -2333,6 +2334,7 @@ pub(crate) fn collect_stmt_uses(stmt: &Stmt, uses: &mut HashSet<String>) {
         }
         Stmt::Destructure { initializer, .. } => collect_expr_uses(initializer, uses),
         Stmt::Unsafe { body } | Stmt::Quiet { body, .. } => collect_stmt_uses(body, uses),
+        Stmt::Defer { statement, .. } => collect_stmt_uses(statement, uses),
         Stmt::Function { .. }
         | Stmt::AsyncFunction { .. }
         | Stmt::ExternFunction { .. }

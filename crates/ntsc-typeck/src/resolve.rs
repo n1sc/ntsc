@@ -1218,6 +1218,17 @@ impl TypeChecker {
                 self.check_statement(body);
                 self.unsafe_depth -= 1;
             }
+            Stmt::Defer { keyword, statement } => {
+                if self.async_depth > 0 {
+                    self.errors.push(TypeError {
+                        code: None,
+                        help: None,
+                        message: "defer is not supported inside an async function".into(),
+                        span: keyword.span,
+                    });
+                }
+                self.check_statement(statement);
+            }
             Stmt::Quiet { body, .. } => {
                 self.check_statement(body);
             }

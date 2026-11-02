@@ -813,10 +813,23 @@ pub(crate) struct FunctionContext<'ctx, 'm> {
     /// and must not be touched here, even if the loop assigned it.
     loop_outer_names: Vec<HashSet<String>>,
 
+    /// Deferred statements for each open block, innermost last. A block pushes
+    /// an entry on entry and drains it on every way out.
+    defer_scopes: Vec<Vec<Stmt>>,
+
+    /// `defer_scopes.len()` at each enclosing loop, innermost last, so
+    /// `break`/`continue` know which deferred statements they run past.
+    loop_defer_depths: Vec<usize>,
+
     /// Exception-handler blocks of enclosing `try`/`retry`, innermost last.
     /// A pending exception branches to the innermost block; when empty it
     /// unwinds to the function's exception-return block.
     exception_targets: Vec<inkwell::basic_block::BasicBlock<'ctx>>,
+
+    /// `defer_scopes.len()` at each enclosing exception handler, innermost
+    /// last: a `throw` runs the defers of the blocks it leaves on the way to
+    /// that handler, and only the uncaught path runs the function's own.
+    exception_defer_depths: Vec<usize>,
 
     /// The block a pending exception branches to when no enclosing
     /// `try`/`retry` handles it: it drops all owned locals and returns a
@@ -923,7 +936,10 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
             continue_targets: Vec::new(),
             loop_owned_slots: Vec::new(),
             loop_outer_names: Vec::new(),
+            defer_scopes: Vec::new(),
+            loop_defer_depths: Vec::new(),
             exception_targets: Vec::new(),
+            exception_defer_depths: Vec::new(),
             exception_return_bb: None,
             exception_checks: true,
             future_base: None,
@@ -994,6 +1010,41 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
         Ok(())
     }
 
+    fn push_defer_scope(&mut self) {
+        self.defer_scopes.push(Vec::new());
+    }
+
+    fn defer_depth(&self) -> usize {
+        self.defer_scopes.len()
+    }
+
+    /// Emit the deferred statements of every scope above `depth`, innermost
+    /// first and last-registered first.
+    ///
+    /// The scopes stay on the stack: they describe the code being emitted, not
+    /// a runtime path, so a `return` inside a block must not unregister the
+    /// defers the block's later statements would still see.
+    fn emit_defers_to(&mut self, depth: usize) -> Result<(), crate::CodegenError> {
+        let scopes: Vec<Vec<Stmt>> = self.defer_scopes[depth..].to_vec();
+        for scope in scopes.into_iter().rev() {
+            for statement in scope.into_iter().rev() {
+                let terminated = self
+                    .builder
+                    .get_insert_block()
+                    .is_some_and(|block| block.get_terminator().is_some());
+                if terminated {
+                    return Ok(());
+                }
+                crate::emit::stmt::emit_statement_in_function(self, &statement)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn pop_defer_scope(&mut self) {
+        self.defer_scopes.pop();
+    }
+
     fn push_loop_targets(
         &mut self,
         break_target: inkwell::basic_block::BasicBlock<'ctx>,
@@ -1004,6 +1055,7 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
         self.loop_owned_slots.push(self.owned_slots.clone());
         self.loop_outer_names
             .push(self.variables.keys().cloned().collect());
+        self.loop_defer_depths.push(self.defer_scopes.len());
     }
 
     fn pop_loop_targets(&mut self) {
@@ -1011,6 +1063,7 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
         self.continue_targets.pop();
         self.loop_owned_slots.pop();
         self.loop_outer_names.pop();
+        self.loop_defer_depths.pop();
     }
 
     fn drop_loop_locals(&mut self) -> Result<(), crate::CodegenError> {
@@ -1066,6 +1119,15 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
                 ));
             }
         };
+        let depth = self.loop_defer_depths.last().copied().unwrap_or(0);
+        self.emit_defers_to(depth)?;
+        if self
+            .builder
+            .get_insert_block()
+            .is_some_and(|block| block.get_terminator().is_some())
+        {
+            return Ok(());
+        }
         self.drop_loop_locals()?;
         self.builder.build_unconditional_branch(target)?;
         Ok(())
@@ -1080,6 +1142,15 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
                 ));
             }
         };
+        let depth = self.loop_defer_depths.last().copied().unwrap_or(0);
+        self.emit_defers_to(depth)?;
+        if self
+            .builder
+            .get_insert_block()
+            .is_some_and(|block| block.get_terminator().is_some())
+        {
+            return Ok(());
+        }
         self.drop_loop_locals()?;
         self.builder.build_unconditional_branch(target)?;
         Ok(())

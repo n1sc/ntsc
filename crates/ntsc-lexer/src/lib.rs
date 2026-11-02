@@ -196,6 +196,7 @@ impl<'src> Lexer<'src> {
             RawToken::Finally => Token::new(TokenKind::Finally, span),
             RawToken::Throw => Token::new(TokenKind::Throw, span),
             RawToken::Retry => Token::new(TokenKind::Retry, span),
+            RawToken::Defer => Token::new(TokenKind::Defer, span),
             RawToken::Unsafe => Token::new(TokenKind::Unsafe, span),
             RawToken::Quiet => Token::new(TokenKind::Quiet, span),
             RawToken::Enum => Token::new(TokenKind::Enum, span),

@@ -170,6 +170,7 @@ fn token_debug_name(kind: &TokenKind) -> &'static str {
         TokenKind::Finally => "finally",
         TokenKind::Throw => "throw",
         TokenKind::Retry => "retry",
+        TokenKind::Defer => "defer",
         TokenKind::Unsafe => "unsafe",
         TokenKind::Quiet => "quiet",
         TokenKind::Enum => "enum",
@@ -507,6 +508,7 @@ impl<'src> Parser<'src> {
             TokenKind::Throw => self.parse_throw_statement(),
             TokenKind::Retry => self.parse_retry_statement(),
             TokenKind::Unsafe => self.parse_unsafe_statement(),
+            TokenKind::Defer => self.parse_defer_statement(),
             TokenKind::Quiet => self.parse_quiet_statement(),
             TokenKind::Return => self.parse_return_statement(),
             TokenKind::Break => self.parse_break_statement(),
@@ -2097,6 +2099,13 @@ impl<'src> Parser<'src> {
             catch_var,
             catch_block,
         })
+    }
+
+    fn parse_defer_statement(&mut self) -> Result<Stmt, ParseError> {
+        let keyword = self.advance();
+        self.skip_newlines();
+        let statement = Box::new(self.parse_statement()?);
+        Ok(Stmt::Defer { keyword, statement })
     }
 
     fn parse_unsafe_statement(&mut self) -> Result<Stmt, ParseError> {

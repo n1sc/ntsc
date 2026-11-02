@@ -169,6 +169,13 @@ pub enum Stmt {
         body: Box<Stmt>,
     },
 
+    /// `defer stmt` — runs `stmt` when the enclosing block exits, last in
+    /// first out.
+    Defer {
+        keyword: Token,
+        statement: Box<Stmt>,
+    },
+
     /// `quiet [name, ...] body` — suppress lint warnings for `body`; an empty
     /// `suppressed` list silences every warning.
     Quiet {

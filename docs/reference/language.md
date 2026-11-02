@@ -663,6 +663,30 @@ retry count { ... } [catch (name) { ... }]
 Runs the block up to `count` times, retrying while a run throws and attempts
 remain; the optional `catch` runs when attempts are exhausted.
 
+### Defer
+
+```
+defer statement
+```
+
+`defer` registers a statement to run when the enclosing block exits, most
+recently registered first. It runs on every way out of the block: reaching its
+end, `return`, `throw`, `break`, and `continue`. The deferred statement sees
+the block's locals as they are at exit and runs before those locals are
+destroyed, which is what makes it useful for cleanup:
+
+```ntsc
+fun read_config(string path) -> string {
+    var file = io.open(path)
+    defer file.close()
+    return file.read()
+}
+```
+
+A `throw` runs the defers of the blocks between it and the `try` that catches
+it, not those of the function it is caught in. `defer` is not allowed inside an
+`async fun`.
+
 ### Unsafe
 
 ```

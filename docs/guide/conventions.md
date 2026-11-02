@@ -351,6 +351,9 @@ local.
 
 ## 10. Close external resources explicitly
 
+`defer` makes the close automatic on every exit path; reach for it before
+writing the same close call at each `return`.
+
 Registry leak detection tracks Neutron handles, but operating-system resources
 also need deterministic cleanup. Always close what you open:
 

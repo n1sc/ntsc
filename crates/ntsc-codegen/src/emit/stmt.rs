@@ -57,6 +57,7 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                         super::emit_object_release(fn_ctx, &crate_name, handle)?;
                     }
                 }
+                fn_ctx.emit_defers_to(0)?;
                 emit_drop_all_owned(fn_ctx)?;
                 fn_ctx.builder.build_return(None)?;
             } else if let Some(expr) = value {
@@ -177,9 +178,11 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                         super::drop::drop_unreturned_escape_class_locals(fn_ctx, &moved)?;
                     }
                 }
+                fn_ctx.emit_defers_to(0)?;
                 emit_drop_all_owned(fn_ctx)?;
                 fn_ctx.builder.build_return(Some(&converted.value))?;
             } else {
+                fn_ctx.emit_defers_to(0)?;
                 emit_drop_all_owned(fn_ctx)?;
                 fn_ctx.builder.build_return(None)?;
             }
@@ -377,9 +380,13 @@ pub(crate) fn emit_statement_in_function<'ctx>(
         }
         Stmt::Block { statements, .. } => {
             let outer = fn_ctx.begin_block_scope();
+            fn_ctx.push_defer_scope();
             for s in statements {
                 emit_statement_in_function(fn_ctx, s)?;
             }
+            let depth = fn_ctx.defer_depth().saturating_sub(1);
+            fn_ctx.emit_defers_to(depth)?;
+            fn_ctx.pop_defer_scope();
             super::release_block_objects(fn_ctx, &outer)?;
             fn_ctx.end_block_scope(outer)?;
         }
@@ -436,6 +443,8 @@ pub(crate) fn emit_statement_in_function<'ctx>(
             } else {
                 msg.value
             };
+            let depth = fn_ctx.exception_defer_depths.last().copied().unwrap_or(0);
+            fn_ctx.emit_defers_to(depth)?;
             let throw_fn = fn_ctx
                 .module
                 .get_function("ntsc_throw")
@@ -496,6 +505,11 @@ pub(crate) fn emit_statement_in_function<'ctx>(
         }
         Stmt::Unsafe { body } => {
             emit_statement_in_function(fn_ctx, body)?;
+        }
+        Stmt::Defer { statement, .. } => {
+            if let Some(scope) = fn_ctx.defer_scopes.last_mut() {
+                scope.push((**statement).clone());
+            }
         }
         Stmt::Quiet { body, .. } => {
             emit_statement_in_function(fn_ctx, body)?;

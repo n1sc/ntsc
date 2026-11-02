@@ -39,6 +39,7 @@ pub(crate) fn emit_exception_return<'ctx>(
     if let Some(exc_bb) = fn_ctx.exception_return_bb {
         let resume_bb = fn_ctx.builder.get_insert_block();
         fn_ctx.builder.position_at_end(exc_bb);
+        fn_ctx.emit_defers_to(0)?;
         emit_drop_all_owned(fn_ctx)?;
         drop_return_escape_class_locals(fn_ctx)?;
         match ret_ty {
@@ -183,6 +184,7 @@ pub(crate) fn emit_function<'ctx>(
         fn_ctx.mark_owned_if_heap(param.name.lexeme(), param_ty);
     }
 
+    fn_ctx.push_defer_scope();
     for stmt in body {
         emit_statement_in_function(&mut fn_ctx, stmt)?;
     }
@@ -191,6 +193,7 @@ pub(crate) fn emit_function<'ctx>(
     let current_block = fn_ctx.builder.get_insert_block().unwrap();
     // Auto-insert the return if the body fell off the end.
     if current_block.get_terminator().is_none() {
+        fn_ctx.emit_defers_to(0)?;
         drop_return_escape_class_locals(&mut fn_ctx)?;
         emit_drop_all_owned(&mut fn_ctx)?;
         match &ret_ty {

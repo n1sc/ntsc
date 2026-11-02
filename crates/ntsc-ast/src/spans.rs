@@ -564,6 +564,10 @@ fn shift_stmt(stmt: &mut Stmt, base: usize) {
             }
         }
         Stmt::Unsafe { body } => shift_stmt(body, base),
+        Stmt::Defer { keyword, statement } => {
+            shift_token(keyword, base);
+            shift_stmt(statement, base)
+        }
         Stmt::Quiet { body, .. } => shift_stmt(body, base),
         Stmt::Destructure {
             names, initializer, ..

@@ -1323,6 +1323,7 @@ impl Indexer {
                 }
             }
             Stmt::Unsafe { body } => self.walk_stmt(body, in_class),
+            Stmt::Defer { statement, .. } => self.walk_stmt(statement, in_class),
             Stmt::Quiet { body, .. } => self.walk_stmt(body, in_class),
             Stmt::Use { .. } | Stmt::Enum { .. } | Stmt::TypeAlias { .. } => {}
             Stmt::Trait {
@@ -1888,6 +1889,7 @@ fn collect_stmt_spans(stmt: &Stmt, out: &mut Vec<Span>) {
             }
         }
         Stmt::Unsafe { body } | Stmt::Quiet { body, .. } => collect_stmt_spans(body, out),
+        Stmt::Defer { statement, .. } => collect_stmt_spans(statement, out),
         Stmt::Destructure {
             names, initializer, ..
         } => {

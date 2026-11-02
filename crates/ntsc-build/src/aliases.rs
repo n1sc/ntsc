@@ -363,6 +363,10 @@ impl Rewriter<'_> {
             Stmt::Unsafe { body } => Stmt::Unsafe {
                 body: Box::new(self.stmt_push(*body)),
             },
+            Stmt::Defer { keyword, statement } => Stmt::Defer {
+                keyword: self.id_token(&keyword, false),
+                statement: Box::new(self.stmt_push(*statement)),
+            },
             Stmt::Quiet { suppressed, body } => Stmt::Quiet {
                 suppressed,
                 body: Box::new(self.stmt_push(*body)),

@@ -319,6 +319,7 @@ impl Linter {
                 }
             }
             Stmt::Unsafe { body } => self.check_stmt(body),
+            Stmt::Defer { statement, .. } => self.check_stmt(statement),
             Stmt::Quiet { suppressed, body } => {
                 let applies = suppressed.is_empty()
                     || suppressed.iter().any(|name| name == LINT_UNUSED_VARIABLE);

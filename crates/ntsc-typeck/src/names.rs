@@ -348,6 +348,7 @@ impl Resolver {
                 }
             }
             Stmt::Unsafe { body } => self.resolve_statement(body),
+            Stmt::Defer { statement, .. } => self.resolve_statement(statement),
             Stmt::Quiet { body, .. } => self.resolve_statement(body),
             Stmt::Break { .. }
             | Stmt::Continue { .. }
