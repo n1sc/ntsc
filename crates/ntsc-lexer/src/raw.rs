@@ -104,8 +104,9 @@ pub(crate) enum RawToken {
     // ── Number literals ──────────────────────────────────────────
     // Radix-prefixed integers come first so `0x1f`, `0o17`, and `0b1010`
     // lex as a single token instead of `0` plus an identifier. Lowercase
-    // prefixes only, matching Rust and TOML.
-    #[regex(r"0x[0-9a-fA-F]+|0o[0-7]+|0b[01]+|[0-9]+(\.[0-9]+)?")]
+    // prefixes only, matching Rust and TOML. A single underscore may separate
+    // digit groups, never lead, trail, or double up.
+    #[regex(r"0x[0-9a-fA-F]+(_[0-9a-fA-F]+)*|0o[0-7]+(_[0-7]+)*|0b[01]+(_[01]+)*|[0-9]+(_[0-9]+)*(\.[0-9]+(_[0-9]+)*)?")]
     NumberLiteral,
 
     // ── String literals (both " and ' delimiters) ────────────────
@@ -421,6 +422,27 @@ mod tests {
             vec![
                 RawToken::NumberLiteral,
                 RawToken::NumberLiteral,
+                RawToken::NumberLiteral,
+            ]
+        );
+    }
+
+    #[test]
+    fn number_literals_allow_digit_separators() {
+        assert_eq!(
+            token_kinds("1_000_000 0xFF_FF 0b1010_1010 3.14_15"),
+            vec![
+                RawToken::NumberLiteral,
+                RawToken::NumberLiteral,
+                RawToken::NumberLiteral,
+                RawToken::NumberLiteral,
+            ]
+        );
+        assert_eq!(
+            token_kinds("1_000 + 1"),
+            vec![
+                RawToken::NumberLiteral,
+                RawToken::Plus,
                 RawToken::NumberLiteral,
             ]
         );

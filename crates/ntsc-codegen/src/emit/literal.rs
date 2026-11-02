@@ -10,8 +10,8 @@ pub(crate) fn emit_literal<'ctx>(
         LiteralValue::String(s) => Ok(TypedValue::new(emit_string_handle(fn_ctx, s)?, Ty::String)),
         LiteralValue::Number(n) => {
             if n.contains('.') {
-                let val: f64 = n.parse().map_err(|e| {
-                    crate::CodegenError::LLVMError(format!("invalid float literal: {e}"))
+                let val = ntsc_ast::expr::parse_float_literal(n).ok_or_else(|| {
+                    crate::CodegenError::LLVMError(format!("invalid float literal: {n}"))
                 })?;
                 Ok(TypedValue::new(
                     fn_ctx.context.f64_type().const_float(val).into(),

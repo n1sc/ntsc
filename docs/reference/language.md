@@ -64,7 +64,9 @@ Interpolation `${expr}` is available inside double-quoted strings. `r"..."`
 strings are stored verbatim: no escapes and no interpolation.
 
 Integers are decimal by default, with optional radix prefixes `0x`
-(hexadecimal), `0o` (octal), and `0b` (binary). Expressions may span line
+(hexadecimal), `0o` (octal), and `0b` (binary). A single underscore may
+separate digit groups in any numeric literal: `1_000_000`, `0xFF_FF`,
+`0b1010_1010`, and `1_000.25` all parse. Expressions may span line
 breaks when a binary operator leads the next line or ends the previous one.
 
 ### Keywords
@@ -990,7 +992,6 @@ a `view mut` parameter.
 - `unsafe` does not change behavior at runtime; it gates raw-pointer
   operations at type-check time.
 - `super` is lexed but cannot be used in expressions.
-- Integer literals are decimal only.
 - String escapes (`\n`, `\t`, `\r`, `\0`, `\\`, `\"`, `\'`, `\$`) are processed
   in quoted literals; `r"..."` strings are stored verbatim.
 - Only scalars and stdlib handles cross a thread boundary; views, `shared`

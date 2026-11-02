@@ -130,7 +130,7 @@ impl ConstEvaluator {
             Expr::Literal { value, .. } => match value {
                 LiteralValue::Number(n) => {
                     if n.contains('.') {
-                        n.parse::<f64>().ok().map(ConstValue::Float)
+                        ntsc_ast::expr::parse_float_literal(n).map(ConstValue::Float)
                     } else {
                         ntsc_ast::expr::parse_int_literal(n).map(ConstValue::Int)
                     }

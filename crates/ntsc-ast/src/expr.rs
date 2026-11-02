@@ -29,7 +29,14 @@ pub fn parse_int_literal(text: &str) -> Option<i64> {
     } else {
         (10, text)
     };
-    i64::from_str_radix(digits, radix).ok()
+    let digits: String = digits.chars().filter(|ch| *ch != '_').collect();
+    i64::from_str_radix(&digits, radix).ok()
+}
+
+/// Parse a floating-point literal, ignoring underscore digit separators.
+pub fn parse_float_literal(text: &str) -> Option<f64> {
+    let digits: String = text.chars().filter(|ch| *ch != '_').collect();
+    digits.parse().ok()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -337,7 +344,7 @@ impl Expr {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_int_literal;
+    use super::{parse_float_literal, parse_int_literal};
 
     #[test]
     fn parses_radix_prefixes() {
@@ -348,9 +355,19 @@ mod tests {
     }
 
     #[test]
+    fn ignores_digit_separators() {
+        assert_eq!(parse_int_literal("1_000_000"), Some(1_000_000));
+        assert_eq!(parse_int_literal("0xFF_FF"), Some(0xFFFF));
+        assert_eq!(parse_int_literal("0b1010_1010"), Some(0b1010_1010));
+        assert_eq!(parse_float_literal("1_000.25"), Some(1_000.25));
+        assert_eq!(parse_float_literal("3.5"), Some(3.5));
+    }
+
+    #[test]
     fn rejects_floats_and_malformed_text() {
         assert_eq!(parse_int_literal("3.14"), None);
         assert_eq!(parse_int_literal("0x"), None);
         assert_eq!(parse_int_literal(""), None);
+        assert_eq!(parse_float_literal("nope"), None);
     }
 }
