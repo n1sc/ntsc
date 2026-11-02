@@ -265,6 +265,9 @@ impl Resolver {
                 }
                 self.in_scope(|resolver| {
                     resolver.define("this", name.span);
+                    if parent.is_some() {
+                        resolver.define("super", name.span);
+                    }
                     for member in body {
                         if let Stmt::Function { name, .. } = member {
                             resolver.define(name.lexeme(), name.span);
@@ -413,6 +416,7 @@ impl Resolver {
         match expression {
             Expr::Literal { .. } => {}
             Expr::This { keyword } => self.require("this", keyword.span),
+            Expr::Super { keyword } => self.require("super", keyword.span),
             Expr::Variable { name } => {
                 let lex = name.lexeme().trim_start_matches('@');
                 self.require(lex, name.span)

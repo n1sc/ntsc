@@ -114,6 +114,12 @@ pub enum Expr {
         keyword: Token,
     },
 
+    /// `super` — the base-class view of `this`, valid only in a class that
+    /// extends another.
+    Super {
+        keyword: Token,
+    },
+
     Lambda {
         params: Vec<FunctionParam>,
         return_type: Option<ReturnTypeAnnotation>,
@@ -290,7 +296,7 @@ impl Expr {
             Expr::MemberSet {
                 object, property, ..
             } => object.span().to(property.span),
-            Expr::This { keyword } => keyword.span,
+            Expr::This { keyword } | Expr::Super { keyword } => keyword.span,
             Expr::Lambda { span, .. } => *span,
             Expr::Ternary {
                 condition,

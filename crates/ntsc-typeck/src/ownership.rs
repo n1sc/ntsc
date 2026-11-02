@@ -1687,6 +1687,7 @@ impl OwnershipChecker {
                 value_kind
             }
             Expr::This { .. } => Some(self.lookup_kind("this").unwrap_or(ValueKind::Heap)),
+            Expr::Super { .. } => Some(self.lookup_kind("super").unwrap_or(ValueKind::Heap)),
             Expr::Spread { value, .. } => {
                 let _ = self.check_expr(value);
                 Some(ValueKind::Unknown)
@@ -2353,7 +2354,7 @@ pub(crate) fn collect_expr_uses(expr: &Expr, uses: &mut HashSet<String>) {
         Expr::Variable { name } => {
             uses.insert(name.lexeme().to_string());
         }
-        Expr::Literal { .. } | Expr::This { .. } => {}
+        Expr::Literal { .. } | Expr::This { .. } | Expr::Super { .. } => {}
         Expr::Binary { left, right, .. } => {
             collect_expr_uses(left, uses);
             collect_expr_uses(right, uses);

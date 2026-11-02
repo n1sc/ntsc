@@ -717,7 +717,10 @@ A test body. Run by `ntsc test`; a thrown exception fails the test. See
 ### Variables and `this`
 
 A bare name refers to a variable, parameter, or function. `this` refers to
-the enclosing instance.
+the enclosing instance. `super` is the same instance viewed as its base
+class, so `super.method()` calls the base implementation even when the
+derived class overrides that method; it is only defined inside a class with an
+`extends` clause.
 
 ### Grouping
 
@@ -991,7 +994,6 @@ a `view mut` parameter.
   referent's lifetime is the caller's responsibility.
 - `unsafe` does not change behavior at runtime; it gates raw-pointer
   operations at type-check time.
-- `super` is lexed but cannot be used in expressions.
 - String escapes (`\n`, `\t`, `\r`, `\0`, `\\`, `\"`, `\'`, `\$`) are processed
   in quoted literals; `r"..."` strings are stored verbatim.
 - Only scalars and stdlib handles cross a thread boundary; views, `shared`

@@ -311,6 +311,27 @@ pub(crate) fn emit_expression<'ctx>(
                 dot_span
             )))
         }
+        Expr::Super { .. } => {
+            let Some((ptr, ty)) = fn_ctx.lookup_var("this") else {
+                return Ok(TypedValue::new(
+                    fn_ctx
+                        .context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                        .into(),
+                    Ty::Any,
+                ));
+            };
+            let loaded =
+                fn_ctx
+                    .builder
+                    .build_load(ty_to_llvm(ty, fn_ctx.context), ptr, "super_load")?;
+            let base = match ty {
+                Ty::Class(name) => class_parent(name).map_or_else(|| ty.clone(), Ty::Class),
+                _ => ty.clone(),
+            };
+            Ok(TypedValue::new(loaded, base))
+        }
         Expr::This { .. } => {
             if let Some((ptr, ty)) = fn_ctx.lookup_var("this") {
                 let loaded =

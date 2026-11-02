@@ -130,7 +130,7 @@ fn shift_expr(expr: &mut Expr, base: usize) {
             shift_token(property, base);
             shift_expr(value, base);
         }
-        Expr::This { keyword } => shift_token(keyword, base),
+        Expr::This { keyword } | Expr::Super { keyword } => shift_token(keyword, base),
         Expr::Lambda {
             params,
             return_type,

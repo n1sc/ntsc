@@ -1645,6 +1645,7 @@ impl<'src> Parser<'src> {
                 | TokenKind::Nil
                 | TokenKind::Identifier(_)
                 | TokenKind::This
+                | TokenKind::Super
                 | TokenKind::Minus
                 | TokenKind::Bang
                 | TokenKind::Tilde
@@ -2353,6 +2354,10 @@ impl<'src> Parser<'src> {
                     return self.parse_struct_literal(tok);
                 }
                 Ok(Expr::Variable { name: tok })
+            }
+            TokenKind::Super => {
+                let tok = self.advance();
+                Ok(Expr::Super { keyword: tok })
             }
             TokenKind::This => {
                 let tok = self.advance();

@@ -1391,6 +1391,9 @@ impl Indexer {
             Expr::This { keyword } => {
                 self.resolve("this", keyword.span, false);
             }
+            Expr::Super { keyword } => {
+                self.resolve("super", keyword.span, false);
+            }
             Expr::Assign { name, value } => {
                 self.resolve(name.lexeme(), name.span, false);
                 self.walk_expr(value);
@@ -1963,6 +1966,7 @@ fn collect_expr_spans(expr: &Expr, out: &mut Vec<Span>) {
         Expr::Literal { .. }
         | Expr::Variable { .. }
         | Expr::This { .. }
+        | Expr::Super { .. }
         | Expr::TupleIndex { .. } => {}
         Expr::Binary { left, right, .. }
         | Expr::IndexGet {

@@ -1197,6 +1197,11 @@ impl TypeChecker {
                 // Check class body in a new scope with `this`.
                 self.symbols.push_scope();
                 let _ = self.symbols.define("this", Ty::Class(name.lexeme().into()));
+                if let Some(parent) = parent {
+                    let _ = self
+                        .symbols
+                        .define("super", Ty::Class(parent.lexeme().into()));
+                }
                 let prev_in_class = self.in_class_body;
                 self.in_class_body = true;
                 for member in body {
@@ -2826,6 +2831,7 @@ impl TypeChecker {
                 }
             }
             Expr::This { .. } => self.symbols.lookup("this").cloned(),
+            Expr::Super { .. } => self.symbols.lookup("super").cloned(),
             Expr::Spread { value, .. } => {
                 if let Expr::ArrayLiteral { elements, .. } = &**value
                     && let Some(first) = elements.first()
@@ -4057,7 +4063,9 @@ fn find_await(expr: &Expr) -> Option<Span> {
         Expr::Await { span, .. } => Some(*span),
         Expr::AsyncBlock { .. } => None,
         Expr::Lambda { .. } => None,
-        Expr::Literal { .. } | Expr::Variable { .. } | Expr::This { .. } => None,
+        Expr::Literal { .. } | Expr::Variable { .. } | Expr::This { .. } | Expr::Super { .. } => {
+            None
+        }
         Expr::Binary { left, right, .. }
         | Expr::IndexGet {
             object: left,

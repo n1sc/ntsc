@@ -59,7 +59,7 @@ pub(crate) fn collect_stack_candidates(
 pub(crate) fn expr_mentions_var(expr: &Expr, var: &str) -> bool {
     match expr {
         Expr::Variable { name } => name.lexeme() == var,
-        Expr::Literal { .. } | Expr::This { .. } => false,
+        Expr::Literal { .. } | Expr::This { .. } | Expr::Super { .. } => false,
         Expr::Binary { left, right, .. } => {
             expr_mentions_var(left, var) || expr_mentions_var(right, var)
         }
@@ -435,7 +435,7 @@ pub(crate) fn expr_uses_var_safely(
     match expr {
         // A bare reference is only safe as a single-level base.
         Expr::Variable { name: _ } => ctx == ExprCtx::Base,
-        Expr::Literal { .. } | Expr::This { .. } => true,
+        Expr::Literal { .. } | Expr::This { .. } | Expr::Super { .. } => true,
         // Grouping an object base is treated as an escape (conservative).
         Expr::Grouping { expression, .. } => {
             expr_uses_var_safely(expression, var, ExprCtx::Data, kind)
@@ -596,7 +596,7 @@ pub(crate) fn expr_uses_var_safely(
 /// still checked as data.
 pub(crate) fn view_borrows_place(expr: &Expr, var: &str, kind: EscapeKind<'_>) -> bool {
     match expr {
-        Expr::Variable { .. } | Expr::This { .. } => true,
+        Expr::Variable { .. } | Expr::This { .. } | Expr::Super { .. } => true,
         Expr::Member { object, .. } | Expr::OptionalMember { object, .. } => {
             view_borrows_place(object, var, kind)
         }

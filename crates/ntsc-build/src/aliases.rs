@@ -623,6 +623,7 @@ impl Rewriter<'_> {
                 value: Box::new(self.expr(*value)),
             },
             Expr::This { keyword } => Expr::This { keyword },
+            Expr::Super { keyword } => Expr::Super { keyword },
             Expr::Lambda {
                 params,
                 return_type,

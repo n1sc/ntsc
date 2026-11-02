@@ -403,7 +403,7 @@ impl Linter {
                 self.check_expr(object);
                 self.check_expr(value);
             }
-            Expr::This { .. } => {}
+            Expr::This { .. } | Expr::Super { .. } => {}
             Expr::Lambda { body, .. } => {
                 let saved = self.suppress_unused;
                 self.suppress_unused = false;

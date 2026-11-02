@@ -152,3 +152,87 @@ fn inheritance_cycles_are_rejected_before_codegen() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Regression: `super` was lexed but rejected in expressions, so a derived
+/// class could not call the base implementation it overrides.
+#[test]
+fn super_calls_the_base_implementation() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rewrite_dir = workspace.parent().unwrap().parent().unwrap();
+    let runtime_lib = rewrite_dir.join(
+        Path::new("target")
+            .join("debug")
+            .join(ntsc_codegen::runtime_lib_name()),
+    );
+    if !runtime_lib.exists() {
+        let status = std::process::Command::new("cargo")
+            .args(["build", "-p", "ntsc-runtime"])
+            .current_dir(rewrite_dir)
+            .status()
+            .expect("failed to run cargo");
+        assert!(status.success(), "failed to build ntsc-runtime");
+    }
+
+    let source = r#"class Base {
+    var string name
+
+    fun init(string n) {
+        this.name = n
+    }
+
+    fun greet() -> string {
+        return "base:" + this.name
+    }
+
+    fun kind() -> string {
+        return "base"
+    }
+}
+
+class Child extends Base {
+    fun init(string n) {
+        super.init(n)
+    }
+
+    fun greet() -> string {
+        return super.greet() + "/child"
+    }
+
+    fun kind() -> string {
+        return super.kind() + "-child"
+    }
+}
+
+fun main() {
+    var Child c = Child("ada")
+    say(c.greet())
+    say(c.kind())
+}
+"#;
+
+    let dir = std::env::temp_dir().join("ntsc_super_e2e_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join(format!("super_call.{}", ntsc_codegen::object_extension()));
+    let bin_path = dir.join("super_call_ntsc_test");
+
+    ntsc_codegen::compile_source(source, ntsc_codegen::host_triple(), "super_call", &dir)
+        .expect("compile_source failed");
+    ntsc_codegen::link_binary(&obj_path, &runtime_lib, &bin_path).expect("link_binary failed");
+
+    let output = std::process::Command::new(&bin_path)
+        .output()
+        .expect("failed to run binary");
+    assert!(
+        output.status.success(),
+        "binary exited with non-zero status: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        stdout.lines().any(|line| line == "base:ada/child"),
+        "{stdout}"
+    );
+    assert!(stdout.lines().any(|line| line == "base-child"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
