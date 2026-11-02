@@ -192,6 +192,10 @@ Errors aim to point at the fix, not just the problem:
 - Warnings name their lint (e.g. `unused_variable`) and the help line shows
   the exact `quiet [lint] { ... }` form that suppresses it locally.
 
+The command line applies the same rule to its own vocabulary: a mistyped
+command or flag names the closest match, so `ntsc buidl` answers with
+`did you mean 'ntsc build'?` instead of a bare error.
+
 ## Environment variables
 
 | Variable | Meaning |

@@ -198,6 +198,20 @@ pub(crate) const GLOBAL_FLAGS: &[(&str, &str)] = &[
     ("--version, -V", "Print detailed version info and exit"),
 ];
 
+const OPTION_NAMES: &[&str] = &[
+    "--cache",
+    "--debug",
+    "--dry-run",
+    "--force-rebuild",
+    "--help",
+    "--json",
+    "--max-age",
+    "--release",
+    "--short",
+    "--tmp",
+    "--version",
+];
+
 fn main() {
     #[cfg(unix)]
     reset_sigpipe();
@@ -373,13 +387,13 @@ fn parse_args() -> Result<(Command, CliOptions), String> {
             "--json" => opts.json = true,
             "--help" | "-h" => return Ok((Command::Help(command.clone()), opts)),
             "--version" | "-V" => return Ok((Command::Version, opts)),
-            _ if arg.starts_with('-') => return Err(format!("unknown option '{arg}'")),
+            _ if arg.starts_with('-') => return Err(unknown_option(&arg)),
             _ => match command.as_deref() {
                 None => {
                     if is_command(&arg) || arg == "help" {
                         command = Some(arg);
                     } else {
-                        return Err(format!("unknown command '{arg}'"));
+                        return Err(unknown_command(&arg));
                     }
                 }
                 Some("init") | Some("docs") if positional.is_empty() => positional.push(arg),
@@ -414,7 +428,7 @@ fn parse_args() -> Result<(Command, CliOptions), String> {
         "pkg" => Command::Pkg(forwarded),
         "cargo" => Command::Cargo(forwarded),
         "lsp" => Command::Lsp,
-        _ => return Err(format!("unknown command '{name}'")),
+        _ => return Err(unknown_command(&name)),
     };
     Ok((command, opts))
 }
@@ -437,13 +451,55 @@ fn is_command(name: &str) -> bool {
     )
 }
 
+fn unknown_command(name: &str) -> String {
+    match closest(name, COMMANDS.iter().map(|doc| doc.name)) {
+        Some(suggestion) => format!("unknown command '{name}'\ndid you mean 'ntsc {suggestion}'?"),
+        None => format!("unknown command '{name}'"),
+    }
+}
+
+fn unknown_option(option: &str) -> String {
+    match closest(option, OPTION_NAMES.iter().copied()) {
+        Some(suggestion) => format!("unknown option '{option}'\ndid you mean '{suggestion}'?"),
+        None => format!("unknown option '{option}'"),
+    }
+}
+
+/// Pick the candidate within a small edit distance of the input.
+fn closest<'a>(input: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let limit = if input.chars().count() <= 4 { 1 } else { 2 };
+    candidates
+        .into_iter()
+        .map(|candidate| (levenshtein(input, candidate), candidate))
+        .filter(|(distance, _)| *distance <= limit)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, candidate)| candidate)
+}
+
+fn levenshtein(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len() + 1];
+    for (row, left_char) in left.chars().enumerate() {
+        current[0] = row + 1;
+        for (column, right_char) in right.iter().enumerate() {
+            let cost = usize::from(left_char != *right_char);
+            current[column + 1] = (previous[column + 1] + 1)
+                .min(current[column] + 1)
+                .min(previous[column] + cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
 fn print_help(target: Option<&str>) -> Result<(), CliError> {
     let mut out = io::stdout().lock();
     let colour = colour_on(io::stdout().is_terminal());
     match target {
         Some(name) => {
             if !print_command_help(&mut out, name, colour)? {
-                return Err(CliError::Plain(format!("unknown command '{name}'")));
+                return Err(CliError::Plain(unknown_command(name)));
             }
         }
         None => print_usage(&mut out, colour)?,
@@ -1618,6 +1674,18 @@ mod tests {
         // Must not resurrect the misleading workspace-only wording.
         assert!(!msg.contains("cannot locate the NTSC workspace"));
     }
+    #[test]
+    fn closest_suggests_near_misses() {
+        let commands = COMMANDS.iter().map(|doc| doc.name);
+        assert_eq!(closest("buidl", commands.clone()), Some("build"));
+        assert_eq!(closest("doc", commands.clone()), Some("docs"));
+        assert_eq!(closest("qwerty", commands), None);
+        assert_eq!(
+            closest("--dryrun", OPTION_NAMES.iter().copied()),
+            Some("--dry-run")
+        );
+    }
+
     #[test]
     fn json_escape_handles_quotes_and_controls() {
         assert_eq!(json_escape("a\"b\\c\n\t"), "a\\\"b\\\\c\\n\\t");
