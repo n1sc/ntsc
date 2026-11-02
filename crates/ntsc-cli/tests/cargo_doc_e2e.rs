@@ -257,10 +257,9 @@ fn cargo_doc_opens_generated_html_with_system_opener() {
     use std::thread;
     use std::time::Duration;
 
-    for _ in 0..100 {
-        if marker.is_file() {
-            break;
-        }
+    // The opener runs as a child process, which can be slow under load.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !marker.is_file() && std::time::Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(marker.is_file(), "fake browser opener was not invoked");
