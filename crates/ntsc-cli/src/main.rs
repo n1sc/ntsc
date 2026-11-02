@@ -1,6 +1,13 @@
+mod docs;
+mod ui;
+
+mod docs_data {
+    include!(concat!(env!("OUT_DIR"), "/docs_data.rs"));
+}
+
 use std::env;
 use std::fs;
-use std::io::{BufRead, IsTerminal};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -9,7 +16,7 @@ use ntsc_ast::stmt::{Program, Stmt};
 use ntsc_codegen::SUMMARY_MARKER;
 use ntsc_diag::{DiagConfig, Diagnostic, SourceBuffer, SourceMap, Writer, diagnostics_to_json};
 
-// The compiler's version is the crate version, so `ntsc --version` can never
+// The compiler's version is the crate version, so --version can never
 // drift from Cargo.toml.
 pub const NTSC_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -31,7 +38,7 @@ fn colour_on(stream_is_tty: bool) -> bool {
     force || (!no_color && !clicolor_off && !dumb_term && stream_is_tty)
 }
 
-/// Wrap `text` in an ANSI escape code when colour is enabled.
+/// Wrap text in an ANSI escape code when colour is enabled.
 fn paint(text: &str, code: &str, colour: bool) -> String {
     if colour {
         format!("{code}{text}{RESET}")
@@ -40,21 +47,183 @@ fn paint(text: &str, code: &str, colour: bool) -> String {
     }
 }
 
+/// One row of the command reference. Shared by --help, ntsc help, and the
+/// interactive landing screen so the three can never drift apart.
+pub(crate) struct CommandDoc {
+    pub name: &'static str,
+    pub usage: &'static str,
+    pub summary: &'static str,
+    pub details: &'static [&'static str],
+    pub options: &'static [(&'static str, &'static str)],
+}
+
+pub(crate) const COMMANDS: &[CommandDoc] = &[
+    CommandDoc {
+        name: "init",
+        usage: "ntsc init [name]",
+        summary: "Scaffold a new project",
+        details: &[
+            "Creates neutron.toml and src/main.nt.",
+            "With no name, scaffolds in the current directory.",
+            "Refuses to overwrite an existing project.",
+        ],
+        options: &[],
+    },
+    CommandDoc {
+        name: "build",
+        usage: "ntsc build [--release] [--json]",
+        summary: "Compile the project",
+        details: &[
+            "Reads neutron.toml, loads the module closure, compiles, and links.",
+            "Writes to build/debug/ or build/release/.",
+        ],
+        options: &[
+            ("--release", "Optimize with LLVM"),
+            ("--json", "Emit the build result and diagnostics as JSON"),
+        ],
+    },
+    CommandDoc {
+        name: "test",
+        usage: "ntsc test [--release] [--json]",
+        summary: "Run every test block",
+        details: &[
+            "Builds with the test harness in place of main.",
+            "Exits non-zero if any test fails.",
+        ],
+        options: &[
+            ("--release", "Optimize with LLVM"),
+            ("--json", "Emit the test summary and diagnostics as JSON"),
+        ],
+    },
+    CommandDoc {
+        name: "run",
+        usage: "ntsc run [--release] [--json]",
+        summary: "Build and execute",
+        details: &["Builds the project, then runs the resulting binary."],
+        options: &[
+            ("--release", "Optimize with LLVM"),
+            ("--json", "Emit diagnostics as JSON"),
+        ],
+    },
+    CommandDoc {
+        name: "clean",
+        usage: "ntsc clean [--cache] [--tmp] [--dry-run] [--max-age <days>]",
+        summary: "Remove build output or caches",
+        details: &[
+            "With no flags, removes build/.",
+            "--cache prunes global Rust adaptor caches.",
+            "--tmp removes stale /tmp/ntsc_* scratch trees.",
+        ],
+        options: &[
+            ("--cache", "Prune global adaptor caches"),
+            ("--tmp", "Remove stale compiler scratch trees"),
+            ("--dry-run", "Show what would be removed"),
+            ("--max-age <days>", "Only prune entries older than <days>"),
+            ("--force-rebuild", "Drop caches even when they are fresh"),
+        ],
+    },
+    CommandDoc {
+        name: "watch",
+        usage: "ntsc watch [--release] [--json]",
+        summary: "Rebuild when sources change",
+        details: &["Polls the module closure and neutron.toml every 400 ms."],
+        options: &[
+            ("--release", "Optimize with LLVM"),
+            ("--json", "Emit diagnostics as JSON"),
+        ],
+    },
+    CommandDoc {
+        name: "graph",
+        usage: "ntsc graph",
+        summary: "Print the module graph as DOT",
+        details: &["Writes a Graphviz digraph of file imports to stdout."],
+        options: &[],
+    },
+    CommandDoc {
+        name: "pkg",
+        usage: "ntsc pkg <command> [args]",
+        summary: "Run the package manager",
+        details: &[
+            "Forwards arguments to ntsc-pkg.",
+            "Commands: install, remove, update, list, search, help.",
+        ],
+        options: &[],
+    },
+    CommandDoc {
+        name: "cargo",
+        usage: "ntsc cargo <command> [args]",
+        summary: "Manage Rust crate dependencies",
+        details: &["Commands: install, remove, list, update, features, doc, coverage, gc."],
+        options: &[],
+    },
+    CommandDoc {
+        name: "lsp",
+        usage: "ntsc lsp",
+        summary: "Start the language server",
+        details: &["Speaks LSP over stdio for editor integration."],
+        options: &[],
+    },
+    CommandDoc {
+        name: "docs",
+        usage: "ntsc docs [page]",
+        summary: "Browse the documentation",
+        details: &[
+            "Reads docs/ from the checkout when available, otherwise the embedded copy.",
+            "With a page name or path, opens that page.",
+            "When stdout is not a terminal, prints the index or the page body.",
+        ],
+        options: &[],
+    },
+    CommandDoc {
+        name: "version",
+        usage: "ntsc version | --version | -V",
+        summary: "Print detailed version information",
+        details: &["Shows the version, LLVM revision, host triple, build profile, and git commit."],
+        options: &[],
+    },
+    CommandDoc {
+        name: "help",
+        usage: "ntsc help [command]",
+        summary: "Show help for a command",
+        details: &["With no command, prints the full command reference."],
+        options: &[],
+    },
+];
+
+pub(crate) const GLOBAL_FLAGS: &[(&str, &str)] = &[
+    ("--release", "Build with LLVM aggressive optimization"),
+    ("--debug", "Build with no optimization (default)"),
+    ("--json", "Emit diagnostics and results as JSON lines"),
+    ("--help, -h", "Print help, optionally for one command"),
+    ("--version, -V", "Print detailed version info and exit"),
+];
+
 fn main() {
+    #[cfg(unix)]
+    reset_sigpipe();
+
+    if env::args_os().len() == 1 {
+        if ui::interactive_available() && ui::run_landing().is_ok() {
+            return;
+        }
+        let mut out = io::stderr().lock();
+        let _ = print_usage(&mut out, colour_on(io::stderr().is_terminal()));
+        std::process::exit(1);
+    }
+
     let (command, opts) = match parse_args() {
         Ok(parsed) => parsed,
-        Err(msg) => {
-            eprintln!("error: {msg}");
-            print_usage();
+        Err(message) => {
+            eprintln!("error: {message}");
+            let mut out = io::stderr().lock();
+            let _ = print_usage(&mut out, colour_on(io::stderr().is_terminal()));
             std::process::exit(1);
         }
     };
 
     let result = match command {
-        Command::Help => {
-            print_usage();
-            Ok(())
-        }
+        Command::Help(target) => print_help(target.as_deref()),
+        Command::Docs(page) => cmd_docs(page.as_deref()),
         Command::Version => {
             print_version();
             Ok(())
@@ -76,6 +245,16 @@ fn main() {
     if let Err(e) = result {
         report(e, opts.json);
         std::process::exit(1);
+    }
+}
+
+/// Rust ignores SIGPIPE by default, which turns a piped ntsc run into a
+/// panic on the first failed write. Restore the conventional behaviour.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    // SAFETY: signal is async-signal-safe and SIG_DFL is a valid handler.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 
@@ -124,11 +303,10 @@ impl From<ntsc_codegen::CodegenError> for CliError {
     }
 }
 
-/// Print a CLI error: diagnostics through the writer, plain messages as
-/// text.
+/// Print a CLI error: diagnostics through the writer, plain messages as a
+/// styled panel (or plain text when the terminal cannot render it).
 ///
-/// With `--json`, emit a machine-readable JSON document on stdout
-/// instead.
+/// With --json, emit a machine-readable JSON document on stdout instead.
 fn report(error: CliError, json: bool) {
     match error {
         CliError::Diagnostics { diags, sources } => {
@@ -143,14 +321,15 @@ fn report(error: CliError, json: bool) {
             if json {
                 println!("{}", diagnostics_to_json(&[Diagnostic::error(msg)]));
             } else {
-                eprintln!("error: {msg}");
+                ui::report_plain_error(&msg);
             }
         }
     }
 }
 
 enum Command {
-    Help,
+    Help(Option<String>),
+    Docs(Option<String>),
     Version,
     Init(Option<String>),
     Build,
@@ -164,114 +343,182 @@ enum Command {
     Lsp,
 }
 
-/// Parse the command line, accepting flags (`--release`, `--debug`,
-/// `--json`, `--help`) before or after the subcommand.
+/// Parse the command line, accepting global flags (--release, --debug,
+/// --json, --help, --version) before or after the subcommand.
 fn parse_args() -> Result<(Command, CliOptions), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut opts = CliOptions::default();
-    let mut command = None;
-    let mut init_name = None;
-    let mut pkg_args = Vec::new();
-    let mut cargo_args = Vec::new();
-    let mut clean_args = Vec::new();
+    let mut command: Option<String> = None;
+    let mut positional: Vec<String> = Vec::new();
+    let mut forwarded: Vec<String> = Vec::new();
 
     for arg in args {
-        if command.as_deref() == Some("pkg") {
-            pkg_args.push(arg);
-            continue;
+        if let Some(name) = command.as_deref() {
+            if matches!(name, "pkg" | "cargo") {
+                forwarded.push(arg);
+                continue;
+            }
+            if name == "clean" {
+                if matches!(arg.as_str(), "--help" | "-h") {
+                    return Ok((Command::Help(Some(name.to_string())), opts));
+                }
+                forwarded.push(arg);
+                continue;
+            }
         }
-        if command.as_deref() == Some("cargo") {
-            cargo_args.push(arg);
-            continue;
-        }
-        if command.as_deref() == Some("clean") {
-            clean_args.push(arg);
-            continue;
-        }
+
         match arg.as_str() {
             "--release" => opts.release = true,
             "--debug" => opts.release = false,
             "--json" => opts.json = true,
-            "--help" | "-h" => return Ok((Command::Help, opts)),
+            "--help" | "-h" => return Ok((Command::Help(command.clone()), opts)),
             "--version" | "-V" => return Ok((Command::Version, opts)),
-            "version" => return Ok((Command::Version, opts)),
-            "init" | "build" | "test" | "run" | "clean" | "watch" | "graph" | "pkg" | "cargo"
-            | "lsp" => {
-                if command.is_some() {
-                    return Err(format!("unexpected argument `{arg}`"));
+            _ if arg.starts_with('-') => return Err(format!("unknown option '{arg}'")),
+            _ => match command.as_deref() {
+                None => {
+                    if is_command(&arg) || arg == "help" {
+                        command = Some(arg);
+                    } else {
+                        return Err(format!("unknown command '{arg}'"));
+                    }
                 }
-                command = Some(arg);
-            }
-            _ if command.as_deref() == Some("init") && init_name.is_none() => {
-                init_name = Some(arg);
-            }
-            other => return Err(format!("unknown argument `{other}`")),
+                Some("init") | Some("docs") if positional.is_empty() => positional.push(arg),
+                Some("help") if positional.len() < 2 => positional.push(arg),
+                Some(_) => return Err(format!("unexpected argument '{arg}'")),
+            },
         }
     }
 
-    let command = match command {
-        Some(c) => c,
-        None => return Err("missing command".to_string()),
-    };
-    let command = match command.as_str() {
-        "init" => Command::Init(init_name),
+    let name = command.ok_or_else(|| "missing command".to_string())?;
+    let command = match name.as_str() {
+        "help" => {
+            if positional.len() > 1 {
+                return Err("help takes at most one command name".to_string());
+            }
+            Command::Help(positional.into_iter().next())
+        }
+        "version" => {
+            if !positional.is_empty() {
+                return Err("version takes no arguments".to_string());
+            }
+            Command::Version
+        }
+        "init" => Command::Init(positional.into_iter().next()),
+        "docs" => Command::Docs(positional.into_iter().next()),
         "build" => Command::Build,
         "test" => Command::Test,
         "run" => Command::Run,
-        "clean" => Command::Clean(clean_args),
+        "clean" => Command::Clean(forwarded),
         "watch" => Command::Watch,
         "graph" => Command::Graph,
-        "pkg" => Command::Pkg(pkg_args),
-        "cargo" => Command::Cargo(cargo_args),
+        "pkg" => Command::Pkg(forwarded),
+        "cargo" => Command::Cargo(forwarded),
         "lsp" => Command::Lsp,
-        _ => unreachable!("validated above"),
+        _ => return Err(format!("unknown command '{name}'")),
     };
     Ok((command, opts))
 }
 
-fn print_usage() {
-    let colour = colour_on(std::io::stderr().is_terminal());
-    let bold = |text: &str| paint(text, BOLD, colour);
-    let cell = |name: &str| paint(&format!("{name:<16}"), CYAN, colour);
-    let row = |name: &str, desc: &str| format!("  {}{desc}", cell(name));
+fn is_command(name: &str) -> bool {
+    matches!(
+        name,
+        "init"
+            | "build"
+            | "test"
+            | "run"
+            | "clean"
+            | "watch"
+            | "graph"
+            | "pkg"
+            | "cargo"
+            | "lsp"
+            | "docs"
+            | "version"
+    )
+}
 
-    eprintln!("ntsc — Neutron Type-Safe Compiler {}", bold(NTSC_VERSION));
-    eprintln!();
-    eprintln!("A statically typed, memory-safe systems language compiled to native");
-    eprintln!("binaries through LLVM.");
-    eprintln!();
-    eprintln!("Usage: ntsc <command> [options]");
-    eprintln!();
-    eprintln!("{}", bold("Commands:"));
-    eprintln!("{}", row("init [name]", "Scaffold a new project"));
-    eprintln!(
-        "{}",
-        row("build", "Compile to build/debug/ or build/release/")
-    );
-    eprintln!("{}", row("test", "Discover and run `test` blocks"));
-    eprintln!("{}", row("run", "Build and execute"));
-    eprintln!("{}", row("clean", "Remove build/ (or caches with --cache)"));
-    eprintln!("{}", row("watch", "Rebuild when sources change"));
-    eprintln!("{}", row("pkg [args]", "Run the package manager"));
-    eprintln!("{}", row("cargo [args]", "Manage Rust crate dependencies"));
-    eprintln!(
-        "{}",
-        row("graph", "Print the module dependency graph as DOT")
-    );
-    eprintln!(
-        "{}",
-        row("lsp", "Start the language server (LSP over stdio)")
-    );
-    eprintln!();
-    eprintln!("{}", bold("Options:"));
-    eprintln!("{}", row("--release", "Build in release mode"));
-    eprintln!("{}", row("--debug", "Build in debug mode (default)"));
-    eprintln!("{}", row("--json", "Emit diagnostics as JSON on stdout"));
-    eprintln!(
-        "{}",
-        row("--version, -V", "Print detailed version info and exit")
-    );
-    eprintln!("{}", row("--help, -h", "Print this help and exit"));
+fn print_help(target: Option<&str>) -> Result<(), CliError> {
+    let mut out = io::stdout().lock();
+    let colour = colour_on(io::stdout().is_terminal());
+    match target {
+        Some(name) => {
+            if !print_command_help(&mut out, name, colour)? {
+                return Err(CliError::Plain(format!("unknown command '{name}'")));
+            }
+        }
+        None => print_usage(&mut out, colour)?,
+    }
+    Ok(())
+}
+
+fn print_usage(out: &mut dyn Write, colour: bool) -> io::Result<()> {
+    let bold = |text: &str| paint(text, BOLD, colour);
+    let cell = |name: &str| paint(&format!("{name:<20}"), CYAN, colour);
+
+    writeln!(
+        out,
+        "ntsc — Neutron Type-Safe Compiler {}",
+        bold(NTSC_VERSION)
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "A statically typed, memory-safe systems language compiled to native"
+    )?;
+    writeln!(out, "binaries through LLVM.")?;
+    writeln!(out)?;
+    writeln!(out, "Usage: ntsc [options] <command> [args]")?;
+    writeln!(out)?;
+    writeln!(out, "{}", bold("Commands:"))?;
+    for doc in COMMANDS {
+        let name = if doc.name == "init" {
+            "init [name]"
+        } else {
+            doc.name
+        };
+        writeln!(out, "  {}{}", cell(name), doc.summary)?;
+    }
+    writeln!(out)?;
+    writeln!(out, "{}", bold("Options:"))?;
+    for (flag, description) in GLOBAL_FLAGS {
+        writeln!(out, "  {}{}", cell(flag), description)?;
+    }
+    writeln!(out)?;
+    writeln!(
+        out,
+        "Run ntsc help <command> for details, or just ntsc for the interactive screen."
+    )?;
+    Ok(())
+}
+
+fn print_command_help(out: &mut dyn Write, name: &str, colour: bool) -> io::Result<bool> {
+    let Some(doc) = COMMANDS.iter().find(|doc| doc.name == name) else {
+        return Ok(false);
+    };
+    let bold = |text: &str| paint(text, BOLD, colour);
+
+    writeln!(out, "{}", bold(doc.summary))?;
+    writeln!(out)?;
+    writeln!(out, "Usage: {}", paint(doc.usage, CYAN, colour))?;
+    if !doc.details.is_empty() {
+        writeln!(out)?;
+        for detail in doc.details {
+            writeln!(out, "  {detail}")?;
+        }
+    }
+    if !doc.options.is_empty() {
+        writeln!(out)?;
+        writeln!(out, "{}", bold("Options:"))?;
+        for (flag, description) in doc.options {
+            writeln!(
+                out,
+                "  {}{}",
+                paint(&format!("{flag:<22}"), CYAN, colour),
+                description
+            )?;
+        }
+    }
+    Ok(true)
 }
 
 /// Print a detailed version banner: version, LLVM revision, host triple,
@@ -348,23 +595,79 @@ impl BuildMode {
     }
 }
 
-/// Scaffold a new project with exactly two files: `neutron.toml` and
-/// `src/main.nt`.
-fn cmd_init(project_name: Option<&str>) -> Result<(), CliError> {
-    let name = match project_name {
-        Some(n) => n.to_string(),
-        None => {
-            let cwd = env::current_dir()?;
-            cwd.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("my-project")
-                .to_string()
-        }
+/// Open the built-in documentation browser, or print docs when stdout is
+/// not a terminal.
+fn cmd_docs(page: Option<&str>) -> Result<(), CliError> {
+    let pages = docs::load_docs();
+    if pages.is_empty() {
+        return Err(CliError::Plain(
+            "no documentation pages were found in this build".into(),
+        ));
+    }
+
+    let index = match page {
+        Some(query) => match ui::docs::find_doc(&pages, query) {
+            Some(index) => Some(index),
+            None => {
+                return Err(CliError::Plain(format!(
+                    "no documentation page matches '{query}'"
+                )));
+            }
+        },
+        None => None,
     };
 
-    let project_dir = Path::new(&name);
-    let src_dir = project_dir.join("src");
-    fs::create_dir_all(&src_dir)?;
+    if ui::interactive_available() {
+        return ui::docs::run_docs(pages, index).map_err(CliError::from);
+    }
+
+    let mut out = io::stdout().lock();
+    match index {
+        Some(index) => out.write_all(pages[index].body.as_bytes())?,
+        None => {
+            for doc in &pages {
+                writeln!(out, "{:<44} {}", doc.title, doc.path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Scaffold a new project with exactly two files: neutron.toml and
+/// src/main.nt.
+///
+/// With no name the project is scaffolded in the current directory; with a
+/// name it is created in ./<name>. Existing projects are never overwritten.
+fn cmd_init(project_name: Option<&str>) -> Result<(), CliError> {
+    let cwd = env::current_dir()?;
+    let project_dir = match project_name {
+        Some(name) => {
+            let target = Path::new(name);
+            if name.is_empty() || target == Path::new(".") {
+                cwd.clone()
+            } else {
+                cwd.join(target)
+            }
+        }
+        None => cwd.clone(),
+    };
+
+    let name = project_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("my-project")
+        .to_string();
+
+    let manifest_path = project_dir.join("neutron.toml");
+    let main_path = project_dir.join("src").join("main.nt");
+    if manifest_path.exists() || main_path.exists() {
+        return Err(CliError::Plain(format!(
+            "refusing to overwrite the existing project in {}",
+            project_dir.display()
+        )));
+    }
+
+    fs::create_dir_all(project_dir.join("src"))?;
 
     let neutron_toml = format!(
         "[package]\n\
@@ -372,14 +675,14 @@ fn cmd_init(project_name: Option<&str>) -> Result<(), CliError> {
          output = \"{}\"\n",
         ntsc_codegen::with_executable_extension(&name),
     );
-    fs::write(project_dir.join("neutron.toml"), &neutron_toml)?;
+    fs::write(&manifest_path, &neutron_toml)?;
 
     let main_nt = "fun main() {\n    say(\"Hello, World!\")\n}\n";
-    fs::write(src_dir.join("main.nt"), main_nt)?;
+    fs::write(&main_path, main_nt)?;
 
-    println!("Created project `{name}`:");
-    println!("  {name}/neutron.toml");
-    println!("  {name}/src/main.nt");
+    println!("Created project '{name}' in {}", project_dir.display());
+    println!("  {}", display_rel(&cwd, &manifest_path));
+    println!("  {}", display_rel(&cwd, &main_path));
 
     Ok(())
 }
@@ -562,6 +865,14 @@ fn cmd_build(release: bool, test_mode: bool, json: bool) -> Result<PathBuf, CliE
             output_path.display()
         );
     }
+
+    if json {
+        println!(
+            "{{\"success\":true,\"output\":\"{}\",\"mode\":\"{}\"}}",
+            json_escape(&output_path.display().to_string()),
+            mode.dir_name()
+        );
+    }
     Ok(output_path)
 }
 
@@ -678,13 +989,14 @@ fn cmd_test(release: bool, json: bool) -> Result<PathBuf, CliError> {
     let mut child = std::process::Command::new(&output_path)
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| CliError::Plain(format!("failed to run `{}`: {e}", output_path.display())))?;
+        .map_err(|e| CliError::Plain(format!("failed to run '{}': {e}", output_path.display())))?;
 
-    // The generated harness reports its totals on a `__NTSC_SUMMARY__`
-    // line (see `emit_test_harness`). That marker is an internal protocol
-    // between codegen and this command, so it is consumed here and
-    // re-rendered rather than shown to the user. Output is streamed line
-    // by line so test progress still appears as it happens.
+    // The generated harness reports its totals on a __NTSC_SUMMARY__ line
+    // (see emit_test_harness). That marker is an internal protocol between
+    // codegen and this command, so it is consumed here and re-rendered rather
+    // than shown to the user. Human-readable output is streamed line by line
+    // so test progress still appears as it happens; with --json, stdout stays
+    // machine-readable and only the summary object is printed.
     let mut summary = None;
     if let Some(stdout) = child.stdout.take() {
         let reader = std::io::BufReader::new(stdout);
@@ -693,6 +1005,7 @@ fn cmd_test(release: bool, json: bool) -> Result<PathBuf, CliError> {
                 line.map_err(|e| CliError::Plain(format!("failed to read test output: {e}")))?;
             match line.strip_prefix(SUMMARY_MARKER) {
                 Some(totals) => summary = Some(totals.trim().to_string()),
+                None if json => {}
                 None => println!("{line}"),
             }
         }
@@ -700,9 +1013,16 @@ fn cmd_test(release: bool, json: bool) -> Result<PathBuf, CliError> {
 
     let status = child
         .wait()
-        .map_err(|e| CliError::Plain(format!("failed to run `{}`: {e}", output_path.display())))?;
+        .map_err(|e| CliError::Plain(format!("failed to run '{}': {e}", output_path.display())))?;
 
-    if !json && let Some(totals) = summary {
+    let totals = summary.unwrap_or_else(|| "no tests ran".to_string());
+    if json {
+        println!(
+            "{{\"success\":{},\"summary\":\"{}\"}}",
+            status.success(),
+            json_escape(&totals)
+        );
+    } else {
         let colour = colour_on(std::io::stdout().is_terminal());
         let label = if status.success() { GREEN } else { BOLD };
         println!("  {} {totals}", paint("Summary", label, colour));
@@ -762,9 +1082,16 @@ fn cmd_clean(args: &[String]) -> Result<(), CliError> {
                         CliError::Plain("--max-age requires a number of days".into())
                     })?);
             }
-            other => return Err(CliError::Plain(format!("unknown clean option `{other}`"))),
+            other => return Err(CliError::Plain(format!("unknown clean option '{other}'"))),
         }
         index += 1;
+    }
+
+    if max_age.is_some() && !clean_cache {
+        return Err(CliError::Plain("--max-age requires --cache".into()));
+    }
+    if force_rebuild && !clean_cache {
+        return Err(CliError::Plain("--force-rebuild requires --cache".into()));
     }
 
     if clean_cache {
@@ -787,10 +1114,18 @@ fn cmd_clean(args: &[String]) -> Result<(), CliError> {
 
     let cwd = env::current_dir()?;
     let build_dir = cwd.join("build");
-    if build_dir.exists() {
-        fs::remove_dir_all(&build_dir)?;
+    if !build_dir.exists() {
+        if !dry_run {
+            println!("Nothing to remove: {} does not exist", build_dir.display());
+        }
+        return Ok(());
     }
-    println!("Removed {}", build_dir.display());
+    if dry_run {
+        println!("would remove {}", build_dir.display());
+    } else {
+        fs::remove_dir_all(&build_dir)?;
+        println!("Removed {}", build_dir.display());
+    }
     Ok(())
 }
 
@@ -926,8 +1261,7 @@ fn cmd_pkg(args: &[String]) -> Result<(), CliError> {
     if !pkg.is_file() {
         return Err(CliError::Plain(format!(
             "cannot find the package manager beside ntsc: {}\n\
-             reinstall ntsc, or run `arq install` from a source checkout, which \
-             builds ntsc-pkg and installs it beside the compiler",
+             reinstall ntsc so ntsc-pkg is installed beside the compiler",
             pkg.display()
         )));
     }
@@ -1227,6 +1561,25 @@ fn find_rewrite_dir_from_exe() -> Option<PathBuf> {
     find_rewrite_dir(&exe).ok().flatten()
 }
 
+/// Escape a string for embedding in a JSON string literal.
+fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            character if (character as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => out.push(character),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1264,5 +1617,9 @@ mod tests {
         assert!(msg.contains("<prefix>/lib/ntsc/"));
         // Must not resurrect the misleading workspace-only wording.
         assert!(!msg.contains("cannot locate the NTSC workspace"));
+    }
+    #[test]
+    fn json_escape_handles_quotes_and_controls() {
+        assert_eq!(json_escape("a\"b\\c\n\t"), "a\\\"b\\\\c\\n\\t");
     }
 }

@@ -15,27 +15,30 @@ Flags may appear before or after the command.
 
 | Command | Description |
 | --- | --- |
-| `ntsc init [name]` | Scaffold a new project in `./name` (defaults to the current directory name). |
+| `ntsc init [name]` | Scaffold a project in `./name`, or in the current directory when no name is given. Refuses to overwrite existing files. |
 | `ntsc build` | Compile the project to `build/debug/`. |
 | `ntsc test` | Compile in test mode and run every `test` block. |
 | `ntsc run` | Build, then execute the resulting binary. |
 | `ntsc clean` | Remove the `build/` directory. |
-| `ntsc clean --cache [--dry-run] [--max-age <days>]` | Prune stale global Rust adaptor caches. |
+| `ntsc clean --cache [--dry-run] [--max-age <days>] [--force-rebuild]` | Prune stale global Rust adaptor caches. |
 | `ntsc clean --tmp [--dry-run]` | Remove stale `/tmp/ntsc_*` compiler scratch trees. |
 | `ntsc watch` | Rebuild whenever a source file or `neutron.toml` changes. |
+| `ntsc docs [page]` | Browse the embedded documentation with search, or print a page when stdout is not a terminal. |
 | `ntsc graph` | Print the module dependency graph as DOT. |
 | `ntsc cargo doc <crate> [--no-open]` | Generate Neutron-facing HTML docs for a Rust adaptor; print a terminal summary and open the page unless `--no-open` is given. Hyphenated package names use underscore namespaces in Neutron. |
 | `ntsc cargo coverage [<crate>]` | Report export-manifest coverage for all direct Rust adaptors, or for one named crate. |
 | `ntsc cargo …` | Manage Rust crate dependencies; the generated adaptors follow [the autogen standard](rust-autogen.md). |
 | `ntsc pkg <command>` | Install, update, remove, list, and search project dependencies. See [Packages](../guide/packages.md). |
 | `ntsc version` / `--version` / `-V` | Print detailed version info (version, LLVM revision, host triple, build profile, git commit) and exit. |
-| `ntsc --help` / `-h` | Print usage. |
+| `ntsc help [command]` | Print the command reference, or details for one command. |
+| `ntsc --help` / `-h` | Print usage to stdout. |
 
-`ntsc init` creates exactly two files:
+`ntsc init` creates exactly two files (and never overwrites an existing
+project):
 
 ```
 name/
-   neutron.toml      entry/output; target defaults to the host platform
+  neutron.toml    entry/output; target defaults to the host platform
   src/main.nt     fun main() { say("Hello, World!") }
 ```
 
@@ -45,20 +48,48 @@ name/
 | --- | --- |
 | `--release` | Build with LLVM aggressive optimization into `build/release/`. |
 | `--debug` | Build with no optimization into `build/debug/` (the default). |
-| `--json` | Emit diagnostics as JSON on stdout. |
+| `--json` | Emit diagnostics and results as JSON lines on stdout; `build` and `test` suppress human progress. |
 
 ## Build output
 
 A successful build prints, for each module, its parse time:
 
 ```
-  Modules (1):
+  Compiling 1 module:
     src/main.nt (0.1ms)
-  load 0.2ms, codegen 3.4ms, link 1.1ms
-Build complete (Debug): /path/to/build/debug/hello
+  Timing load 0.2ms, codegen 3.4ms, link 1.1ms
+  Finished Debug build at /path/to/build/debug/hello
 ```
 
 `ntsc run` additionally prints `Running /path/to/build/debug/hello...`.
+
+## Help and the interactive screen
+
+`ntsc --help` and `ntsc help [command]` write to stdout, so they can be piped
+or redirected. Bare `ntsc` opens an interactive screen with the ASCII logo, a
+selectable command list, and a detail pane; `q` or `Esc` exits. When stdout is
+not a terminal, bare `ntsc` prints the same usage text to stderr and exits 1.
+
+Plain CLI errors render as a rounded, coloured panel when the terminal can
+host one, and fall back to `error: ...` text otherwise. Compiler diagnostics
+keep their annotated source snippets and colour settings.
+
+## Documentation browser
+
+`ntsc docs` opens a page list, a rendered Markdown pane, and incremental
+search across titles, paths, and page text. In a checkout it reads `docs/`
+from the nearest ancestor of the working directory or the executable, so edits
+show up on the next launch without rebuilding; installed binaries fall back to
+the copy embedded at build time. Set `NTSC_DOCS_DIR` to point at a docs
+directory, and press `r` in the browser to reload it.
+
+Fenced code blocks are highlighted for Neutron, TOML, shell, console, Rust,
+and PowerShell, with a coloured language badge above each block.
+
+Press `/` to search, `Enter` to keep the filter, `Esc` to clear it,
+`PgUp`/`PgDn` to scroll, and `q` to quit. `ntsc docs <page>` opens a page
+directly by title, path, or path without `.md`. When stdout is not a terminal,
+`ntsc docs` prints the page index and `ntsc docs <page>` prints the raw page.
 
 ## The build manifest
 
@@ -110,7 +141,8 @@ features may change or be removed in any release.
 
 `ntsc pkg` is a separate executable, `ntsc-pkg`, installed beside the
 compiler by `arq install` and the release packages. `ntsc pkg` forwards its
-arguments to it.
+arguments to it. Invalid invocations report errors and usage on stderr, and
+extra arguments are rejected.
 
 | Command | Description |
 | --- | --- |
@@ -144,7 +176,9 @@ The error limit defaults to 20 and can be changed with `NTSC_MAX_ERRORS`
 (`0` means unlimited). With `--json`, diagnostics are emitted as structured
 JSON on stdout instead; each object carries `severity`, `code`, `message`,
 span fields, optional `help`, and — for warnings — the `lint` name that
-silences it locally.
+silences it locally. On success, `ntsc build --json` prints
+`{"success":true,"output":"...","mode":"debug"}` and `ntsc test --json` prints
+`{"success":true,"summary":"N passed, M failed"}`.
 
 Errors aim to point at the fix, not just the problem:
 
@@ -163,6 +197,7 @@ Errors aim to point at the fix, not just the problem:
 | `LLVM_SYS_231_PREFIX` | Location of an LLVM 23 installation. |
 | `NTSC_MAX_ERRORS` | Maximum diagnostics shown per run; `0` is unlimited. |
 | `NTSC_REGISTRY` | Package registry index URL; defaults to `https://ntsc.yasakei.dev/v1/registry`. |
+| `NTSC_DOCS_DIR` | Documentation directory for `ntsc docs`; overrides checkout discovery. |
 | `CLICOLOR_FORCE`, `NO_COLOR`, `CLICOLOR`, `TERM` | Diagnostic color control. |
 
 ## The runtime library

@@ -19,4 +19,9 @@ ntsc-typeck = { path = "../ntsc-typeck" }
 ntsc-diag = { path = "../ntsc-diag" }
 ntsc-cargo = { path = "../ntsc-cargo" }
 ntsc-lsp = { path = "../ntsc-lsp" }
+ratatui = "0.29"
+pulldown-cmark = { version = "0.13", default-features = false }
+# Restores the default SIGPIPE handler so piping `ntsc` output into
+# `head`/`less` exits quietly instead of panicking on a broken pipe.
+libc = "0.2"
 inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["llvm23-1-force-dynamic", "target-x86", "target-aarch64"] }

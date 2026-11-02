@@ -167,12 +167,14 @@ first-class bare-module imports as builtin modules.
 | `ntsc test [--release]` | Discover and run `test` blocks |
 | `ntsc run [--release]` | Build and execute |
 | `ntsc clean` | Remove the `build/` directory |
-| `ntsc clean --cache [--dry-run] [--max-age <days>]` | Prune stale global Rust adaptor caches |
+| `ntsc clean --cache [--dry-run] [--max-age <days>] [--force-rebuild]` | Prune stale global Rust adaptor caches |
 | `ntsc clean --tmp [--dry-run]` | Remove stale `/tmp/ntsc_*` compiler scratch trees |
 | `ntsc watch [--release]` | Rebuild when sources change |
+| `ntsc docs [page]` | Browse the built-in documentation with search |
 | `ntsc pkg [args]` | Run the package manager |
 | `ntsc graph` | Print the module dependency graph as DOT |
 | `ntsc lsp` | Start the language server (LSP over stdio) |
+| `ntsc help [command]` | Show command help |
 | `ntsc --version` | Print the compiler version |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

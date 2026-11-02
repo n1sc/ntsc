@@ -39,6 +39,10 @@ fn main() {
     println!("cargo:rustc-env=NTSC_BUILD_DATE={date}");
     println!("cargo:rerun-if-env-changed=NTSC_PACKAGED_BUILD");
     println!("cargo:rerun-if-env-changed=VERGEN_GIT_SHA");
+
+    if let Err(error) = generate_docs() {
+        println!("cargo:warning=could not embed documentation: {error}");
+    }
 }
 
 fn encode_base36(mut value: u128) -> String {
@@ -53,4 +57,76 @@ fn encode_base36(mut value: u128) -> String {
     }
     out.reverse();
     String::from_utf8(out).unwrap_or_else(|_| "0".into())
+}
+
+/// Embed every Markdown file under docs/ so the docs browser works from an
+/// installed binary with no checkout on disk.
+fn generate_docs() -> std::io::Result<()> {
+    let manifest = std::env::var_os("CARGO_MANIFEST_DIR")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "CARGO_MANIFEST_DIR"))?;
+    let docs_root = std::path::PathBuf::from(manifest).join("../../docs");
+    let mut pages = Vec::new();
+    collect_pages(&docs_root, &docs_root, &mut pages)?;
+    pages.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut generated = String::from(
+        "pub(crate) struct EmbeddedDoc {\n    pub title: &'static str,\n    pub path: &'static str,\n    pub body: &'static str,\n}\n\npub(crate) const EMBEDDED: &[EmbeddedDoc] = &[\n",
+    );
+    for (relative, title) in &pages {
+        generated.push_str(&format!(
+            "    EmbeddedDoc {{ title: {title:?}, path: {relative:?}, body: include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../docs/{relative}\")) }},\n"
+        ));
+    }
+    generated.push_str("];\n");
+
+    let out_dir = std::env::var_os("OUT_DIR")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "OUT_DIR"))?;
+    std::fs::write(
+        std::path::PathBuf::from(out_dir).join("docs_data.rs"),
+        generated,
+    )?;
+    println!("cargo:rerun-if-changed={}", docs_root.display());
+    Ok(())
+}
+
+fn collect_pages(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    pages: &mut Vec<(String, String)>,
+) -> std::io::Result<()> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        entries.push(entry?);
+    }
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_pages(root, &path, pages)?;
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("md") {
+            let body = std::fs::read_to_string(&path)?;
+            let title = title_for(&path, &body);
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            pages.push((relative, title));
+        }
+    }
+    Ok(())
+}
+
+fn title_for(path: &std::path::Path, body: &str) -> String {
+    body.lines()
+        .find_map(|line| line.strip_prefix("# "))
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("Documentation")
+                .replace('-', " ")
+        })
 }
