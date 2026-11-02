@@ -55,10 +55,30 @@ pub type CargoResult<T> = Result<T, CargoError>;
 /// Dispatch mirrors the shape of the CLI's own command enum: `install`,
 /// `remove`, `update`, `list`, and `gc` all live behind this entry point,
 /// parallel to how `ntsc pkg` dispatches to its own manager.
+/// Print the ntsc cargo command reference.
+fn print_usage() {
+    println!("ntsc cargo - manage Rust crate dependencies");
+    println!();
+    println!("commands:");
+    println!("  install <crate>               add a crate to [rust-deps]");
+    println!("  remove <crate>                drop a crate and its adaptor");
+    println!("  list                          list configured Rust crates");
+    println!("  update [crate]                re-resolve dependencies");
+    println!("  features <crate> --add <f>    enable a crate feature");
+    println!("  features <crate> --remove <f> disable a crate feature");
+    println!("  doc <crate> [--no-open]       generate adaptor docs");
+    println!("  coverage [crate]              report export-manifest coverage");
+    println!("  gc [--dry-run] [--max-age <days>] [--force-rebuild]");
+}
+
 pub fn run(args: &[String], project_dir: &Path) -> CargoResult<()> {
     let cache = cache::CacheRoot::from_env();
     let sub = args.first().map(String::as_str).unwrap_or_default();
     match sub {
+        "" | "help" | "--help" | "-h" => {
+            print_usage();
+            Ok(())
+        }
         "install" => {
             let name = args
                 .get(1)
@@ -109,7 +129,7 @@ pub fn run(args: &[String], project_dir: &Path) -> CargoResult<()> {
             cache::gc(&cache, dry_run, max_age, force_rebuild)
         }
         _ => Err(CargoError(format!(
-            "unknown `ntsc cargo` subcommand `{sub}`"
+            "unknown `ntsc cargo` subcommand `{sub}` (try `ntsc cargo --help`)"
         ))),
     }
 }

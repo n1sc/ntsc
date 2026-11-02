@@ -1,9 +1,11 @@
 use "modules/install" as installer
 use "modules/registry" as registry
 
-use sys
-use strings
 use arrays
+use io
+use strings
+use sys
+use term
 
 fun main() -> int {
     var args = sys.args()
@@ -19,21 +21,61 @@ fun main() -> int {
 
     match (command) {
         case "install" => {
+            if (too_many(args, 1)) {
+                return usage_error("install takes at most one package")
+            }
+            if (is_help(first)) {
+                usage()
+                return 0
+            }
             if (strings.is_empty(first)) {
                 return report(installer.install(sys.cwd()))
             }
             return report(installer.add(sys.cwd(), first))
         }
         case "remove" => {
+            if (too_many(args, 1)) {
+                return usage_error("remove takes exactly one package name")
+            }
+            if (is_help(first)) {
+                usage()
+                return 0
+            }
             if (strings.is_empty(first)) {
-                say("usage: ntsc pkg remove <name>")
-                return 1
+                return usage_error("remove needs a package name")
             }
             return report(installer.remove(sys.cwd(), first))
         }
-        case "update" => return report(installer.update(sys.cwd()))
-        case "list" => return report(installer.list_installed(sys.cwd()))
-        case "search" => return search(first)
+        case "update" => {
+            if (too_many(args, 0)) {
+                return usage_error("update takes no arguments")
+            }
+            if (is_help(first)) {
+                usage()
+                return 0
+            }
+            return report(installer.update(sys.cwd()))
+        }
+        case "list" => {
+            if (too_many(args, 0)) {
+                return usage_error("list takes no arguments")
+            }
+            if (is_help(first)) {
+                usage()
+                return 0
+            }
+            return report(installer.list_installed(sys.cwd()))
+        }
+        case "search" => {
+            if (too_many(args, 1)) {
+                return usage_error("search takes exactly one query")
+            }
+            if (is_help(first)) {
+                usage()
+                return 0
+            }
+            return search(first)
+        }
         case "help" => {
             usage()
             return 0
@@ -51,36 +93,46 @@ fun main() -> int {
             return 0
         }
         default => {
-            say("error: unknown command '" + copy(command) + "'")
-            say("")
-            usage()
-            return 1
+            return usage_error("unknown command '" + copy(command) + "'")
         }
     }
+}
+
+fun is_help(view string value) -> bool {
+    return value == "--help" || value == "-h"
+}
+
+fun too_many(view array[string] args, int allowed) -> bool {
+    return arrays.length(args) > allowed + 2
 }
 
 fun report(result[bool, string] outcome) -> int {
     match (outcome) {
         case Ok(_) => return 0
-        case Err(e) => {
-            say("error: " + e)
-            return 1
-        }
+        case Err(e) => return fail(e)
     }
+}
+
+fun fail(view string message) -> int {
+    var stream = io.stderr()
+    io.write_line(stream, paint("31", "error: ") + copy(message))
+    return 1
+}
+
+fun usage_error(view string message) -> int {
+    var code = fail(message)
+    usage_to(io.stderr())
+    return code
 }
 
 fun search(view string query) -> int {
     if (strings.is_empty(query)) {
-        say("usage: ntsc pkg search <query>")
-        return 1
+        return usage_error("search needs a query")
     }
 
     var result[array[string], string] found = registry.search(query)
     match (found) {
-        case Err(e) => {
-            say("error: " + e)
-            return 1
-        }
+        case Err(e) => return fail(e)
         case Ok(entries) => {
             var count = arrays.length(entries)
             if (count == 0) {
@@ -106,18 +158,30 @@ fun search(view string query) -> int {
 }
 
 fun usage() {
-    say("ntsc pkg - Neutron package manager")
-    say("")
-    say("commands:")
-    say("  install                install the dependencies in neutron.toml")
-    say("  install <name>         add a package at its latest version")
-    say("  install <name>@<req>   add a package with an explicit requirement")
-    say("  remove <name>          drop a dependency and unvendor it")
-    say("  update                 re-resolve to the newest allowed versions")
-    say("  list                   list the packages in neutron.lock")
-    say("  search <query>         search the registry")
-    say("  help                   show this help")
-    say("")
-    say("packages are vendored into .ntsc/<name> and imported by name:")
-    say("  use json")
+    usage_to(io.stdout())
+}
+
+fun usage_to(int stream) {
+    io.write_line(stream, paint("1", "ntsc pkg") + " - Neutron package manager")
+    io.write_line(stream, "")
+    io.write_line(stream, "commands:")
+    io.write_line(stream, "  install                install the dependencies in neutron.toml")
+    io.write_line(stream, "  install <name>         add a package at its latest version")
+    io.write_line(stream, "  install <name>@<req>   add a package with an explicit requirement")
+    io.write_line(stream, "  remove <name>          drop a dependency and unvendor it")
+    io.write_line(stream, "  update                 re-resolve to the newest allowed versions")
+    io.write_line(stream, "  list                   list the packages in neutron.lock")
+    io.write_line(stream, "  search <query>         search the registry")
+    io.write_line(stream, "  help                   show this help")
+    io.write_line(stream, "")
+    io.write_line(stream, "packages are vendored into .ntsc/<name> and imported by name:")
+    io.write_line(stream, "  use json")
+}
+
+fun paint(view string code, view string text) -> string {
+    if (!term.is_tty()) {
+        return copy(text)
+    }
+    var escape = strings.from_char_code(27)
+    return escape + "[" + copy(code) + "m" + copy(text) + escape + "[0m"
 }

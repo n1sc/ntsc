@@ -28,7 +28,9 @@ fn done(msg) {
 task build {
     step("release build (workspace)")
     run "cargo build --release"
-    done("release binaries in target/release")
+    step("release build (ntsc-pkg)")
+    run "cd crates/ntsc-pkg && ../../target/release/ntsc build --release"
+    done("release binaries in target/release and crates/ntsc-pkg/build/release")
 }
 
 task build_debug {
@@ -100,7 +102,7 @@ task test_pkg {
 
 task proj {
     step("smoke test (PROJ selects the project, default examples/bank)")
-    run "set -e; root=$(pwd); dir=$PROJ; if [ -z $dir ]; then dir=examples/bank; fi; echo smoke: $dir; cargo build -p ntsc-cli; cd $dir; $root/target/debug/ntsc build; ./build/debug/$(basename $dir)"
+    run "set -e; root=$(pwd); dir=$PROJ; if [ -z \"$dir\" ]; then dir=examples/bank; fi; echo smoke: $dir; cargo build -p ntsc-cli; cd \"$dir\"; $root/target/debug/ntsc build; ./build/debug/$(basename \"$dir\")"
     done("smoke test passed")
 }
 
@@ -116,8 +118,8 @@ task quick {
 }
 
 task full {
-    step("full gate: fmt + workspace clippy + workspace tests")
-    run "cargo fmt --all"
+    step("full gate: fmt check + workspace clippy + workspace tests")
+    run "cargo fmt --all -- --check"
     print(color("cyan", "==> clippy (workspace)"))
     run "cargo clippy --workspace --all-targets --all-features -- -D warnings"
     print(color("cyan", "==> tests (workspace)"))
@@ -127,7 +129,7 @@ task full {
 
 task install after build {
     step("installing ntsc globally to ${bindir} (PREFIX overrides)")
-    run "set -e; prefix=${prefix}; bindir=$prefix/bin; cargo build --release -p ntsc-cli -p ntsc-lsp; cargo build --release -p ntsc-runtime; (cd crates/ntsc-pkg && ../../target/release/ntsc build --release); if [ -w $bindir ]; then SUDO=; else SUDO=sudo; fi; $SUDO mkdir -p $bindir; $SUDO cp target/release/ntsc $bindir/ntsc; $SUDO cp target/release/ntsc-lsp $bindir/ntsc-lsp; $SUDO cp crates/ntsc-pkg/build/release/ntsc-pkg $bindir/ntsc-pkg; $SUDO cp target/release/libntsc_runtime.a $bindir/libntsc_runtime.a; $SUDO chmod 755 $bindir/ntsc $bindir/ntsc-lsp $bindir/ntsc-pkg; $bindir/ntsc --version; case :$PATH: in *:$bindir:*) ;; *) echo NOTE: add $bindir to PATH: export PATH=$bindir:$PATH ;; esac"
+    run "set -e; prefix=${prefix}; bindir=$prefix/bin; (cd crates/ntsc-pkg && ../../target/release/ntsc build --release); if [ -w $bindir ]; then SUDO=; else SUDO=sudo; fi; $SUDO mkdir -p $bindir; $SUDO cp target/release/ntsc $bindir/ntsc; $SUDO cp target/release/ntsc-lsp $bindir/ntsc-lsp; $SUDO cp crates/ntsc-pkg/build/release/ntsc-pkg $bindir/ntsc-pkg; $SUDO cp target/release/libntsc_runtime.a $bindir/libntsc_runtime.a; $SUDO chmod 755 $bindir/ntsc $bindir/ntsc-lsp $bindir/ntsc-pkg; $bindir/ntsc --version; case :$PATH: in *:$bindir:*) ;; *) echo NOTE: add $bindir to PATH: export PATH=$bindir:$PATH ;; esac"
     done("ntsc installed to ${bindir}")
 }
 
