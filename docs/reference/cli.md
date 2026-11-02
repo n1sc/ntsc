@@ -88,7 +88,8 @@ and PowerShell, with a coloured language badge above each block. A scrollbar
 on the right edge and the percentage in the header track the reading position.
 
 Press `/` to search, `Enter` to keep the filter, `Esc` to clear it,
-`PgUp`/`PgDn` to scroll, and `q` to quit. `ntsc docs <page>` opens a page
+`n`/`N` to jump between matches inside the open page, `PgUp`/`PgDn` to
+scroll, and `q` to quit. `ntsc docs <page>` opens a page
 directly by title, path, or path without `.md`. When stdout is not a terminal,
 `ntsc docs` prints the page index and `ntsc docs <page>` prints the raw page.
 

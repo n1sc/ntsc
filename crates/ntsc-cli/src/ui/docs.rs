@@ -68,6 +68,9 @@ struct DocsState {
     searching: bool,
     scroll: u16,
     max_scroll: u16,
+    matches: Vec<usize>,
+    match_index: Option<usize>,
+    jump: Option<isize>,
 }
 
 impl DocsState {
@@ -82,6 +85,9 @@ impl DocsState {
             searching: false,
             scroll: 0,
             max_scroll: 0,
+            matches: Vec::new(),
+            match_index: None,
+            jump: None,
         }
     }
 
@@ -105,6 +111,9 @@ impl DocsState {
             .collect();
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
         self.scroll = 0;
+        self.matches.clear();
+        self.match_index = None;
+        self.jump = None;
     }
 }
 
@@ -128,7 +137,10 @@ fn docs_loop(terminal: &mut DefaultTerminal, mut state: DocsState) -> io::Result
                     state.filter.clear();
                     state.refresh();
                 }
-                KeyCode::Enter => state.searching = false,
+                KeyCode::Enter => {
+                    state.searching = false;
+                    state.jump = Some(0);
+                }
                 KeyCode::Backspace => {
                     state.filter.pop();
                     state.refresh();
@@ -155,6 +167,8 @@ fn docs_loop(terminal: &mut DefaultTerminal, mut state: DocsState) -> io::Result
                 state.docs = crate::docs::load_docs();
                 state.refresh();
             }
+            KeyCode::Char('n') => state.jump = Some(1),
+            KeyCode::Char('N') => state.jump = Some(-1),
             KeyCode::Up | KeyCode::Char('k') => move_selection(&mut state, -1),
             KeyCode::Down | KeyCode::Char('j') => move_selection(&mut state, 1),
             KeyCode::PageUp => state.scroll = state.scroll.saturating_sub(10),
@@ -177,6 +191,7 @@ fn move_selection(state: &mut DocsState, delta: isize) {
     if next != state.selected {
         state.selected = next;
         state.scroll = 0;
+        state.match_index = None;
     }
 }
 
@@ -300,10 +315,29 @@ fn draw_page(frame: &mut Frame, area: Rect, state: &mut DocsState) {
 
     let block = panel(title);
     let inner = block.inner(area);
-    let lines = render_markdown(&doc.body, inner.width as usize);
+    let mut lines = render_markdown(&doc.body, inner.width as usize);
     state.max_scroll =
         (lines.len().saturating_sub(inner.height as usize)).min(u16::MAX as usize) as u16;
     state.scroll = state.scroll.min(state.max_scroll);
+
+    let query = state.filter.trim().to_ascii_lowercase();
+    state.matches = if query.is_empty() {
+        Vec::new()
+    } else {
+        matching_lines(&lines, &query)
+    };
+    if let Some(step) = state.jump.take()
+        && !state.matches.is_empty()
+    {
+        let index = next_match_index(state.match_index, step, state.matches.len());
+        state.match_index = Some(index);
+        state.scroll = (state.matches[index] as u16)
+            .saturating_sub(2)
+            .min(state.max_scroll);
+    }
+    if !state.matches.is_empty() {
+        highlight_matches(&mut lines, &query);
+    }
 
     frame.render_widget(
         Paragraph::new(lines)
@@ -313,6 +347,81 @@ fn draw_page(frame: &mut Frame, area: Rect, state: &mut DocsState) {
         area,
     );
     draw_scrollbar(frame, inner, state);
+}
+
+fn next_match_index(current: Option<usize>, step: isize, len: usize) -> usize {
+    let next = match current {
+        Some(index) => (index as isize + step).rem_euclid(len as isize),
+        None if step < 0 => len as isize - 1,
+        None => 0,
+    };
+    next as usize
+}
+
+fn matching_lines(lines: &[Line<'_>], query: &str) -> Vec<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .to_ascii_lowercase()
+                .contains(query)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn highlight_matches(lines: &mut [Line<'static>], query: &str) {
+    let needle: Vec<char> = query.chars().map(|ch| ch.to_ascii_lowercase()).collect();
+    if needle.is_empty() {
+        return;
+    }
+    let style = Style::default()
+        .fg(BG)
+        .bg(ACCENT2)
+        .add_modifier(Modifier::BOLD);
+    for line in lines.iter_mut() {
+        let mut spans = Vec::with_capacity(line.spans.len());
+        for span in &line.spans {
+            let chars: Vec<char> = span.content.chars().collect();
+            let mut start = 0;
+            let mut index = 0;
+            while index + needle.len() <= chars.len() {
+                let hit = chars[index..index + needle.len()]
+                    .iter()
+                    .zip(needle.iter())
+                    .all(|(ch, needle)| ch.to_ascii_lowercase() == *needle);
+                if hit {
+                    if start < index {
+                        spans.push(Span::styled(
+                            chars[start..index].iter().collect::<String>(),
+                            span.style,
+                        ));
+                    }
+                    spans.push(Span::styled(
+                        chars[index..index + needle.len()]
+                            .iter()
+                            .collect::<String>(),
+                        style,
+                    ));
+                    index += needle.len();
+                    start = index;
+                } else {
+                    index += 1;
+                }
+            }
+            if start < chars.len() {
+                spans.push(Span::styled(
+                    chars[start..].iter().collect::<String>(),
+                    span.style,
+                ));
+            }
+        }
+        line.spans = spans;
+    }
 }
 
 fn draw_scrollbar(frame: &mut Frame, area: Rect, state: &DocsState) {
@@ -349,18 +458,27 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &DocsState) {
             Span::styled("  Enter keep · Esc clear", Style::default().fg(MUTED)),
         ])
     } else {
-        Line::from(vec![
+        let mut spans = vec![
             key(" ↑↓ "),
             Span::styled(" pages  ", Style::default().fg(MUTED)),
             key(" PgUp/PgDn "),
             Span::styled(" scroll  ", Style::default().fg(MUTED)),
             key(" / "),
             Span::styled(" search  ", Style::default().fg(MUTED)),
-            key(" r "),
-            Span::styled(" reload  ", Style::default().fg(MUTED)),
-            key(" q "),
-            Span::styled(" quit", Style::default().fg(MUTED)),
-        ])
+        ];
+        if !state.matches.is_empty() {
+            spans.push(key(" n/N "));
+            let label = match state.match_index {
+                Some(index) => format!(" match {}/{}  ", index + 1, state.matches.len()),
+                None => format!(" match 0/{}  ", state.matches.len()),
+            };
+            spans.push(Span::styled(label, Style::default().fg(MUTED)));
+        }
+        spans.push(key(" r "));
+        spans.push(Span::styled(" reload  ", Style::default().fg(MUTED)));
+        spans.push(key(" q "));
+        spans.push(Span::styled(" quit", Style::default().fg(MUTED)));
+        Line::from(spans)
     };
     frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
@@ -1022,5 +1140,33 @@ mod tests {
         assert_eq!(reading_percent(&state), 25);
         state.scroll = 200;
         assert_eq!(reading_percent(&state), 100);
+    }
+
+    #[test]
+    fn match_navigation_wraps_around() {
+        assert_eq!(next_match_index(None, 1, 3), 0);
+        assert_eq!(next_match_index(None, -1, 3), 2);
+        assert_eq!(next_match_index(Some(2), 1, 3), 0);
+        assert_eq!(next_match_index(Some(0), -1, 3), 2);
+    }
+
+    #[test]
+    fn matches_are_highlighted_without_changing_text() {
+        let body = "Alpha beta alpha.\n";
+        let mut lines = render_markdown(body, 40);
+        assert_eq!(matching_lines(&lines, "alpha"), vec![0]);
+        highlight_matches(&mut lines, "alpha");
+        let hits = lines[0]
+            .spans
+            .iter()
+            .filter(|span| span.style.bg == Some(ACCENT2))
+            .count();
+        assert_eq!(hits, 2);
+        let text: String = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text, "Alpha beta alpha.");
     }
 }
