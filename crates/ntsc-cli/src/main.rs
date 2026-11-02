@@ -1,3 +1,4 @@
+mod docgen;
 mod docs;
 mod ui;
 
@@ -164,6 +165,16 @@ pub(crate) const COMMANDS: &[CommandDoc] = &[
         options: &[],
     },
     CommandDoc {
+        name: "doc",
+        usage: "ntsc doc",
+        summary: "Generate HTML docs from ## comments",
+        details: &[
+            "Reads ## comment lines directly above a declaration and writes one page per source file.",
+            "Output goes to build/doc/, with an index.html listing every page.",
+        ],
+        options: &[],
+    },
+    CommandDoc {
         name: "docs",
         usage: "ntsc docs [--list | --print <page>] [page]",
         summary: "Browse the documentation",
@@ -241,6 +252,7 @@ fn main() {
     let result = match command {
         Command::Help(target) => print_help(target.as_deref()),
         Command::Docs { page, mode } => cmd_docs(page.as_deref(), mode),
+        Command::Doc => cmd_doc(),
         Command::Version => {
             print_version();
             Ok(())
@@ -357,6 +369,7 @@ enum Command {
         page: Option<String>,
         mode: DocsMode,
     },
+    Doc,
     Version,
     Init(Option<String>),
     Build,
@@ -446,6 +459,7 @@ fn parse_args() -> Result<(Command, CliOptions), String> {
             Command::Version
         }
         "init" => Command::Init(positional.into_iter().next()),
+        "doc" => Command::Doc,
         "docs" => {
             let mode = match (list_docs, print_doc) {
                 (true, true) => {
@@ -492,6 +506,7 @@ fn is_command(name: &str) -> bool {
             | "cargo"
             | "lsp"
             | "docs"
+            | "doc"
             | "version"
     )
 }
@@ -741,6 +756,13 @@ fn cmd_docs(page: Option<&str>, mode: DocsMode) -> Result<(), CliError> {
             .write_all(pages[index].body.as_bytes())?,
         None => print_doc_index(&pages)?,
     }
+    Ok(())
+}
+
+fn cmd_doc() -> Result<(), CliError> {
+    let root = env::current_dir()?;
+    let index = docgen::generate(&root).map_err(CliError::Plain)?;
+    println!("wrote {}", index.display());
     Ok(())
 }
 
@@ -1741,7 +1763,7 @@ mod tests {
     fn closest_suggests_near_misses() {
         let commands = COMMANDS.iter().map(|doc| doc.name);
         assert_eq!(closest("buidl", commands.clone()), Some("build"));
-        assert_eq!(closest("doc", commands.clone()), Some("docs"));
+        assert_eq!(closest("docsx", commands.clone()), Some("docs"));
         assert_eq!(closest("qwerty", commands), None);
         assert_eq!(
             closest("--dryrun", OPTION_NAMES.iter().copied()),

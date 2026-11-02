@@ -171,6 +171,7 @@ first-class bare-module imports as builtin modules.
 | `ntsc clean --tmp [--dry-run]` | Remove stale `/tmp/ntsc_*` compiler scratch trees |
 | `ntsc watch [--release]` | Rebuild when sources change |
 | `ntsc docs [page]` | Browse the built-in documentation with search (`--list`, `--print <page>`) |
+| `ntsc doc` | Generate HTML docs from `##` comments into `build/doc/` |
 | `ntsc pkg [args]` | Run the package manager |
 | `ntsc graph` | Print the module dependency graph as DOT |
 | `ntsc lsp` | Start the language server (LSP over stdio) |

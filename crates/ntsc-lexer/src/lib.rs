@@ -419,6 +419,16 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn doc_comments_are_trivia_and_keep_line_numbers() {
+        let tokens = tokenize("## first line\n## second line\nfun main() {}\n");
+        let function = tokens
+            .into_iter()
+            .find(|token| token.kind == TokenKind::Fun)
+            .expect("fun token");
+        assert_eq!(function.span.line, 3);
+    }
+
     fn strip_newlines(kinds: Vec<TokenKind>) -> Vec<TokenKind> {
         kinds
             .into_iter()

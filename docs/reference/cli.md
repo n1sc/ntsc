@@ -24,6 +24,7 @@ Flags may appear before or after the command.
 | `ntsc clean --tmp [--dry-run]` | Remove stale `/tmp/ntsc_*` compiler scratch trees. |
 | `ntsc watch` | Rebuild whenever a source file or `neutron.toml` changes. |
 | `ntsc docs [page]` | Browse the embedded documentation with search; `--list` prints the index and `--print <page>` writes one page to stdout. |
+| `ntsc doc` | Generate an HTML reference from `##` comments into `build/doc/`. |
 | `ntsc graph` | Print the module dependency graph as DOT. |
 | `ntsc cargo doc <crate> [--no-open]` | Generate Neutron-facing HTML docs for a Rust adaptor; print a terminal summary and open the page unless `--no-open` is given. Hyphenated package names use underscore namespaces in Neutron. |
 | `ntsc cargo coverage [<crate>]` | Report export-manifest coverage for all direct Rust adaptors, or for one named crate. |
@@ -94,6 +95,24 @@ directly by title, path, or path without `.md`. When stdout is not a terminal,
 `ntsc docs` prints the page index and `ntsc docs <page>` prints the raw page.
 `ntsc docs --list` and `ntsc docs --print <page>` select that output
 explicitly, so they work in a terminal and in scripts alike.
+
+## Project documentation
+
+`ntsc doc` reads every `.nt` file under `src/` and writes one HTML page per
+file plus an `index.html` into `build/doc/`. A declaration is documented by
+`##` lines directly above it; a blank line detaches the comment:
+
+```ntsc
+## Adds two numbers.
+fun add(int a, int b) -> int {
+    return a + b
+}
+```
+
+Functions, `async fun`, classes (with their fields and methods), enums (with
+each case and payload), `type` aliases, and `test` blocks all appear. The
+comments are trivia to the compiler, so a documented project builds exactly as
+before.
 
 ## The build manifest
 

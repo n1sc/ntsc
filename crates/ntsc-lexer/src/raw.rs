@@ -3,6 +3,9 @@ use logos::Logos;
 #[derive(Logos, Debug, Clone, PartialEq)]
 #[logos(skip r"[ \t\r]+")]
 #[logos(skip r"//[^\n]*")]
+// `## text` — documentation comments. They are trivia to the compiler; the
+// `ntsc doc` generator reads them from the source text.
+#[logos(skip r"##[^\n]*")]
 // `#{...}` — block comments (non-nesting; may span newlines).
 #[logos(skip r"#\{[^\}]*\}")]
 /// Raw logos token kind. The public [`Lexer`](crate::Lexer) turns these into

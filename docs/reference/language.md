@@ -30,10 +30,13 @@ return `int`.
 
 ### Whitespace and comments
 
-Whitespace separates tokens. Two comment forms:
+Whitespace separates tokens. Three comment forms:
 
 - `//` runs to end of line.
 - `#{ ... }` is a block comment. It does not nest.
+- `##` runs to end of line and documents the declaration below it. The
+  compiler treats it as trivia; `ntsc doc` reads it from the source text and
+  emits an HTML reference.
 
 ### Semicolons
 
