@@ -50,7 +50,6 @@ pub(crate) fn emit_assign<'ctx>(
                 // emitted before the slot has been marked owned — no drop
                 // would ever be emitted and every iteration but the last
                 // would leak. A null cell drops as a no-op.
-                emit_drop_slot_value(fn_ctx, ptr, &ty)?;
                 let cell = if matches!(val.ntsc_type, Ty::Nil) {
                     fn_ctx
                         .context
@@ -60,13 +59,14 @@ pub(crate) fn emit_assign<'ctx>(
                     // Adopt the fresh temp's cell rather than allocating a
                     // second one and orphaning it.
                     if expr_is_fresh(fn_ctx, value, &val) {
-                        val.value.into_pointer_value()
+                        option_cell_pointer(fn_ctx, val.value)?
                     } else {
                         clone_option_value(fn_ctx, inner, &val)?
                     }
                 } else {
                     box_option_value(fn_ctx, inner, value, &val)?
                 };
+                emit_drop_slot_value(fn_ctx, ptr, &ty)?;
                 fn_ctx.builder.build_store(ptr, cell)?;
                 fn_ctx.mark_owned_if_heap(name.lexeme(), &ty);
                 if let Expr::Variable { name: source } = value

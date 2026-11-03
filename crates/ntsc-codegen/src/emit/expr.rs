@@ -163,8 +163,13 @@ pub(crate) fn emit_expression<'ctx>(
             // (array/string) value it must be copied out first or the drop
             // would free it out from under the caller.
             if expr_is_fresh(fn_ctx, object, &obj_val) {
-                if matches!(tv.ntsc_type, Ty::Array(_) | Ty::String) {
-                    tv = copy_owned_value(fn_ctx, &tv)?;
+                if let Ty::Shared(_) = &tv.ntsc_type {
+                    let retain = fn_ctx.module.get_function("ntsc_shared_retain").ok_or_else(|| {
+                        crate::CodegenError::LLVMError("ntsc_shared_retain not declared".into())
+                    })?;
+                    fn_ctx.builder.build_call(retain, &[tv.value.into()], "element_retain")?;
+                } else if ty_is_owned_handle(&tv.ntsc_type) {
+                    tv = emit_copy_value(fn_ctx, tv)?;
                 }
                 emit_drop_value(fn_ctx, &obj_val)?;
             }
@@ -1211,12 +1216,10 @@ pub(crate) fn emit_box_value<'ctx>(
         .get_function("malloc")
         .ok_or_else(|| crate::CodegenError::LLVMError("malloc not declared".into()))?;
 
-    // Every boxed representation is a scalar or an i64 handle, so one
-    // pointer-sized cell holds any of them.
-    let size = fn_ctx
-        .context
-        .i64_type()
-        .const_int(std::mem::size_of::<i64>() as u64, false);
+    let size = fn_ctx.context.i64_type().const_int(
+        llvm_allocation_size(fn_ctx.module, val.value.get_type())?,
+        false,
+    );
     let cell = fn_ctx
         .builder
         .build_call(malloc, &[size.into()], "own_alloc")?
@@ -1262,15 +1265,9 @@ pub(crate) fn emit_copy_value<'ctx>(
     let (clone_fn, out_ty, extra_args) = match &tv.ntsc_type {
         Ty::String | Ty::Object => ("ntsc_string_clone", tv.ntsc_type.clone(), Vec::new()),
 
-        // Deep-clone nested arrays so the copy is independent of the
-        // source: a shallow clone would share child arrays, and two owned
-        // drops of the same child would double-free it. `levels` is the
-        // array nesting depth of the element type.
-        Ty::Array(inner) => (
-            "ntsc_array_deep_clone",
-            Ty::Array(inner.clone()),
-            vec![array_nesting_depth(inner)],
-        ),
+        // The runtime copies strings; typed fixups below copy other owned
+        // elements recursively without sharing their cells with the source.
+        Ty::Array(inner) => ("ntsc_array_deep_clone", Ty::Array(inner.clone()), vec![0]),
         // A view borrows its value: materialize an independent owned copy
         // from the inner type. Simply retyping the borrowed handle as owned
         // aliases the source, so the copy's drop would reclaim the original
@@ -1378,6 +1375,9 @@ pub(crate) fn emit_copy_value<'ctx>(
         .build_call(callee, &args, "copy_result")?
         .try_as_basic_value()
         .unwrap_basic();
+    if let Ty::Array(inner) = &out_ty {
+        emit_copy_in_owned_elements(fn_ctx, ptr.into_int_value(), inner)?;
+    }
     Ok(TypedValue::new(ptr, out_ty))
 }
 
@@ -1531,15 +1531,6 @@ pub(crate) fn emit_copy_class_fields<'ctx>(
     }
 
     Ok(TypedValue::new(copy.into(), tv.ntsc_type))
-}
-
-/// The number of consecutive `Array` wrappers around `ty` (0 for a
-/// non-array).
-pub(crate) fn array_nesting_depth(ty: &Ty) -> u64 {
-    match ty {
-        Ty::Array(inner) => 1 + array_nesting_depth(inner),
-        _ => 0,
-    }
 }
 
 pub(crate) fn emit_unary<'ctx>(

@@ -304,13 +304,13 @@ pub(crate) fn emit_drop_value<'ctx>(
         // shared boxes (the array owns its own copies), so reclaiming them
         // here is safe. String elements are freed by the runtime itself;
         // scalars are non-owning.
-        if matches!(
-            **elem_ty,
-            Ty::Array(_) | Ty::Class(_) | Ty::Option(_) | Ty::Result { .. } | Ty::Shared(_)
-        ) && let (Some(len_fn), Some(get_fn)) = (
-            fn_ctx.module.get_function("ntsc_array_len"),
-            fn_ctx.module.get_function("ntsc_array_get"),
-        ) {
+        if ty_is_owned_handle(elem_ty)
+            && !matches!(**elem_ty, Ty::String | Ty::Object)
+            && let (Some(len_fn), Some(get_fn)) = (
+                fn_ctx.module.get_function("ntsc_array_len"),
+                fn_ctx.module.get_function("ntsc_array_get"),
+            )
+        {
             let current_fn = fn_ctx.function;
             let i_ptr = fn_ctx.alloca("arr_drop_i", &Ty::Int)?;
             let cond_bb = fn_ctx
@@ -375,8 +375,8 @@ pub(crate) fn emit_drop_value<'ctx>(
                 .builder
                 .build_conditional_branch(is_null, next_bb, drop_bb)?;
             fn_ctx.builder.position_at_end(drop_bb);
-            let elem_ty_clone = (**elem_ty).clone();
-            emit_drop_value(fn_ctx, &TypedValue::new(elem.into(), elem_ty_clone))?;
+            let decoded = decode_array_scalar(fn_ctx, elem.into(), elem_ty)?;
+            emit_drop_value(fn_ctx, &TypedValue::new(decoded, (**elem_ty).clone()))?;
             fn_ctx.builder.build_unconditional_branch(next_bb)?;
             fn_ctx.builder.position_at_end(next_bb);
             fn_ctx.builder.build_unconditional_branch(incr_bb)?;
@@ -612,7 +612,11 @@ pub(crate) fn drop_unreturned_escape_class_locals<'ctx>(
 /// (an element or field read leaves its container owned here), duplicates
 /// (`copy(...)`), or produces a fresh value (a concatenation, a call), and
 /// nulling those slots would leak the original.
-pub(crate) fn moved_locals_in(expr: &Expr, out: &mut Vec<String>) {
+pub(crate) fn moved_locals_in(
+    fn_ctx: &FunctionContext<'_, '_>,
+    expr: &Expr,
+    out: &mut Vec<String>,
+) {
     match expr {
         Expr::Copy { .. } => {}
         Expr::Variable { name } => {
@@ -620,10 +624,21 @@ pub(crate) fn moved_locals_in(expr: &Expr, out: &mut Vec<String>) {
                 out.push(name.lexeme().to_string());
             }
         }
-        Expr::Grouping { expression, .. } => moved_locals_in(expression, out),
-        Expr::TupleLiteral { elements, .. } | Expr::ArrayLiteral { elements, .. } => {
+        Expr::Grouping { expression, .. } => moved_locals_in(fn_ctx, expression, out),
+        Expr::TupleLiteral { elements, .. } => {
             for element in elements {
-                moved_locals_in(element, out);
+                moved_locals_in(fn_ctx, element, out);
+            }
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                if matches!(
+                    member_receiver_type(fn_ctx, element),
+                    Some(Ty::String | Ty::Option(_) | Ty::Shared(_))
+                ) {
+                    continue;
+                }
+                moved_locals_in(fn_ctx, element, out);
             }
         }
         // Either branch may be the one that runs, so both are treated as
@@ -633,8 +648,8 @@ pub(crate) fn moved_locals_in(expr: &Expr, out: &mut Vec<String>) {
             else_branch,
             ..
         } => {
-            moved_locals_in(then_branch, out);
-            moved_locals_in(else_branch, out);
+            moved_locals_in(fn_ctx, then_branch, out);
+            moved_locals_in(fn_ctx, else_branch, out);
         }
         _ => {}
     }
@@ -689,21 +704,12 @@ pub(crate) fn expr_is_fresh<'ctx>(
             expr_is_fresh(fn_ctx, value, tv)
         }
 
-        // An owned element read out of a fresh container (`[1,2][0]`,
-        // `copy(a)[i]`, `makeArr()[i]`) is copied out before the container
-        // is dropped, so the result is a fresh owned value that must be
-        // dropped. Option and shared elements are never transferred this
-        // way: their cells/boxes are owned by the container, so a read
-        // always copies (cloning the cell or retaining the box) and is
-        // never fresh.
-        Expr::IndexGet { object, .. } => match &tv.ntsc_type {
-            Ty::Option(_) | Ty::Shared(_) => false,
-            _ => {
-                let container_tv =
-                    TypedValue::new(tv.value, Ty::Array(Box::new(tv.ntsc_type.clone())));
-                expr_is_fresh(fn_ctx, object, &container_tv)
-            }
-        },
+        // Reads from fresh containers copy owned elements (or retain a
+        // shared element) before reclaiming the container.
+        Expr::IndexGet { object, .. } => {
+            let container_tv = TypedValue::new(tv.value, Ty::Array(Box::new(tv.ntsc_type.clone())));
+            expr_is_fresh(fn_ctx, object, &container_tv)
+        }
         Expr::Call { callee, .. } => match callee.as_ref() {
             // `alloc(value)` hands the caller a fresh owning allocation.
             Expr::Variable { name } if name.lexeme() == "alloc" => {
@@ -733,6 +739,25 @@ pub(crate) fn expr_is_fresh<'ctx>(
                     return true;
                 }
                 let prop = property.lexeme();
+                if matches!(
+                    member_receiver_type(fn_ctx, object),
+                    Some(
+                        Ty::Class(_)
+                            | Ty::Own(_)
+                            | Ty::Shared(_)
+                            | Ty::View(..)
+                            | Ty::Ref(..)
+                            | Ty::Dyn(_)
+                    )
+                ) {
+                    return true;
+                }
+                if matches!(
+                    prop,
+                    "ok_or" | "ok_or_else" | "unwrap_or" | "map" | "and_then" | "or_else"
+                ) {
+                    return true;
+                }
                 match object.as_ref() {
                     Expr::Variable { name } if name.lexeme() == "arrays" => {
                         // Most `arrays.*` ops return a new array; `pop`
@@ -1037,26 +1062,7 @@ pub(crate) fn copy_owned_value<'ctx>(
 ) -> Result<TypedValue<'ctx>, crate::CodegenError> {
     let value = val.value;
     match &val.ntsc_type {
-        Ty::Array(inner) => {
-            let levels = array_nesting_depth(inner);
-            let clone_fn = fn_ctx
-                .module
-                .get_function("ntsc_array_deep_clone")
-                .ok_or_else(|| {
-                    crate::CodegenError::LLVMError("ntsc_array_deep_clone not declared".into())
-                })?;
-            let levels = fn_ctx.context.i64_type().const_int(levels, false);
-            let clone_result = fn_ctx.builder.build_call(
-                clone_fn,
-                &[
-                    BasicMetadataValueEnum::IntValue(value.into_int_value()),
-                    BasicMetadataValueEnum::IntValue(levels),
-                ],
-                "arg_copy",
-            )?;
-            let new_handle = call_result_to_value(fn_ctx, &clone_result);
-            Ok(TypedValue::new(new_handle, Ty::Array(inner.clone())))
-        }
+        Ty::Array(_) => emit_copy_value(fn_ctx, val.clone()),
 
         Ty::String | Ty::Object => Ok(TypedValue::new(
             clone_string_value(fn_ctx, val)?,
@@ -1128,16 +1134,6 @@ pub(crate) fn clone_string_value<'ctx>(
     Ok(cloned.try_as_basic_value().unwrap_basic())
 }
 
-/// Byte size of an option cell for `inner`: a narrow integer payload
-/// (`option[bool]` → `i1`) is packed; everything else reserves 8 bytes.
-pub(crate) fn option_cell_size(inner_llvm: inkwell::types::BasicTypeEnum<'_>) -> i64 {
-    match inner_llvm {
-        inkwell::types::BasicTypeEnum::IntType(i) => i64::from(i.get_bit_width().div_ceil(8)),
-        inkwell::types::BasicTypeEnum::FloatType(_) => 8,
-        _ => 8,
-    }
-}
-
 pub(crate) fn option_cell_pointer<'ctx>(
     fn_ctx: &mut FunctionContext<'ctx, '_>,
     val: BasicValueEnum<'ctx>,
@@ -1169,7 +1165,7 @@ pub(crate) fn allocate_option_cell<'ctx>(
                 fn_ctx
                     .context
                     .i64_type()
-                    .const_int(option_cell_size(inner_llvm) as u64, false),
+                    .const_int(llvm_allocation_size(fn_ctx.module, inner_llvm)?, false),
             )],
             "option_box",
         )?
@@ -1231,12 +1227,7 @@ pub(crate) fn emit_drop_option_value<'ctx>(
         .builder
         .build_load(inner_llvm, cell, "option_inner")?;
     let inner_ty = (*inner).clone();
-    if matches!(
-        inner_ty,
-        Ty::String | Ty::Array(_) | Ty::Shared(_) | Ty::Class(_) | Ty::Option(_)
-    ) {
-        emit_drop_value(fn_ctx, &TypedValue::new(loaded, inner_ty))?;
-    }
+    emit_drop_value(fn_ctx, &TypedValue::new(loaded, inner_ty))?;
     let free_fn = fn_ctx
         .module
         .get_function("free")

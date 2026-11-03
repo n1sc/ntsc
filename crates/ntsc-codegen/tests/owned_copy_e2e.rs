@@ -477,3 +477,279 @@ fun main() -> int {
 "#;
     assert_clean("forward_ref_fresh_call", source, "done");
 }
+
+#[test]
+fn option_self_assignment_copies_before_reclaiming_the_source() {
+    let source = r#"fun main() {
+    var option[string] text = "still alive"
+    var option[int] number = 42
+    var option[bool] flag = true
+    for (var i = 0; i < 8; i = i + 1) {
+        text = text
+        number = number
+        flag = flag
+    }
+    say(text.ok_or("lost").unwrap_or("lost"))
+    say("" + number.ok_or("lost").unwrap_or(0))
+    say("" + flag.ok_or("lost").unwrap_or(false))
+}
+"#;
+    assert_clean("option_self_assignment", source, "still alive\n42\ntrue");
+}
+
+#[test]
+fn option_field_self_assignment_copies_before_reclaiming_the_source() {
+    let source = r#"class Record {
+    var option[string] text
+    fun init() { this.text = "still alive" }
+}
+fun main() {
+    var record = Record()
+    for (var i = 0; i < 8; i = i + 1) {
+        record.text = record.text
+    }
+    say(record.text.ok_or("lost").unwrap_or("lost"))
+}
+"#;
+    assert_clean("option_field_self_assignment", source, "still alive");
+}
+
+#[test]
+fn assigning_fresh_option_results_adopts_the_returned_cells() {
+    let source = r#"class Record {
+    var option[string] text
+}
+fun make() -> option[string] { return "fresh" }
+fun main() {
+    var option[string] text = nil
+    var record = Record()
+    for (var i = 0; i < 4; i = i + 1) {
+        text = make()
+        record.text = make()
+    }
+    say("" + (text == nil))
+    say("" + (record.text == nil))
+}
+"#;
+    assert_clean("fresh_option_assignment", source, "false\nfalse");
+}
+
+#[test]
+fn options_reclaim_nested_results_and_memory_capabilities() {
+    let source = r#"use memory
+fun make() -> result[int, string] { return Err("nested error") }
+fun main() {
+    var option[result[int, string]] outcome = nil
+    var option[pointer] bytes = nil
+    for (var i = 0; i < 4; i = i + 1) {
+        outcome = make()
+        bytes = memory.alloc(8)
+    }
+    say("" + (outcome == nil))
+    say("" + (bytes == nil))
+}
+"#;
+    assert_clean("option_nested_owned_payloads", source, "false\nfalse");
+}
+
+#[test]
+fn overwriting_result_and_pointer_fields_reclaims_previous_values() {
+    let source = r#"use memory
+class Record {
+    var result[int, string] status
+    var pointer bytes
+    fun init() {
+        this.status = make()
+        this.bytes = memory.alloc(8)
+    }
+}
+fun make() -> result[int, string] { return Err("field error") }
+fun main() {
+    var record = Record()
+    for (var i = 0; i < 4; i = i + 1) {
+        record.status = make()
+        record.bytes = memory.alloc(8)
+    }
+    say("done")
+}
+"#;
+    assert_clean("overwrite_owned_fields", source, "done");
+}
+
+#[test]
+fn copying_arrays_of_options_keeps_the_source_cells_alive() {
+    let source = r#"use arrays
+fun main() {
+    var option[string] seed = "payload"
+    var array[option[string]] original = [seed]
+    {
+        var copied = copy(original)
+        say(copied[0].ok_or("lost").unwrap_or("lost"))
+    }
+    var cloned = arrays.clone(original)
+    say(original[0].ok_or("lost").unwrap_or("lost"))
+    say(cloned[0].ok_or("lost").unwrap_or("lost"))
+}
+"#;
+    assert_clean("copy_option_arrays", source, "payload\npayload\npayload");
+}
+
+#[test]
+fn copying_arrays_of_classes_deep_copies_the_owned_fields() {
+    let source = r#"class Record {
+    var string text
+    fun init() { this.text = "payload" }
+}
+fun main() {
+    var array[Record] original = [Record()]
+    {
+        var copied = copy(original)
+        copied[0].text = "changed"
+        say(copied[0].text)
+    }
+    say(original[0].text)
+}
+"#;
+    assert_clean("copy_class_arrays", source, "changed\npayload");
+}
+
+#[test]
+fn shared_values_return_one_owned_reference_to_the_caller() {
+    let source = r#"fun make() -> shared string {
+    var shared string text = "payload"
+    return text
+}
+fun main() {
+    var shared string text = make()
+    say(copy(text))
+}
+"#;
+    assert_clean("shared_return_reference", source, "payload");
+}
+
+#[test]
+fn heap_cells_reserve_enough_storage_for_wide_tuple_payloads() {
+    let source = r#"fun success() -> result[(int, int, int, int, int, int, int, int), int] {
+    return Ok((1, 2, 3, 4, 5, 6, 7, 8))
+}
+fun failure() -> result[int, (int, int, int, int, int, int, int, int)] {
+    return Err((1, 2, 3, 4, 5, 6, 7, 8))
+}
+fun main() {
+    for (var i = 0; i < 4; i = i + 1) {
+        var own (int, int, int, int, int, int, int, int) boxed = alloc((1, 2, 3, 4, 5, 6, 7, 8))
+        var duplicate = copy(boxed)
+        var option[(int, int, int, int, int, int, int, int)] maybe = (1, 2, 3, 4, 5, 6, 7, 8)
+        var copied = copy(maybe)
+        var ok = success()
+        var err = failure()
+        var ok_copy = copy(ok)
+        var err_copy = copy(err)
+        say("" + ok_copy.unwrap_or((0, 0, 0, 0, 0, 0, 0, 0)).7)
+    }
+}
+"#;
+    assert_clean("wide_heap_payloads", source, "8\n8\n8\n8");
+}
+
+#[test]
+fn owned_elements_read_from_fresh_arrays_outlive_the_container() {
+    let source = r#"fun options() -> array[option[string]] {
+    var option[string] seed = "option payload"
+    return [seed]
+}
+fun results() -> array[result[int, string]] {
+    return [Err("result payload")]
+}
+fun main() {
+    var extracted = options()[0]
+    var outcome = results()[0]
+    say(extracted.ok_or("lost").unwrap_or("lost"))
+    say(outcome.or_else(fun(string message) -> result[string, string] {
+        return Ok(message)
+    }).unwrap_or("lost"))
+}
+"#;
+    assert_clean(
+        "fresh_array_owned_elements",
+        source,
+        "option payload\nresult payload",
+    );
+}
+
+#[test]
+fn copied_memory_capability_arrays_reclaim_each_owned_handle() {
+    let source = r#"use memory
+fun main() {
+    var array[pointer] original = [memory.alloc(8)]
+    var copied = copy(original)
+    memory.store64(copied[0], 42)
+    say("" + memory.load64(original[0]))
+}
+"#;
+    assert_clean("copy_memory_arrays", source, "42");
+}
+
+#[test]
+fn combinators_reclaim_unused_defaults_and_fresh_error_payloads() {
+    let source = r#"fun main() {
+    var option[string] some = "payload"
+    var option[string] none = nil
+    say(some.ok_or("unused").unwrap_or("fallback"))
+    say(none.ok_or("error").unwrap_or("fallback"))
+    say(Err("discarded").unwrap_or("recovered"))
+}
+"#;
+    assert_clean(
+        "combinator_unused_payloads",
+        source,
+        "payload\nfallback\nrecovered",
+    );
+}
+
+#[test]
+fn returned_array_copies_leave_source_string_slots_owned() {
+    let source = r#"fun make() -> array[string] {
+    var string seed = "payload"
+    return [seed]
+}
+fun main() {
+    var values = make()
+    say(values[0])
+}
+"#;
+    assert_clean("return_string_array", source, "payload");
+}
+
+#[test]
+fn returned_option_fields_outlive_their_local_instance() {
+    let source = r#"class Record {
+    var option[string] note
+    var string text
+    fun init() { this.note = "option payload"; this.text = "string payload" }
+    fun read_note() -> option[string] { return this.note }
+}
+fun note() -> option[string] {
+    var record = Record()
+    return record.note
+}
+fun text() -> option[string] {
+    var record = Record()
+    return record.text
+}
+fun main() {
+    var a = note()
+    var b = text()
+    say(a.ok_or("lost").unwrap_or("lost"))
+    say(b.ok_or("lost").unwrap_or("lost"))
+    var record = Record()
+    var c = record.read_note()
+    say(c.ok_or("lost").unwrap_or("lost"))
+}
+"#;
+    assert_clean(
+        "return_borrowed_option_fields",
+        source,
+        "option payload\nstring payload\noption payload",
+    );
+}

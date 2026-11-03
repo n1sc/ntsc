@@ -1063,13 +1063,10 @@ fn emit_unary_array_op_with_fixup<'ctx>(
     Ok(result)
 }
 
-/// Give a freshly created array ownership of its option and shared
-/// elements. The runtime copies non-string elements by value, so a new
-/// array built from another (`clone`, `slice`, `remove_at`, `sort`,
-/// `reverse`, `shuffle`, `fill`) would otherwise share option cells and
-/// shared boxes with the source array. Each option cell is deep-copied
-/// into a fresh cell owned by the new array (the old cell is reclaimed),
-/// and each shared box is retained once for the new array's reference.
+/// Give a shallow runtime array copy independent ownership of its heap
+/// elements. Source handles are borrowed: replacing them must not reclaim
+/// values that the original array still owns. Shared elements retain instead
+/// of duplicating their payloads; strings are already copied by the runtime.
 pub(crate) fn emit_copy_in_owned_elements<'ctx>(
     fn_ctx: &mut FunctionContext<'ctx, '_>,
     arr_handle: inkwell::values::IntValue<'ctx>,
@@ -1086,8 +1083,10 @@ pub(crate) fn emit_copy_in_owned_elements<'ctx>(
             .ok_or_else(|| crate::CodegenError::LLVMError("ntsc_array_get not declared".into()))?,
     );
     match elem_ty {
-        Ty::Option(inner) => {
-            let inner = (**inner).clone();
+        owned
+            if ty_is_owned_handle(owned)
+                && !matches!(owned, Ty::String | Ty::Object | Ty::Shared(_)) =>
+        {
             let set_fn = fn_ctx
                 .module
                 .get_function("ntsc_array_set")
@@ -1149,26 +1148,13 @@ pub(crate) fn emit_copy_in_owned_elements<'ctx>(
                 .build_conditional_branch(is_null, next_bb, clone_bb)?;
 
             fn_ctx.builder.position_at_end(clone_bb);
-            let cell = clone_option_value(
-                fn_ctx,
-                &inner,
-                &TypedValue::new(elem.into(), Ty::Option(Box::new(inner.clone()))),
-            )?;
+            let value = decode_array_scalar(fn_ctx, elem.into(), owned)?;
+            let copied = emit_copy_value(fn_ctx, TypedValue::new(value, owned.clone()))?;
+            let bits = encode_array_scalar(fn_ctx, &copied)?;
             fn_ctx.builder.build_call(
                 set_fn,
-                &[
-                    arr_handle.into(),
-                    i.into(),
-                    fn_ctx
-                        .builder
-                        .build_ptr_to_int(cell, fn_ctx.context.i64_type(), "copyin_cell_bits")?
-                        .into(),
-                ],
+                &[arr_handle.into(), i.into(), bits.into()],
                 "copyin_set",
-            )?;
-            emit_drop_value(
-                fn_ctx,
-                &TypedValue::new(elem.into(), Ty::Option(Box::new(inner))),
             )?;
             fn_ctx.builder.build_unconditional_branch(next_bb)?;
 

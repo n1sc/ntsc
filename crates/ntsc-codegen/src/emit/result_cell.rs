@@ -1,12 +1,12 @@
 //! Result cells: the heap layout behind `result[Ok, Err]`.
 //!
-//! A result value is an i64 handle to a 24-byte cell of three fields:
+//! A result value is an i64 handle to a cell of at least 24 bytes:
 //! `[0] i64 tag (0 = Ok, 1 = Err)`, `[1] Ok payload`, `[2] Err payload`.
 //! Exactly one payload slot is valid at a time — which one is gated by the
 //! tag — so uninitialized garbage in the other slot is never read. All
 //! accesses go through a fixed `{ i64, i64, i64 }` view; typed payloads are
-//! stored/loaded through bitcast field pointers so every site agrees on the
-//! layout regardless of the payload types involved.
+//! stored/loaded through bitcast field pointers. Aggregate payloads extend
+//! the allocation beyond their slot; only the active slot is accessed.
 
 use super::*;
 use inkwell::types::{BasicTypeEnum, StructType};
@@ -29,7 +29,24 @@ fn result_view_type<'ctx>(context: &'ctx inkwell::context::Context) -> StructTyp
 
 pub(crate) fn allocate_result_cell<'ctx>(
     fn_ctx: &FunctionContext<'ctx, '_>,
+    ok: &Ty,
+    err: &Ty,
 ) -> Result<PointerValue<'ctx>, crate::CodegenError> {
+    let size = [(OK_SLOT, ok), (ERR_SLOT, err)].into_iter().try_fold(
+        RESULT_CELL_SIZE as u64,
+        |size, (slot, payload)| {
+            let payload_size =
+                llvm_allocation_size(fn_ctx.module, ty_to_llvm(payload, fn_ctx.context))?;
+            let end = payload_size
+                .checked_add(u64::from(slot) * 8)
+                .ok_or_else(|| {
+                    crate::CodegenError::LLVMError(
+                        "result payload size overflows its allocation".into(),
+                    )
+                })?;
+            Ok::<_, crate::CodegenError>(size.max(end))
+        },
+    )?;
     let alloc_fn = fn_ctx
         .module
         .get_function("malloc")
@@ -39,10 +56,7 @@ pub(crate) fn allocate_result_cell<'ctx>(
         .build_call(
             alloc_fn,
             &[BasicMetadataValueEnum::IntValue(
-                fn_ctx
-                    .context
-                    .i64_type()
-                    .const_int(RESULT_CELL_SIZE as u64, false),
+                fn_ctx.context.i64_type().const_int(size, false),
             )],
             "result_box",
         )?
@@ -177,7 +191,7 @@ pub(crate) fn box_result_value<'ctx>(
     want_ok: bool,
 ) -> Result<TypedValue<'ctx>, crate::CodegenError> {
     let slot_payload = if want_ok { ok } else { err };
-    let cell = allocate_result_cell(fn_ctx)?;
+    let cell = allocate_result_cell(fn_ctx, ok, err)?;
     store_result_tag(fn_ctx, cell, want_ok)?;
     store_result_payload(fn_ctx, cell, want_ok, slot_payload, expr, payload)?;
     Ok(TypedValue::new(
@@ -192,16 +206,7 @@ pub(crate) fn box_result_value<'ctx>(
 /// Whether a payload type owns heap data that must be dropped or deep-copied
 /// when its owning result cell is reclaimed or copied.
 pub(crate) fn payload_is_heap(ty: &Ty) -> bool {
-    matches!(
-        ty,
-        Ty::String
-            | Ty::Array(_)
-            | Ty::Shared(_)
-            | Ty::Class(_)
-            | Ty::Option(_)
-            | Ty::Result { .. }
-            | Ty::Object
-    )
+    ty_is_owned_handle(ty)
 }
 
 /// Free a result cell block without touching either payload slot. Only safe
@@ -291,7 +296,7 @@ pub(crate) fn emit_copy_result_value<'ctx>(
     val: &TypedValue<'ctx>,
 ) -> Result<TypedValue<'ctx>, crate::CodegenError> {
     let source = option_cell_pointer(fn_ctx, val.value)?;
-    let target = allocate_result_cell(fn_ctx)?;
+    let target = allocate_result_cell(fn_ctx, ok, err)?;
 
     let current_fn = fn_ctx.function;
     let ok_bb = fn_ctx
@@ -373,7 +378,7 @@ pub(crate) fn rebox_payload<'ctx>(
 ) -> Result<TypedValue<'ctx>, crate::CodegenError> {
     let slot_ty = if want_ok { ok } else { err };
     let coerced = coerce_value(fn_ctx, payload, slot_ty)?;
-    let cell = allocate_result_cell(fn_ctx)?;
+    let cell = allocate_result_cell(fn_ctx, ok, err)?;
     store_result_tag(fn_ctx, cell, want_ok)?;
     let ptr = payload_slot_ptr(fn_ctx, cell, want_ok, slot_ty)?;
     fn_ctx.builder.build_store(ptr, coerced.value)?;
@@ -493,6 +498,9 @@ pub(crate) fn emit_result_combinator<'ctx>(
                 fn_ctx.builder.build_unconditional_branch(done_bb)?;
 
                 fn_ctx.builder.position_at_end(err_bb);
+                if fresh_source {
+                    emit_drop_result_value(fn_ctx, ok, err, receiver)?;
+                }
                 let err_pred = fn_ctx.builder.get_insert_block().unwrap();
                 fn_ctx.builder.build_unconditional_branch(done_bb)?;
 
@@ -658,6 +666,9 @@ pub(crate) fn emit_result_combinator<'ctx>(
         } else {
             emit_copy_value(fn_ctx, payload)?
         };
+        if let Some(unused_error) = &e_value {
+            emit_drop_value(fn_ctx, unused_error)?;
+        }
         let boxed = rebox_payload(fn_ctx, &inner, &err_ty, true, payload)?;
         let some_cell = boxed.value;
         let some_pred = fn_ctx.builder.get_insert_block().unwrap();

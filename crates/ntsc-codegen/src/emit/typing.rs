@@ -105,3 +105,21 @@ pub(crate) fn default_llvm_value<'ctx>(ty: &Ty, context: &'ctx Context) -> Basic
             .into(),
     }
 }
+
+/// Target ABI storage size, with a nonzero allocation even for empty aggregates.
+pub(crate) fn llvm_allocation_size(
+    module: &Module<'_>,
+    llvm_type: inkwell::types::BasicTypeEnum<'_>,
+) -> Result<u64, crate::CodegenError> {
+    if llvm_type.size_of().is_none() {
+        return Err(crate::CodegenError::LLVMError(format!(
+            "cannot allocate unsized type `{llvm_type}`"
+        )));
+    }
+    let layout = module.get_data_layout();
+    let layout = layout.as_str().to_str().map_err(|error| {
+        crate::CodegenError::LLVMError(format!("invalid target data layout: {error}"))
+    })?;
+    let target_data = inkwell::targets::TargetData::create(layout);
+    Ok(target_data.get_abi_size(&llvm_type).max(1))
+}

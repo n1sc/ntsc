@@ -99,33 +99,25 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                     converted
                 };
 
-                // A shared return must hand the caller a box reference:
-                // * a shared variable slot still owns its reference (it is
-                //   released at exit), so retain once for the caller,
-                // * an owned value or literal is boxed (adopted); a
-                //   bare-variable source is moved and nulled below.
-                let converted = if matches!(ret_ty, Ty::Shared(_)) {
-                    match &val_ty {
-                        Ty::Shared(_) => {
-                            let retain_fn = fn_ctx
-                                .module
-                                .get_function("ntsc_shared_retain")
-                                .ok_or_else(|| {
-                                    crate::CodegenError::LLVMError(
-                                        "ntsc_shared_retain not declared".into(),
-                                    )
-                                })?;
-                            fn_ctx.builder.build_call(
-                                retain_fn,
-                                &[BasicMetadataValueEnum::PointerValue(
-                                    converted.value.into_pointer_value(),
-                                )],
-                                "shared_ret_return",
-                            )?;
-                            converted
-                        }
-                        _ => box_or_retain_shared(fn_ctx, &ret_ty, expr, &converted)?,
+                let converted = if let Ty::Option(inner) = &ret_ty {
+                    if matches!(val_ty, Ty::Option(_) | Ty::Nil) {
+                        converted
+                    } else {
+                        let payload = coerce_value(fn_ctx, converted, inner)?;
+                        let payload = if !expr_is_fresh(fn_ctx, expr, &payload)
+                            && !expr_is_string_literal(expr)
+                            && !matches!(expr, Expr::Variable { .. })
+                        {
+                            emit_copy_value(fn_ctx, payload)?
+                        } else {
+                            payload
+                        };
+                        let cell = box_option_value(fn_ctx, inner, expr, &payload)?;
+                        let handle = super::call::coerce_to_i64(fn_ctx, cell.into())?;
+                        TypedValue::new(handle.into(), ret_ty.clone())
                     }
+                } else if matches!(ret_ty, Ty::Shared(_)) {
+                    box_or_retain_shared(fn_ctx, &ret_ty, expr, &converted)?
                 } else {
                     converted
                 };
@@ -136,12 +128,28 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                 // drop never reclaim the same allocation. Bare variables
                 // move instead (nulled below); fresh values transfer
                 // directly.
-                let converted = if matches!(ret_ty, Ty::Array(_) | Ty::String)
+                let converted = if matches!(
+                    ret_ty,
+                    Ty::Array(_)
+                        | Ty::String
+                        | Ty::Option(_)
+                        | Ty::Result { .. }
+                        | Ty::Pointer
+                        | Ty::Own(_)
+                ) && (!matches!(ret_ty, Ty::Option(_))
+                    || matches!(val_ty, Ty::Option(_)))
                     && !expr_is_string_literal(expr)
                     && !expr_is_fresh(fn_ctx, expr, &converted)
                     && !matches!(expr, Expr::Variable { .. })
                 {
-                    copy_owned_value(fn_ctx, &converted)?
+                    emit_copy_value(fn_ctx, converted)?
+                } else {
+                    converted
+                };
+
+                let converted = if matches!(ret_ty, Ty::Option(_)) {
+                    let handle = super::call::coerce_to_i64(fn_ctx, converted.value)?;
+                    TypedValue::new(handle.into(), ret_ty)
                 } else {
                     converted
                 };
@@ -169,7 +177,7 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                     }
                     other => {
                         let mut moved = Vec::new();
-                        super::drop::moved_locals_in(other, &mut moved);
+                        super::drop::moved_locals_in(fn_ctx, other, &mut moved);
                         for name in &moved {
                             if fn_ctx.owned_slots.contains(name.as_str()) {
                                 fn_ctx.null_var_slot(name);

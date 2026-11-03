@@ -42,7 +42,6 @@ pub(crate) fn store_into_field<'ctx>(
         // Storing a bare value here instead of a cell would leave the field
         // pointing at a non-cell, and the class drop thunk would then load
         // through it and free garbage.
-        emit_drop_slot_value(fn_ctx, gep.ptr, &field_ty)?;
         let cell = if matches!(val.ntsc_type, Ty::Nil) {
             fn_ctx
                 .context
@@ -52,13 +51,14 @@ pub(crate) fn store_into_field<'ctx>(
             // A fresh option temp already owns its cell; adopt it rather
             // than allocating a second one and orphaning it.
             if expr_is_fresh(fn_ctx, value, val) {
-                val.value.into_pointer_value()
+                option_cell_pointer(fn_ctx, val.value)?
             } else {
                 clone_option_value(fn_ctx, inner, val)?
             }
         } else {
             box_option_value(fn_ctx, inner, value, val)?
         };
+        emit_drop_slot_value(fn_ctx, gep.ptr, &field_ty)?;
         fn_ctx.builder.build_store(gep.ptr, cell)?;
         if let Expr::Variable { name: source } = value
             && !matches!(val.ntsc_type, Ty::Option(_) | Ty::Nil)
@@ -79,7 +79,7 @@ pub(crate) fn store_into_field<'ctx>(
         val.clone()
     };
 
-    if matches!(field_ty, Ty::String | Ty::Array(_) | Ty::Class(_)) {
+    if ty_is_owned_handle(&field_ty) {
         // Reclaim what the field held before the store overwrites it: once
         // the field points elsewhere, nothing can reach the old value
         // again. A freshly-constructed instance zero-initializes its

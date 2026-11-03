@@ -304,7 +304,22 @@ pub(crate) fn slice_fill(id: i64, value: i64) -> bool {
     let Some((array, start, len)) = slice_window(id) else {
         return false;
     };
-    (0..len).all(|offset| array_set(array, (start + offset) as i64, value))
+    let Some(string_elements) = with_array(array, |array| array.string_elements) else {
+        return false;
+    };
+    let value = if string_elements {
+        let Some(copied) = clone_string(value) else {
+            return false;
+        };
+        copied
+    } else {
+        value
+    };
+    let filled = (0..len).all(|offset| array_set(array, (start + offset) as i64, value));
+    if string_elements {
+        take_string(value);
+    }
+    filled
 }
 
 /// Copy `src` into `dst` element-wise. Both windows must have the same
@@ -318,7 +333,13 @@ pub(crate) fn slice_copy_from(dst: i64, src: i64) -> bool {
     if dst_len != src_len {
         return false;
     }
-    for offset in 0..dst_len {
+    let copy_backwards = dst_array == src_array && dst_start > src_start;
+    for index in 0..dst_len {
+        let offset = if copy_backwards {
+            dst_len - 1 - index
+        } else {
+            index
+        };
         let Some(element) = array_get(src_array, (src_start + offset) as i64) else {
             return false;
         };
@@ -2238,6 +2259,68 @@ mod tests {
         assert_eq!(array_len(arr), 1);
     }
     use super::*;
+
+    #[test]
+    fn overlapping_slice_copy_preserves_source_values() {
+        for (source_start, destination_start, expected) in [
+            (0, 1, vec![1, 1, 2, 3]),
+            (1, 0, vec![2, 3, 4, 4]),
+            (0, 0, vec![1, 2, 3, 4]),
+        ] {
+            let array = array_range(1, 5);
+            let source = slice_of(array, source_start, source_start + 3).unwrap();
+            let destination = slice_of(array, destination_start, destination_start + 3).unwrap();
+            assert!(slice_copy_from(destination, source));
+            assert_eq!(array_to_vec(array), expected);
+            slice_drop(source);
+            slice_drop(destination);
+            array_drop(array);
+        }
+    }
+
+    #[test]
+    fn overlapping_string_slice_copy_preserves_owned_elements() {
+        let array = array_new(8, 0, 1);
+        for text in ["one", "two", "three", "four"] {
+            let handle = put_string(text.to_string());
+            assert!(array_push(array, handle));
+            take_string(handle);
+        }
+        let source = slice_of(array, 0, 3).unwrap();
+        let destination = slice_of(array, 1, 4).unwrap();
+        assert!(slice_copy_from(destination, source));
+        let values: Vec<_> = array_to_vec(array).into_iter().map(get_string).collect();
+        assert_eq!(
+            values,
+            ["one", "one", "two", "three"].map(|s| Some(s.to_string()))
+        );
+        slice_drop(source);
+        slice_drop(destination);
+        array_drop(array);
+    }
+
+    #[test]
+    fn string_slice_fill_can_borrow_its_own_first_element() {
+        let text = put_string("slice_fill_owned_string".to_string());
+        let array = array_fill(text, 4, 8, 1);
+        take_string(text);
+        let window = slice_of(array, 0, 4).unwrap();
+        let value = array_get(array, 0).unwrap();
+        assert!(slice_fill(window, value));
+        for handle in array_to_vec(array) {
+            assert_eq!(
+                get_string(handle).as_deref(),
+                Some("slice_fill_owned_string")
+            );
+        }
+        slice_drop(window);
+        array_drop(array);
+        assert!(
+            !live_entries()
+                .iter()
+                .any(|entry| { entry.detail.as_deref() == Some("slice_fill_owned_string") })
+        );
+    }
 
     #[test]
     fn invalid_string_array_set_reclaims_its_temporary_copy() {

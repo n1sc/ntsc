@@ -2088,7 +2088,7 @@ fn kind_of_annotation(annotation: &TypeAnnotation) -> ValueKind {
         TypeAnnotation::Slice(_) => ValueKind::Heap,
         TypeAnnotation::Object => ValueKind::Heap,
         TypeAnnotation::Named(_) => ValueKind::Heap,
-        TypeAnnotation::Option(inner) => kind_of_annotation(inner),
+        TypeAnnotation::Option(_) => ValueKind::Heap,
         // A result is always a heap cell, whatever it carries.
         TypeAnnotation::Result { .. } => ValueKind::Heap,
         TypeAnnotation::View(..) => ValueKind::View,
@@ -2691,6 +2691,15 @@ mod tests {
         assert_error(
             "fun consume(array[int] xs) -> int { return arrays.length(xs) }
              fun main() { var a = [1, 2]; say(consume(a)); say(a[0]) }",
+            "moved",
+        );
+    }
+
+    #[test]
+    fn scalar_option_cells_move_into_owned_parameters() {
+        assert_error(
+            "fun consume(option[int] value) -> bool { return value == nil }
+             fun main() { var option[int] value = 42; say(consume(value)); say(value == nil) }",
             "moved",
         );
     }
