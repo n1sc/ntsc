@@ -239,33 +239,38 @@ fn user_object_call(expr: &Expr) -> Option<(String, String)> {
 }
 
 /// The bridge half of [`fresh_object_call`]: `@crate.fn(..)` and
-/// `handle.method(..)` shapes resolved purely from syntax and the manifest,
-/// reading no global tracking state.
+/// `handle.method(..)` shapes resolved through the manifest and tracked
+/// receiver types.
 fn fresh_bridge_object_call(expr: &Expr) -> Option<(String, String)> {
     let callee = match expr {
         Expr::Call { callee, .. } => callee.as_ref(),
         other => other,
     };
-    // Method-style: `re.is_match(s)` resolves through the manifest.
+    let (crate_name, bridge_name) = rust_call_target(callee)?;
+    let label = super::rust_return_label(&crate_name, &bridge_name)?;
+    let owner = super::rust_return_origin(&crate_name, &bridge_name).unwrap_or(crate_name);
+    rust_object_label_type(&label).map(|type_path| (owner, type_path))
+}
+
+pub(crate) fn is_rust_array_call(callee: &Expr) -> bool {
+    rust_call_target(callee)
+        .and_then(|(crate_name, bridge_name)| super::rust_return_label(&crate_name, &bridge_name))
+        .is_some_and(|label| super::rust_array_elem_ty(&label).is_some())
+}
+
+fn rust_call_target(callee: &Expr) -> Option<(String, String)> {
     if let Some((crate_name, bridge_name, _)) = rust_member_call_target(callee) {
-        let label = super::rust_return_label(&crate_name, &bridge_name)?;
-        let owner = super::rust_return_origin(&crate_name, &bridge_name).unwrap_or(crate_name);
-        return rust_object_label_type(&label).map(|type_path| (owner, type_path));
+        return Some((crate_name, bridge_name));
     }
-    // Direct `@crate.fn(..)`: same namespace and label lookup as the
-    // synchronous call path in `emit_call` below.
-    if let Expr::Member { object, property } = callee
-        && let Expr::Variable { name } = object.as_ref()
-    {
-        let namespace = name.lexeme().trim_start_matches('@');
-        let crate_name =
-            super::RUST_CRATE_NAMESPACES.with(|m| m.borrow().get(namespace).cloned())?;
-        let prop_name = property.lexeme().to_string();
-        let label = super::rust_return_label(&crate_name, &prop_name)?;
-        let owner = super::rust_return_origin(&crate_name, &prop_name).unwrap_or(crate_name);
-        return rust_object_label_type(&label).map(|type_path| (owner, type_path));
-    }
-    None
+    let Expr::Member { object, property } = callee else {
+        return None;
+    };
+    let Expr::Variable { name } = object.as_ref() else {
+        return None;
+    };
+    let (crate_name, type_path) = super::rust_object_var(name.lexeme())?;
+    let (bridge_name, _) = super::rust_method(&crate_name, &type_path, property.lexeme())?;
+    Some((crate_name, bridge_name))
 }
 
 /// Compute, for every free function, the fresh Rust object it hands back to

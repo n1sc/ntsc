@@ -607,15 +607,9 @@ pub(crate) fn adopt_object_assignment<'ctx>(
     value: &Expr,
 ) -> Result<(), crate::CodegenError> {
     if let Some((crate_name, type_path)) = call::fresh_object_call(value) {
-        let consumed_destination = match value {
-            Expr::Call { arguments, .. } => arguments.iter().any(
-                |argument| matches!(argument, Expr::Variable { name } if name.lexeme() == dest),
-            ),
-            _ => false,
-        };
-        if !consumed_destination {
-            release_tracked_object(fn_ctx, dest)?;
-        }
+        // Consumed handles release as a no-op; a retained receiver result
+        // still needs the replaced slot's reference released.
+        release_tracked_object(fn_ctx, dest)?;
         set_rust_object_var(dest, Some((crate_name, type_path)));
         return Ok(());
     }

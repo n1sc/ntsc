@@ -45,6 +45,14 @@ reason. “All Rust modules” therefore means all reachable public modules, not
 that arbitrary Rust lifetimes, unconstrained generics, unsafe contracts, or
 process-specific runtime invariants can be inferred at the FFI boundary.
 
+Discovery handles single-arm, zero-argument literal item macros and
+attribute-only repeated-item wrappers, including invocation-supplied cfg
+predicates. It preserves macro scope and host/default or requested feature
+gates; unknown custom build-script flags are disabled, not assumed enabled.
+Available path or exactly pinned cached dependency re-exports are scanned
+with their forwarded Cargo features. This is not general macro expansion or
+a compiler-derived API inventory.
+
 ## Performance goals
 
 Autogen must be fast both on a cold dependency and during ordinary edits:
@@ -98,6 +106,61 @@ rewrite an API as an out-parameter merely to work around an old binding rule;
 if a safe shape is missing, add it to the shared autogen classifier and emitter
 so every crate benefits.
 
+### Fixed-size bytes and fluent receiver returns
+
+A parameter `[u8; N]` uses the existing `bytes` label when `N` is a numeric
+literal. The bridge copies bytes into owned scratch, uses checked `TryFrom`
+to construct the array, and raises an exception on a length mismatch before
+calling Rust. Borrowed arrays use that scratch only for the call; successful
+mutable calls copy back into the original byte handle. Named and generic
+lengths remain unsupported, as do mutable fixed-byte callback arguments.
+Method returns of byte arrays retain their existing `array[int]` labels;
+fixed-byte public field getters use the existing `bytes` label.
+
+A synchronous method with a borrowed receiver and a direct `&Self` or
+`&mut Self` return uses the existing `object[T]` label. The emitter records
+the receiver pointer before the call and checks the returned pointer against
+it. A match retains the receiver's existing handle; a mismatch raises an
+exception. The borrow guard is released on success and unwinding, and no
+borrowed pointer is registered as an owned allocation. Associated functions,
+owned receivers, and native async borrowed returns are excluded.
+
+The returned share is owned by the destination slot or expression temporary.
+Replacing a slot releases its prior share even if that slot was an argument;
+a previously consumed handle releases as a no-op. Keeping an extra share
+alive continues to block mutable borrowing under the runtime's uniqueness
+check. These additions reuse schema-v3 labels and bump the emitter revision
+to invalidate previously generated source.
+
+### Compile-audited boundary corrections
+
+Mutable `String` and `str` parameters use mutable owned scratch and copy their
+bytes back into the caller's string handle after a successful call, like mutable
+byte parameters. Optional and fallible byte returns borrow their result without
+assuming it implements dereferencing, so fixed arrays work too.
+
+Scalar/string arrays returned by manifested Rust calls are fresh owned values,
+including direct and method-style calls. Destination slots adopt them, and
+discarded results or fresh borrowed call arguments are reclaimed rather than
+leaked. This follows the existing Neutron array drop rules.
+
+Concrete standard-library trait arguments made entirely from scope-independent
+Rust types use explicit UFCS dispatch. This avoids ambiguous calls such as
+`Borrow<[u8]>::borrow` when the receiver also implements reflexive borrowing.
+Local and unresolved generic arguments retain the existing conservative rules;
+this is not universal trait specialization. Imports rooted in `alloc` bring
+that built-in crate into scope.
+
+Explicit imports take precedence over same-named aliases elsewhere in a crate.
+Both `std::time::Duration` and `core::time::Duration` parameters use millis.
+Structs with known unsized fields cannot receive owned shared-registry handles.
+Known non-`Send` field shapes (including `Rc` and raw-pointer markers) also
+exclude owned handles, unless the upstream type supplies a `Send` implementation.
+The shared registry's `Send + 'static` bound is never weakened.
+When the analyzed crate is Tokio itself, the async runtime features are merged
+into its source-pinned dependency instead of emitting a duplicate TOML key.
+These corrections use emitter revision 4.
+
 ### Option-cell ownership across the boundary
 
 Scalar option cells are libc-allocated (`_ntsc_option_cell` /
@@ -147,6 +210,13 @@ public modules in that dependency; it is manifest coverage, not Rust source-line
 coverage. Treat unsupported counts and reasons as the input list for shared
 autogen work, not as a list of binders to maintain. Missing manifests are
 reported without failing the command.
+
+The `ntsc-cargo` coverage example can classify cached sources directly without
+creating adaptors, copying sources, resolving dependencies, or building the
+inspected crates. Its sorted JSON includes exact package versions and rejection
+reasons, but source classification is not proof of complete upstream discovery
+or bridge compilation. A zero-item scan has an unknown (null) percentage.
+See [the cached-crate audit](rust-coverage-audit.md).
 
 ## Determinism
 

@@ -81,6 +81,40 @@ task test_runtime {
     done("runtime unit tests passed")
 }
 
+task test_cargo {
+    step("Rust adaptor generator unit tests and audit examples")
+    run "cargo test -p ntsc-cargo --lib --examples"
+    done("Rust adaptor unit tests passed")
+}
+
+task lint_cargo {
+    step("clippy (ntsc-cargo)")
+    run "cargo clippy -p ntsc-cargo --all-targets --all-features -- -D warnings"
+    done("Rust adaptor clippy clean")
+}
+
+task test_rust_adaptor {
+    step("Rust adaptor end-to-end tests")
+    run "cargo test -p ntsc-cli --test rust_adaptor_e2e"
+    done("Rust adaptor end-to-end tests passed")
+}
+
+task rust_adaptor_check {
+    step("compile-check a generated Rust adaptor (MANIFEST selects Cargo.toml)")
+    run "cargo check --offline -j 2 --manifest-path \"$MANIFEST\" --target-dir \"$PWD/target\""
+    done("generated Rust adaptor compiles")
+}
+
+task rust_adaptor_emit {
+    step("emit a cached-crate adaptor (SOURCE and PROJ select source and audit directories)")
+    run "cargo run --offline -p ntsc-cargo --example emit_cached_adaptors -- \"$PROJ\" \"$SOURCE\""
+    done("cached-crate adaptor emitted")
+}
+
+task rust_coverage {
+    run "cargo run --offline -q -p ntsc-cargo --example coverage -- \"$SOURCE\""
+}
+
 task test {
     step("unit tests (codegen + runtime)")
     run "cargo test -p ntsc-runtime"

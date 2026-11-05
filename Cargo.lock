@@ -810,6 +810,7 @@ name = "ntsc-cargo"
 version = "0.1.0"
 dependencies = [
  "ntsc-build",
+ "proc-macro2",
  "pulldown-cmark",
  "serde",
  "serde_json",

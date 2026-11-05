@@ -710,6 +710,11 @@ pub(crate) fn expr_is_fresh<'ctx>(
             let container_tv = TypedValue::new(tv.value, Ty::Array(Box::new(tv.ntsc_type.clone())));
             expr_is_fresh(fn_ctx, object, &container_tv)
         }
+        Expr::Call { callee, .. }
+            if matches!(tv.ntsc_type, Ty::Array(_)) && super::call::is_rust_array_call(callee) =>
+        {
+            true
+        }
         Expr::Call { callee, .. } => match callee.as_ref() {
             // `alloc(value)` hands the caller a fresh owning allocation.
             Expr::Variable { name } if name.lexeme() == "alloc" => {

@@ -121,6 +121,7 @@ representations for option types.
 | `String`, `&str` | `string` | |
 | `Cow<str>` | `string` | The generated bridge reconstructs owned `Cow` storage. |
 | `Vec<u8>`, `&[u8]` | `string` (bytes) | |
+| `[u8; N]`, `&[u8; N]`, `&mut [u8; N]` parameters | `string` (bytes) | Literal lengths are checked before calling Rust. Successful mutable calls copy bytes back. |
 | `Cow<[u8]>` | `string` (bytes) | The generated bridge reconstructs owned `Cow` storage. |
 | `Vec<T>`, `&[T]` for scalar `T` | `array[T]` | |
 | `Option<T>` for scalar `T` | `option[T]` | A cell handle, not the scalar itself. |
@@ -130,11 +131,20 @@ representations for option types.
 | A supported owned struct | `object[T]` | Moves into the object registry; borrowed returns and field getters may require `Clone`. |
 | `&T` / `&mut T` | borrowed | A `&mut` parameter is a mutable borrow for the call. |
 | `self`, `&self`, `&mut self` | receiver | `Type_method(handle, …)`, also callable as `handle.method(…)`. |
+| Synchronous `&Self` / `&mut Self` receiver returns | `object[T]` | Retains the receiver handle after a pointer-identity check; no borrowed pointer escapes. |
 | A unit enum variant | a value | `Enum::Variant` is a value, not a call. |
 
 Public struct fields get accessors for free — `Dashboard_new(…)` plus
 `Dashboard_set_latency(…)` and `Dashboard_latency(…)` appear with no code on
 your side. Hand-written `impl` methods appear as `Type_method`.
+
+Fluent methods such as `builder = builder.option(...)` return an owned share
+of the same checked handle, not a clone of the Rust object. Assignment releases
+the old slot's share; discarding the result releases the temporary share.
+Keeping both handles alive prevents mutable borrowing until the extra share
+is dropped. Returning a different object of the same type raises an exception.
+Borrowed returns from associated functions, owned receivers, and native async
+methods remain unsupported by this rule.
 
 ## Traps
 
@@ -205,6 +215,18 @@ page shows exact Neutron calls, return types, Rust doc comments, callbacks, and
 unsupported public signatures. It reads the generated export manifest as the
 source of truth; run `ntsc build` to refresh it after changing the dependency
 or generator.
+
+To audit already-cached crate sources without fetching dependencies or building
+their adaptors, use the repository's read-only coverage example:
+
+```bash
+cargo run --offline -p ntsc-cargo --example coverage -- /path/to/crate-source ...
+```
+
+Its JSON reports **source classification**, not compiler-expanded or
+compile-verified coverage. Empty discovery has a null percentage, never 100%.
+See the [cached-crate audit](../reference/rust-coverage-audit.md) for measured
+results and limitations.
 
 ## When autogen does not cover what you need
 
