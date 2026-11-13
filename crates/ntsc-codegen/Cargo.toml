@@ -22,12 +22,12 @@ ntsc-diag = { path = "../ntsc-diag" }
 # codegen to the emitter's exact whitespace and broke on escaped strings.
 serde_json = "1.0"
 
-# llvm-sys does not support dynamic linking on MSVC. Unix uses the shared
-# library to keep LLVM from being duplicated into every e2e test executable.
-# The direct llvm-sys dependency supplies LLVMGetVersion for the ABI check.
+# llvm-sys rejects MSVC shared linking and misparses build-machine paths in
+# the archive's static system libraries. build.rs links the shipped C API
+# import library instead; Unix retains llvm-sys's automatic shared linking.
 [target.'cfg(target_env = "msvc")'.dependencies]
-inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["llvm23-1-force-static"] }
-llvm-sys = { version = "231", default-features = false, features = ["force-static"] }
+inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["llvm23-1-no-llvm-linking"] }
+llvm-sys = { version = "231", default-features = false, features = ["no-llvm-linking"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["llvm23-1-force-dynamic"] }

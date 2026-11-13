@@ -27,7 +27,7 @@ libc = "0.2"
 inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["target-x86", "target-aarch64"] }
 
 [target.'cfg(target_env = "msvc")'.dependencies]
-inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["llvm23-1-force-static"] }
+inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["llvm23-1-no-llvm-linking"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["llvm23-1-force-dynamic"] }

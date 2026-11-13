@@ -13,8 +13,9 @@ the [guide](../guide/getting-started.md) and the [CLI reference](cli.md).
 - **LLVM development libraries**, version 23. `ntsc-codegen` uses inkwell's
   git source pinned to the release that provides
   `llvm23-1` bindings and links only the x86-64 and aarch64 targets.
-  Cargo selects `force-dynamic` on Unix and `force-static` on MSVC,
-  where llvm-sys does not support dynamic linking.
+  Cargo selects `force-dynamic` on Unix. On MSVC, `ntsc-codegen`'s build
+  script links the archive's `LLVM-C.lib` / `LLVM-C.dll` directly, avoiding
+  llvm-sys's unsupported shared-linking path and nonportable static metadata.
   `LLVM_SYS_231_PREFIX` must point at an LLVM 23 prefix
   (e.g. `LLVM_SYS_231_PREFIX=/usr/lib/llvm-23` when it is not the default
   `llvm-config` on `PATH`). This must be *LLVM 23 exactly*: a different system LLVM silently

@@ -236,6 +236,11 @@ jobs:
           tar -xf llvm.tar.xz
           Remove-Item llvm.tar.xz
           $llvm = Join-Path $pwd "clang+llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc"
+          foreach ($library in @("$llvm\lib\LLVM-C.lib", "$llvm\bin\LLVM-C.dll")) {
+            if (-not (Test-Path $library -PathType Leaf)) {
+              throw "LLVM C API library missing: $library"
+            }
+          }
           "LLVM_SYS_231_PREFIX=$llvm" >> $env:GITHUB_ENV
           "LLVM_BIN=$llvm\bin" >> $env:GITHUB_ENV
           "$llvm\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
