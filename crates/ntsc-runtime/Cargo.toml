@@ -13,8 +13,8 @@ default = ["full"]
 full = ["regex", "http", "archive", "crypto"]
 regex = ["dep:regex"]
 http = ["dep:rustls", "dep:webpki-roots"]
-archive = ["dep:tar", "dep:flate2", "dep:crc32fast"]
-crypto = ["dep:sha2", "dep:base64", "dep:md5", "dep:hmac", "dep:crc32fast"]
+archive = ["dep:tar", "dep:flate2"]
+crypto = ["dep:sha2", "dep:base64", "dep:md5", "dep:hmac"]
 
 [dependencies]
 crossterm = "0.28"
@@ -29,11 +29,11 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = { version = "1.0", optional = true }
 tar = { version = "0.4", optional = true }
 flate2 = { version = "1.1", optional = true }
-crc32fast = { version = "1.4", optional = true }
 libc = "0.2"
 md5 = { version = "0.7", optional = true }
 hmac = { version = "0.12", optional = true }
 
 [dev-dependencies]
+crc32fast = "1.4"
 # Generates a self-signed certificate for the offline TLS round-trip test.
 rcgen = "0.14"

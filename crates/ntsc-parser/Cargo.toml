@@ -7,5 +7,7 @@ description = "Pratt + recursive-descent parser for the NTSC language"
 
 [dependencies]
 ntsc-ast = { path = "../ntsc-ast" }
-ntsc-lexer = { path = "../ntsc-lexer" }
 ntsc-diag = { path = "../ntsc-diag" }
+
+[dev-dependencies]
+ntsc-lexer = { path = "../ntsc-lexer" }
