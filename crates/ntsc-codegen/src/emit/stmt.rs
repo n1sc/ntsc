@@ -386,6 +386,7 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                     .insert(name.lexeme().to_string(), tuple_owned);
             }
             fn_ctx.define_var(name.lexeme(), ptr, ty);
+            super::scalar_array::bind_scalar_array_buffer(fn_ctx, name.lexeme())?;
         }
         Stmt::Block { statements, .. } => {
             let outer = fn_ctx.begin_block_scope();
@@ -408,7 +409,9 @@ pub(crate) fn emit_statement_in_function<'ctx>(
             emit_if(fn_ctx, condition, then_branch, elif_branches, else_branch)?;
         }
         Stmt::While { condition, body } => {
-            emit_while(fn_ctx, condition, body)?;
+            if !super::scalar_array::emit_versioned_while(fn_ctx, condition, body)? {
+                emit_while(fn_ctx, condition, body)?;
+            }
         }
         Stmt::DoWhile { body, condition } => {
             emit_do_while(fn_ctx, condition, body)?;

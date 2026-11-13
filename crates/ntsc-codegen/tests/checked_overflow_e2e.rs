@@ -1,15 +1,19 @@
-//! End-to-end tests for defined integer overflow and shift behavior.
+//! End-to-end tests for integer overflow and shift behavior.
 //!
-//! Plain `add`/`sub`/`mul` wrap and the `nsw` variants are poison on overflow,
-//! and `shl`/`ashr` are poison when the shift amount is out of range. Poison
-//! lets an optimized build compute a different value than a debug build from the
-//! same source, which the language forbids, so every one of those cases throws a
-//! catchable exception instead.
+//! A debug build traps: `add`/`sub`/`mul` (and `-x`, `x++`, `x--`) raise a
+//! catchable exception when the result does not fit, so a mistake surfaces
+//! where it happens instead of silently corrupting a value. A release build
+//! wraps two's-complement like C, Go and optimized Rust, because the guard is a
+//! branch on every arithmetic operation.
 //!
-//! Each program therefore runs in a debug *and* an optimized build and both must
-//! print the same thing. The debug build also has leak detection enabled, so the
-//! throw edges out of the middle of an expression are checked for dropping the
-//! temporaries and locals that were already live.
+//! Shift amounts and division stay checked in both builds: an out-of-range
+//! shift has no wrapped result to fall back on, and a zero divisor is a fault
+//! in every language.
+//!
+//! Every program is compiled in a debug *and* an optimized build. The debug
+//! build also has leak detection enabled, so the throw edges out of the middle
+//! of an expression are checked for dropping the temporaries and locals that
+//! were already live.
 
 use std::path::Path;
 
@@ -79,9 +83,9 @@ fn compile_run(
     )
 }
 
-/// Assert `source` prints `expected` in a debug build and in an optimized build,
-/// and that the debug build reports no leak. Equal output across the two builds
-/// is the property that matters here: a wrapping or poison result would differ.
+/// Assert `source` prints `expected` in a debug build and in an optimized
+/// build, and that the debug build reports no leak. For the checks that survive
+/// into release — shift amounts and division — both builds must agree.
 fn assert_same_in_both_builds(name: &str, source: &str, expected: &str) {
     let (ok, stdout, stderr) = compile_run(name, source, inkwell::OptimizationLevel::None);
     assert!(ok, "debug build failed: {stderr:?}\n{stdout}");
@@ -104,28 +108,68 @@ fn assert_same_in_both_builds(name: &str, source: &str, expected: &str) {
     );
 }
 
+/// Assert `source` traps with `debug` output in a debug build and wraps to
+/// `release` output in an optimized build.
+fn assert_traps_in_debug_and_wraps_in_release(
+    name: &str,
+    source: &str,
+    debug: &str,
+    release: &str,
+) {
+    let (ok, stdout, stderr) = compile_run(name, source, inkwell::OptimizationLevel::None);
+    assert!(ok, "debug build failed: {stderr:?}\n{stdout}");
+    assert_eq!(stdout.trim(), debug, "debug build output");
+    assert!(
+        !stderr.contains("memory leak detected"),
+        "debug build leaked: {stderr:?}"
+    );
+
+    let (ok, opt_stdout, opt_stderr) = compile_run(
+        &format!("{name}_opt"),
+        source,
+        inkwell::OptimizationLevel::Aggressive,
+    );
+    assert!(ok, "optimized build failed: {opt_stderr:?}\n{opt_stdout}");
+    assert_eq!(
+        opt_stdout.trim(),
+        release,
+        "optimized build must wrap, not trap"
+    );
+}
+
+/// Assert `source` traps in a debug build, with no leak on the throw edge.
+fn assert_traps_in_debug(name: &str, source: &str, expected: &str) {
+    let (ok, stdout, stderr) = compile_run(name, source, inkwell::OptimizationLevel::None);
+    assert!(ok, "debug build failed: {stderr:?}\n{stdout}");
+    assert_eq!(stdout.trim(), expected, "debug build output");
+    assert!(
+        !stderr.contains("memory leak detected"),
+        "debug build leaked: {stderr:?}"
+    );
+}
+
 #[test]
 fn addition_and_subtraction_overflow_throw() {
-    assert_same_in_both_builds(
+    assert_traps_in_debug_and_wraps_in_release(
         "addsub",
         r#"fun main() {
     var max = 9223372036854775807
     var min = -9223372036854775807 - 1
     try {
         var x = max + 1
-        say("a1: WRONG " + x)
+        say("a1: " + x)
     } catch (e) { say("a1: " + e) }
     try {
         var x = min + min
-        say("a2: WRONG " + x)
+        say("a2: " + x)
     } catch (e) { say("a2: " + e) }
     try {
         var x = min - 1
-        say("s1: WRONG " + x)
+        say("s1: " + x)
     } catch (e) { say("s1: " + e) }
     try {
         var x = max - min
-        say("s2: WRONG " + x)
+        say("s2: " + x)
     } catch (e) { say("s2: " + e) }
     say("ok: " + (max - 1) + " " + (min + 1) + " " + (max + min))
 }
@@ -135,27 +179,32 @@ fn addition_and_subtraction_overflow_throw() {
          s1: integer subtraction overflow\n\
          s2: integer subtraction overflow\n\
          ok: 9223372036854775806 -9223372036854775807 -1",
+        "a1: -9223372036854775808\n\
+         a2: 0\n\
+         s1: 9223372036854775807\n\
+         s2: -1\n\
+         ok: 9223372036854775806 -9223372036854775807 -1",
     );
 }
 
 #[test]
 fn multiplication_overflow_throws() {
-    assert_same_in_both_builds(
+    assert_traps_in_debug_and_wraps_in_release(
         "mul",
         r#"fun main() {
     var max = 9223372036854775807
     var min = -9223372036854775807 - 1
     try {
         var x = max * 2
-        say("m1: WRONG " + x)
+        say("m1: " + x)
     } catch (e) { say("m1: " + e) }
     try {
         var x = min * -1
-        say("m2: WRONG " + x)
+        say("m2: " + x)
     } catch (e) { say("m2: " + e) }
     try {
         var x = 4611686018427387904 * 2
-        say("m3: WRONG " + x)
+        say("m3: " + x)
     } catch (e) { say("m3: " + e) }
     say("ok: " + (max * 1) + " " + (max * 0) + " " + (3 * 5))
 }
@@ -164,30 +213,34 @@ fn multiplication_overflow_throws() {
          m2: integer multiplication overflow\n\
          m3: integer multiplication overflow\n\
          ok: 9223372036854775807 0 15",
+        "m1: -2\n\
+         m2: -9223372036854775808\n\
+         m3: -9223372036854775808\n\
+         ok: 9223372036854775807 0 15",
     );
 }
 
 #[test]
 fn negation_and_increment_overflow_throw() {
-    assert_same_in_both_builds(
+    assert_traps_in_debug_and_wraps_in_release(
         "neginc",
         r#"fun main() {
     var max = 9223372036854775807
     var min = -9223372036854775807 - 1
     try {
         var x = -min
-        say("n1: WRONG " + x)
+        say("n1: " + x)
     } catch (e) { say("n1: " + e) }
     say("n2: " + (-max))
     var up = max
     try {
         up++
-        say("i1: WRONG " + up)
+        say("i1: " + up)
     } catch (e) { say("i1: " + e) }
     var down = min
     try {
         down--
-        say("i2: WRONG " + down)
+        say("i2: " + down)
     } catch (e) { say("i2: " + e) }
     var n = 5
     n++
@@ -200,6 +253,11 @@ fn negation_and_increment_overflow_throw() {
          n2: -9223372036854775807\n\
          i1: integer addition overflow\n\
          i2: integer subtraction overflow\n\
+         i3: 4",
+        "n1: -9223372036854775808\n\
+         n2: -9223372036854775807\n\
+         i1: -9223372036854775808\n\
+         i2: 9223372036854775807\n\
          i3: 4",
     );
 }
@@ -241,8 +299,9 @@ fn out_of_range_shift_amounts_throw() {
 fn an_overflow_throw_reclaims_live_values() {
     // The guard branches to the enclosing handler from the middle of an
     // expression, so the drops for values already live on that path have to run
-    // on the throw edge like any other exception.
-    assert_same_in_both_builds(
+    // on the throw edge like any other exception. Only a debug build traps, so
+    // the leak check (also debug-only) is where this property lives.
+    assert_traps_in_debug(
         "cleanup",
         r#"use arrays
 fun main() {
@@ -273,7 +332,7 @@ fun main() {
 
 #[test]
 fn overflow_propagates_out_of_a_function_and_is_retryable() {
-    assert_same_in_both_builds(
+    assert_traps_in_debug(
         "propagate",
         r#"fun grow(int n) -> int {
     return n * 2
@@ -310,7 +369,8 @@ fn an_overflow_in_an_async_body_completes_the_future_as_uncaught() {
     // pending exception is reported as uncaught instead of the state machine
     // running on with a wrapped value. Regression: the throw edge used to leave
     // the poll function's exception block without a terminator, which failed
-    // module verification.
+    // module verification. Only a debug build has the guard, so this is a
+    // debug-build test.
     let source = r#"async fun main() -> int {
     var int n = 4611686018427387904
     await async.sleep(1)
@@ -319,16 +379,12 @@ fn an_overflow_in_an_async_body_completes_the_future_as_uncaught() {
     return 0
 }
 "#;
-    for (name, opt) in [
-        ("async_overflow", inkwell::OptimizationLevel::None),
-        ("async_overflow_opt", inkwell::OptimizationLevel::Aggressive),
-    ] {
-        let (ok, stdout, stderr) = compile_run(name, source, opt);
-        assert!(!ok, "{name}: overflow must not be ignored: {stdout}");
-        assert!(
-            stderr.contains("uncaught exception: integer multiplication overflow"),
-            "{name}: unexpected stderr {stderr:?}"
-        );
-        assert!(!stdout.contains("WRONG"), "{name}: kept running: {stdout}");
-    }
+    let (ok, stdout, stderr) =
+        compile_run("async_overflow", source, inkwell::OptimizationLevel::None);
+    assert!(!ok, "overflow must not be ignored: {stdout}");
+    assert!(
+        stderr.contains("uncaught exception: integer multiplication overflow"),
+        "unexpected stderr {stderr:?}"
+    );
+    assert!(!stdout.contains("WRONG"), "kept running: {stdout}");
 }

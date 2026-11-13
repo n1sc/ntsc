@@ -939,46 +939,56 @@ pub(crate) fn array_push(id: i64, elem: i64) -> bool {
 /// other elements are replaced by value. A no-op for an out-of-bounds
 /// index or an unknown array.
 pub(crate) fn array_set(id: i64, index: i64, elem: i64) -> bool {
-    if id == NULL || index < 0 {
-        return false;
-    }
-    let mut value = elem;
-    let string_elements = match shard_lock(id).get(&id) {
-        Some(Handle::Array(arr)) => arr.string_elements,
-        _ => return false,
-    };
-    if string_elements {
-        let text = match shard_lock(elem).get(&elem) {
-            Some(Handle::String(s)) => s.clone(),
-            _ => return false,
-        };
-        value = insert(Handle::String(text));
-    }
+    array_set_checked(id, index, elem).is_ok()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ArraySetError {
+    OutOfBounds,
+    Unavailable,
+}
+
+pub(crate) fn array_set_checked(id: i64, index: i64, elem: i64) -> Result<(), ArraySetError> {
     let mut guard = shard_lock(id);
     let Some(Handle::Array(arr)) = guard.get_mut(&id) else {
-        if string_elements {
-            drop(guard);
-            take_string(value);
-        }
-        return false;
+        return Err(ArraySetError::Unavailable);
     };
-    if index as usize >= arr.elements.len() {
-        if string_elements {
-            drop(guard);
-            take_string(value);
-        }
-        return false;
+    let index = usize::try_from(index).map_err(|_| ArraySetError::OutOfBounds)?;
+    let slot = arr
+        .elements
+        .get_mut(index)
+        .ok_or(ArraySetError::OutOfBounds)?;
+    if !arr.string_elements {
+        *slot = elem;
+        return Ok(());
     }
-    let old = std::mem::replace(&mut arr.elements[index as usize], value);
     drop(guard);
 
-    // The new string handle is always freshly registered, so it can never
-    // alias `old`; reclaim the replaced string element through `take_string`,
-    // which locks the handle's own shard and decrements `LIVE`.
-    if string_elements {
-        take_string(old);
+    // Registering a string copy takes another shard, so the array lock must
+    // be released before copying and its destination revalidated afterward.
+    let value = clone_string(elem).ok_or(ArraySetError::Unavailable)?;
+    let mut guard = shard_lock(id);
+    let slot = match guard.get_mut(&id) {
+        Some(Handle::Array(arr)) => arr.elements.get_mut(index),
+        _ => None,
+    };
+    let Some(slot) = slot else {
+        drop(guard);
+        take_string(value);
+        return Err(ArraySetError::Unavailable);
+    };
+    let old = std::mem::replace(slot, value);
+    drop(guard);
+    take_string(old);
+    Ok(())
+}
+
+pub(crate) fn array_scalar_data(id: i64) -> *mut i64 {
+    let mut guard = shard_lock(id);
+    match guard.get_mut(&id) {
+        Some(Handle::Array(array)) if !array.string_elements => array.elements.as_mut_ptr(),
+        _ => std::ptr::null_mut(),
     }
-    true
 }
 
 /// Remove the array behind `id`, reclaiming any owned string elements. A

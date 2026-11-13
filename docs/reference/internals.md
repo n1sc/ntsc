@@ -163,9 +163,13 @@ The generated code decides at compile time who owns each value:
 
 Exceptions use a return-check model, not stack unwinding. `ntsc_throw` stores
 the message handle in a thread-local pending slot and returns `0`; generated
-code checks `ntsc_exception_pending()` after every call that can throw and
-branches to its exception-return path when the flag is set, running the drops
-for everything live on that path on the way out. A `catch` handler takes the
+code polls that slot after every call that can throw and branches to its
+exception-return path when the flag is set, running the drops for everything
+live on that path on the way out. The poll is the hottest runtime check in the
+language, so where the runtime can name the slot at link time (x86-64 Linux) the
+slot is a thread-local `i64` symbol that generated code loads directly — two
+instructions instead of an out-of-line call. Elsewhere it goes through
+`ntsc_exception_pending()`. A `catch` handler takes the
 message with `ntsc_exception_take_message`, which clears the flag;
 `ntsc_rethrow` re-arms it (used after a `finally` that ran with a clean flag).
 An exception still pending when `main` returns is reported by

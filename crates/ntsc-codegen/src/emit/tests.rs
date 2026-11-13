@@ -39,7 +39,7 @@ fn emit_program(
 fn runtime_callbacks_use_pointer_parameters() {
     let context = Context::create();
     let module = context.create_module("runtime_callback_abi");
-    declare_runtime_functions(&module);
+    declare_runtime_functions(&module, crate::host_triple());
 
     let spawn = module
         .get_function("ntsc_process_spawn_thread")
@@ -50,6 +50,44 @@ fn runtime_callbacks_use_pointer_parameters() {
         .get_function("ntsc_sort_sort_by")
         .expect("sort_by declaration");
     assert!(sort_by.get_type().get_param_types()[1].is_pointer_type());
+}
+
+#[test]
+fn pending_exception_fallback_uses_the_runtime_flag_type() {
+    let context = Context::create();
+    let module = context.create_module("exception_poll_fallback");
+    declare_runtime_functions(&module, "unknown-unknown-unknown");
+    assert!(module.get_global(EXCEPTION_SLOT).is_none());
+
+    let function = module.add_function("run", context.i64_type().fn_type(&[], false), None);
+    let entry = context.append_basic_block(function, "entry");
+    let builder = context.create_builder();
+    builder.position_at_end(entry);
+    let mut function_context = FunctionContext::new(
+        function,
+        &builder,
+        &builder,
+        entry,
+        &module,
+        Ty::Int,
+        &context,
+    );
+    function_context
+        .emit_pending_exception_check()
+        .expect("emit fallback poll");
+    builder
+        .build_return(Some(&context.i64_type().const_zero()))
+        .expect("emit return");
+    let handler = function_context.current_exception_handler();
+    builder.position_at_end(handler);
+    builder
+        .build_return(Some(&context.i64_type().const_zero()))
+        .expect("emit exception return");
+
+    module.verify().expect("valid fallback poll IR");
+    let ir = module.print_to_string().to_string();
+    assert!(ir.contains("call i8 @ntsc_exception_pending()"), "{ir}");
+    assert!(ir.contains("icmp ne i8"), "{ir}");
 }
 
 #[test]
@@ -380,5 +418,146 @@ fn crate_names_normalize_hyphens_to_one_key() {
     assert_eq!(
         table_key_for_test("keyring", "Entry_new"),
         ("keyring".to_string(), "Entry_new".to_string())
+    );
+}
+
+/// A call must be followed by a poll of the runtime's pending-exception slot,
+/// not by a call into `ntsc_exception_pending`: the slot is a thread-local the
+/// generated code addresses directly, which is the difference between a
+/// two-instruction check and an out-of-line call in every loop that calls out.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn pending_exception_poll_reads_the_thread_local_slot() {
+    let source = r#"
+fun helper(int value) -> int {
+    return value;
+}
+
+fun run(int n) -> int {
+    var int total = 0;
+    var int i = 0;
+    while (i < n) {
+        total = total + helper(i);
+        i = i + 1;
+    }
+    return total;
+}
+"#;
+    let program = ntsc_parser::parse(&ntsc_lexer::tokenize(source)).expect("parse");
+    let Stmt::Function {
+        name,
+        params,
+        return_type,
+        body,
+        ..
+    } = &program.statements[1]
+    else {
+        panic!("expected a function");
+    };
+    let context = Context::create();
+    let module = context.create_module("exception_poll_ir");
+    declare_runtime_functions(&module, crate::host_triple());
+    let helper_ty = context
+        .i64_type()
+        .fn_type(&[context.i64_type().into()], false);
+    module.add_function(
+        "helper",
+        helper_ty,
+        Some(inkwell::module::Linkage::External),
+    );
+    let function =
+        emit_function(&context, &module, name, params, return_type, body).expect("emit function");
+    let ir = inkwell::values::AnyValue::print_to_string(&function).to_string();
+
+    assert!(
+        ir.contains("@ntsc_pending_exception_slot"),
+        "expected the poll to read the thread-local slot:\n{ir}"
+    );
+    assert!(
+        !ir.contains("@ntsc_exception_pending"),
+        "expected no out-of-line poll call:\n{ir}"
+    );
+}
+
+/// A call to a function that cannot throw must not poll the slot at all: the
+/// poll is a load and a branch on every call, which dominates a leaf call in a
+/// hot loop.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn exception_free_callees_skip_the_pending_poll() {
+    let source = r#"
+fun helper(int value) -> int {
+    return value + 1;
+}
+
+fun run(int n) -> int {
+    return helper(n);
+}
+"#;
+    let program = ntsc_parser::parse(&ntsc_lexer::tokenize(source)).expect("parse");
+    super::set_infallible_functions(super::call::compute_infallible_functions(&program, false));
+    let Stmt::Function {
+        name,
+        params,
+        return_type,
+        body,
+        ..
+    } = &program.statements[1]
+    else {
+        panic!("expected a function");
+    };
+    let context = Context::create();
+    let module = context.create_module("no_poll_ir");
+    declare_runtime_functions(&module, crate::host_triple());
+    let helper_ty = context
+        .i64_type()
+        .fn_type(&[context.i64_type().into()], false);
+    module.add_function(
+        "helper",
+        helper_ty,
+        Some(inkwell::module::Linkage::External),
+    );
+    let function =
+        emit_function(&context, &module, name, params, return_type, body).expect("emit function");
+    let ir = inkwell::values::AnyValue::print_to_string(&function).to_string();
+
+    assert!(
+        !ir.contains("ntsc_pending_exception_slot"),
+        "expected no poll after an exception-free call:\n{ir}"
+    );
+}
+
+/// Recursion must not stop the analysis: a function whose only call is to
+/// itself, over scalars, has no throw path, so every node of a backtracking
+/// search costs one direct call.
+#[test]
+fn recursive_scalar_functions_are_exception_free() {
+    let source = r#"
+fun search(int mask, int columns, int left, int right) -> int {
+    if (columns == mask) {
+        return 1;
+    }
+    var int available = mask & ~(columns | left | right);
+    var int solutions = 0;
+    while (available != 0) {
+        var int bit = available & -available;
+        available = available - bit;
+        solutions = solutions + search(mask, columns | bit, ((left | bit) << 1) & mask, (right | bit) >> 1);
+    }
+    return solutions;
+}
+"#;
+    let program = ntsc_parser::parse(&ntsc_lexer::tokenize(source)).expect("parse");
+
+    let release = super::call::compute_infallible_functions(&program, false);
+    assert!(
+        release.contains("search"),
+        "a wrapping build leaves search with no throw path"
+    );
+
+    let debug = super::call::compute_infallible_functions(&program, true);
+    assert!(
+        !debug.contains("search"),
+        "arithmetic traps on overflow in a debug build"
     );
 }

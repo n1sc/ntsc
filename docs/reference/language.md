@@ -820,22 +820,31 @@ true, for `||`) guard.
 
 ### Numeric faults
 
-Integer arithmetic is checked. An operation whose mathematical result does not
-fit in a 64-bit signed integer throws a catchable exception instead of wrapping
-or producing a build-mode-dependent value, so a debug build and an optimized
-build always agree:
+Integer arithmetic is checked in debug builds. An operation whose mathematical
+result does not fit in a 64-bit signed integer throws a catchable exception
+instead of silently corrupting a value, so a mistake surfaces where it happens:
 
-| Operation | Message |
-| --- | --- |
-| `a + b` out of range | `integer addition overflow` |
-| `a - b` out of range, including `-x` of the minimum value | `integer subtraction overflow` |
-| `a * b` out of range | `integer multiplication overflow` |
-| `a / 0`, `a % 0` | `division by zero` |
-| minimum value `/ -1`, `% -1` | `integer division overflow` |
-| `a << b`, `a >> b` with `b` negative or above 63 | `shift amount out of range` |
+| Operation | Message | Checked in release? |
+| --- | --- | --- |
+| `a + b` out of range | `integer addition overflow` | no |
+| `a - b` out of range, including `-x` of the minimum value | `integer subtraction overflow` | no |
+| `a * b` out of range | `integer multiplication overflow` | no |
+| `a / 0`, `a % 0` | `division by zero` | yes |
+| minimum value `/ -1`, `% -1` | `integer division overflow` | yes |
+| `a << b`, `a >> b` with `b` negative or above 63 | `shift amount out of range` | yes |
 
-`x++` and `x--` are checked like the `+` and `-` they stand for. Float
-arithmetic is IEEE-754 and never throws: it yields infinity or NaN.
+In a release build `+`, `-`, `*`, `-x`, `x++` and `x--` wrap two's-complement
+instead — the same value Go and optimized Rust produce. Unlike those languages,
+signed overflow in C is undefined. The guard is a
+branch on every arithmetic operation, and in a tight numeric loop that branch
+costs more than the fault is worth once the program is optimized. `x++` and
+`x--` are checked like the `+` and `-` they stand for, in whichever mode the
+build selects. Float arithmetic is IEEE-754 and never throws: it yields
+infinity or NaN.
+
+Division and shifts stay checked in every build: a zero divisor is a fault in
+every language, and a shift amount outside `0..=63` has no wrapped result to
+fall back on.
 
 Indexing is checked. A negative or out-of-range index throws
 `array index out of bounds`, on writes (`a[i] = v`) as well as reads.

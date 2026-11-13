@@ -127,21 +127,24 @@ pub fn write_object_file(
 ///
 /// `TargetMachine::write_to_file` only runs the backend, so the alloca-based
 /// slots the codegen emits would stay as stack memory unless the IR-level
-/// passes (mem2reg etc.) run explicitly here. The pass set is deliberately
-/// conservative and deterministic — no vectorization or unrolling — so the
-/// emitted IR and final object stay predictable and easy to debug.
+/// passes run explicitly here. Release builds use LLVM's standard `O3`
+/// pipeline — the same vectorization other native compilers apply — so
+/// array kernels can reach native throughput. Debug builds never call
+/// this function.
 pub fn run_optimization_passes(
     module: &Module<'_>,
     target_machine: &TargetMachine,
 ) -> Result<(), crate::CodegenError> {
     let _guard = CodegenLockGuard::acquire();
 
-    let passes = "mem2reg,instcombine,simplifycfg,sccp,dce,gvn";
+    let passes = "default<O3>";
     let options = inkwell::passes::PassBuilderOptions::create();
     options.set_verify_each(true);
+    // Loop unrolling makes the array kernels slower: it duplicates the
+    // already-large versioned bodies and defeats the vectorizer's cost model.
     options.set_loop_unrolling(false);
-    options.set_loop_vectorization(false);
-    options.set_loop_slp_vectorization(false);
+    options.set_loop_vectorization(true);
+    options.set_loop_slp_vectorization(true);
     module
         .run_passes(passes, target_machine, options)
         .map_err(|e| {

@@ -30,6 +30,16 @@ pub fn emit_module(
 ) -> Result<(), crate::CodegenError> {
     let _guard = crate::context::CodegenLockGuard::acquire();
 
+    // Release builds wrap on overflow like C and Go; debug builds keep the
+    // catchable exception so a mistake surfaces where it happens.
+    OVERFLOW_POLICY.with(|policy| {
+        policy.set(if optimize {
+            OverflowPolicy::Wrap
+        } else {
+            OverflowPolicy::Trap
+        });
+    });
+
     // Trait-object vtables are built from the tables the type checker
     // recorded while erasing trait declarations.
     super::dyn_obj::load_trait_tables(ntsc_typeck::take_trait_object_tables());
@@ -361,8 +371,17 @@ pub fn emit_module(
     // classification consults).
     super::set_user_object_returns(super::call::compute_user_object_returns(program));
 
+    // Free functions that cannot leave an exception pending: their call sites
+    // skip the poll. Only an optimized build can produce many of them, because
+    // the overflow guards of a debug build throw.
+    super::set_infallible_functions(super::call::compute_infallible_functions(
+        program, !optimize,
+    ));
+
     // Declare runtime functions.
-    declare_runtime_functions(&module);
+    let triple = target_machine.get_triple();
+    let target_triple = triple.as_str().to_string_lossy();
+    declare_runtime_functions(&module, &target_triple);
 
     // Declare every top-level function up front so call sites resolve
     // regardless of definition order (required once `use` imports merge

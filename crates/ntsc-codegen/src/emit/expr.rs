@@ -83,7 +83,15 @@ pub(crate) fn emit_expression<'ctx>(
         Expr::IndexGet { object, index } => {
             let obj_val = emit_expression(fn_ctx, object)?;
             let obj_val = deref_shared(fn_ctx, obj_val)?;
-            let idx_val = emit_expression(fn_ctx, index)?;
+            let idx_val = super::scalar_array::emit_index_expression(fn_ctx, object, index)?;
+            if let Some(value) = super::scalar_array::read_scalar_array(
+                fn_ctx,
+                object,
+                idx_val.value.into_int_value(),
+                index,
+            )? {
+                return Ok(value);
+            }
             // A window is bounds-checked against the window, not the array
             // behind it, so it reads through the slice ABI.
             if let Ty::Slice(element) = &obj_val.ntsc_type {
@@ -183,7 +191,16 @@ pub(crate) fn emit_expression<'ctx>(
             let val = emit_expression(fn_ctx, value)?;
             let obj_val = emit_expression(fn_ctx, object)?;
             let obj_val = deref_shared(fn_ctx, obj_val)?;
-            let idx_val = emit_expression(fn_ctx, index)?;
+            let idx_val = super::scalar_array::emit_index_expression(fn_ctx, object, index)?;
+            if super::scalar_array::write_scalar_array(
+                fn_ctx,
+                object,
+                idx_val.value.into_int_value(),
+                index,
+                &val,
+            )? {
+                return Ok(val);
+            }
 
             // Nested arrays, option cells, and shared boxes are owned by
             // their container, but `ntsc_array_set` only reclaims the

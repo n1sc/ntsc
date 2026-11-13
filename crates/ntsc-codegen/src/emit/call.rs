@@ -1,6 +1,7 @@
 //! Call emission: argument preparation, spread, stdlib calls.
 
 use super::*;
+use ntsc_ast::expr::FunctionParam;
 
 /// Get a basic value result from a call site. A `void` return produces no
 /// basic value; callers still get a placeholder so call expressions can be
@@ -307,6 +308,304 @@ pub(crate) fn compute_user_object_returns(program: &Program) -> HashMap<String, 
         }
     }
     resolved
+}
+
+// ── Exception-freedom analysis ──────────────────────────────────────────
+
+thread_local! {
+    /// Free functions whose bodies cannot leave a pending exception, so a
+    /// call to one needs no poll afterwards. The poll is the only runtime
+    /// work a call to a leaf numeric helper otherwise does, and in a tight
+    /// recursive loop that compare-and-branch is a visible fraction of the
+    /// loop body.
+    static INFALLIBLE_FUNCTIONS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+pub(crate) fn set_infallible_functions(functions: HashSet<String>) {
+    INFALLIBLE_FUNCTIONS.with(|current| *current.borrow_mut() = functions);
+}
+
+/// Whether calling `name` can leave an exception pending. Anything the
+/// analysis did not classify is assumed able to throw.
+pub(crate) fn is_infallible_function(name: &str) -> bool {
+    !is_ffi_function(name) && INFALLIBLE_FUNCTIONS.with(|set| set.borrow().contains(name))
+}
+
+/// Compute the free functions that cannot leave a pending exception.
+///
+/// The analysis starts from "every free function is infallible" and removes
+/// the ones whose body contains an operation that can throw. Shrinking from
+/// the top yields the greatest fixpoint, which is the right choice for
+/// recursion: a function that only calls itself and performs infallible
+/// operations has no throw path at all.
+pub(crate) fn compute_infallible_functions(
+    program: &Program,
+    overflow_traps: bool,
+) -> HashSet<String> {
+    let functions: Vec<FunctionSummary<'_>> = program
+        .statements
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::Function {
+                name,
+                params,
+                return_type,
+                body,
+                ..
+            } => Some(FunctionSummary {
+                name: name.lexeme(),
+                params,
+                returns_scalar: return_type.as_ref().is_some_and(|annotation| {
+                    is_scalar_ty(type_annotation_to_ty(&Some(annotation.ty.clone())))
+                }),
+                body,
+            }),
+            _ => None,
+        })
+        .collect();
+
+    let mut infallible: HashSet<String> = functions
+        .iter()
+        .map(|function| function.name.to_string())
+        .collect();
+    loop {
+        let mut changed = false;
+        for function in &functions {
+            if !infallible.contains(function.name) {
+                continue;
+            }
+            let scalars = scalar_bindings(function.params, function.body);
+            let facts = BodyFacts {
+                infallible: &infallible,
+                scalars: &scalars,
+                overflow_traps,
+                returns_scalar: function.returns_scalar,
+            };
+            let safe = function
+                .body
+                .iter()
+                .all(|statement| statement_is_infallible(statement, &facts));
+            if !safe {
+                infallible.remove(function.name);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    infallible
+}
+
+/// A free function the analysis examines, reduced to what decides whether its
+/// body can leave an exception pending.
+struct FunctionSummary<'a> {
+    name: &'a str,
+    params: &'a [FunctionParam],
+    returns_scalar: bool,
+    body: &'a [Stmt],
+}
+
+/// What the analysis knows about one function body while it walks it.
+struct BodyFacts<'a> {
+    infallible: &'a HashSet<String>,
+    scalars: &'a HashSet<String>,
+    overflow_traps: bool,
+    returns_scalar: bool,
+}
+
+fn is_scalar_ty(ty: Ty) -> bool {
+    matches!(ty, Ty::Int | Ty::Float | Ty::Bool)
+}
+
+/// Names this function binds to a plain scalar. Assigning to one only stores
+/// a machine word, so it cannot run a destructor that throws; assigning to any
+/// other local may.
+fn scalar_bindings(params: &[FunctionParam], body: &[Stmt]) -> HashSet<String> {
+    let mut declared: HashMap<String, bool> = HashMap::new();
+    for param in params {
+        let scalar = is_scalar_ty(type_annotation_to_ty(&param.type_annotation));
+        let entry = declared
+            .entry(param.name.lexeme().to_string())
+            .or_insert(true);
+        *entry = *entry && scalar;
+    }
+    for statement in body {
+        collect_scalar_locals(statement, &mut declared);
+    }
+    declared
+        .into_iter()
+        .filter_map(|(name, scalar)| scalar.then_some(name))
+        .collect()
+}
+
+fn collect_scalar_locals(statement: &Stmt, declared: &mut HashMap<String, bool>) {
+    match statement {
+        Stmt::Var {
+            name,
+            type_annotation,
+            ..
+        } => {
+            let scalar = is_scalar_ty(type_annotation_to_ty(type_annotation));
+            let entry = declared.entry(name.lexeme().to_string()).or_insert(true);
+            *entry = *entry && scalar;
+        }
+        Stmt::Block { statements, .. } => {
+            for statement in statements {
+                collect_scalar_locals(statement, declared);
+            }
+        }
+        Stmt::If {
+            then_branch,
+            elif_branches,
+            else_branch,
+            ..
+        } => {
+            collect_scalar_locals(then_branch, declared);
+            for branch in elif_branches {
+                collect_scalar_locals(&branch.body, declared);
+            }
+            if let Some(body) = else_branch {
+                collect_scalar_locals(body, declared);
+            }
+        }
+        Stmt::While { body, .. } => collect_scalar_locals(body, declared),
+        _ => {}
+    }
+}
+
+/// Whether `statement` can run to completion without leaving an exception
+/// pending. Anything not listed here is assumed able to throw.
+fn statement_is_infallible(statement: &Stmt, facts: &BodyFacts<'_>) -> bool {
+    match statement {
+        Stmt::Expression { expression } => expression_is_infallible(expression, facts),
+        // A non-scalar local runs a destructor when its scope ends, and that
+        // destructor may throw, so only plain scalars are safe here.
+        Stmt::Var {
+            name,
+            initializer,
+            view: None,
+            is_static: false,
+            ..
+        } => {
+            facts.scalars.contains(name.lexeme())
+                && initializer
+                    .as_ref()
+                    .is_none_or(|value| expression_is_infallible(value, facts))
+        }
+        Stmt::Block { statements, .. } => statements
+            .iter()
+            .all(|statement| statement_is_infallible(statement, facts)),
+        Stmt::If {
+            condition,
+            then_branch,
+            elif_branches,
+            else_branch,
+        } => {
+            expression_is_infallible(condition, facts)
+                && statement_is_infallible(then_branch, facts)
+                && elif_branches.iter().all(|branch| {
+                    expression_is_infallible(&branch.condition, facts)
+                        && statement_is_infallible(&branch.body, facts)
+                })
+                && else_branch
+                    .as_ref()
+                    .is_none_or(|body| statement_is_infallible(body, facts))
+        }
+        Stmt::While { condition, body } => {
+            expression_is_infallible(condition, facts) && statement_is_infallible(body, facts)
+        }
+        // Handing a non-scalar back to the caller copies it, which allocates.
+        Stmt::Return { value } => {
+            facts.returns_scalar
+                && value
+                    .as_ref()
+                    .is_none_or(|value| expression_is_infallible(value, facts))
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => true,
+        _ => false,
+    }
+}
+
+/// Whether evaluating `expression` can throw. Bitwise, comparison and
+/// control-flow operators cannot; arithmetic can only when this build traps
+/// on overflow; and a call is only as safe as its target.
+fn expression_is_infallible(expression: &Expr, facts: &BodyFacts<'_>) -> bool {
+    let recurse = |expression: &Expr| expression_is_infallible(expression, facts);
+    match expression {
+        // A string literal interns a runtime handle, which allocates.
+        Expr::Literal { value, .. } => matches!(
+            value,
+            LiteralValue::Nil | LiteralValue::Bool(_) | LiteralValue::Number(_)
+        ),
+        Expr::Variable { .. } | Expr::This { .. } => true,
+        Expr::Grouping { expression, .. } => recurse(expression),
+        Expr::Assign { name, value } => facts.scalars.contains(name.lexeme()) && recurse(value),
+        Expr::Unary { op, right } => {
+            let operand = recurse(right);
+            match op.kind {
+                TokenKind::Bang | TokenKind::Tilde => operand,
+                TokenKind::Minus => operand && !facts.overflow_traps,
+                _ => false,
+            }
+        }
+        Expr::PostfixUnary { op, left } => {
+            matches!(op.kind, TokenKind::PlusPlus | TokenKind::MinusMinus)
+                && !facts.overflow_traps
+                && recurse(left)
+        }
+        Expr::Binary { left, op, right } => {
+            if !recurse(left) || !recurse(right) {
+                return false;
+            }
+            match op.kind {
+                TokenKind::Ampersand
+                | TokenKind::Pipe
+                | TokenKind::Caret
+                | TokenKind::EqualEqual
+                | TokenKind::BangEqual
+                | TokenKind::Less
+                | TokenKind::Greater
+                | TokenKind::LessEqual
+                | TokenKind::GreaterEqual => true,
+                TokenKind::Plus | TokenKind::Minus | TokenKind::Star => !facts.overflow_traps,
+                // An out-of-range shift amount throws in every build.
+                TokenKind::LessLess | TokenKind::GreaterGreater => {
+                    !facts.overflow_traps && constant_shift_amount(right).is_some()
+                }
+                _ => false,
+            }
+        }
+        Expr::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+        } => recurse(condition) && recurse(then_branch) && recurse(else_branch),
+        // Only a direct call to a free function can be classified; anything
+        // reached through a variable is a function pointer the analysis
+        // cannot see through.
+        Expr::Call {
+            callee, arguments, ..
+        } => {
+            let Expr::Variable { name } = callee.as_ref() else {
+                return false;
+            };
+            facts.infallible.contains(name.lexeme()) && arguments.iter().all(recurse)
+        }
+        _ => false,
+    }
+}
+
+/// The shift amount of a literal `a << 3`, when it is in range.
+fn constant_shift_amount(expression: &Expr) -> Option<i64> {
+    let Expr::Literal {
+        value: LiteralValue::Number(text),
+        ..
+    } = expression
+    else {
+        return None;
+    };
+    ntsc_ast::expr::parse_int_literal(text).filter(|amount| (0..64).contains(amount))
 }
 
 /// The fresh object `body` returns, if every information source available so
@@ -1321,7 +1620,7 @@ pub(crate) fn emit_call<'ctx>(
             } else {
                 result_val
             };
-            fn_ctx.emit_pending_exception_check()?;
+            fn_ctx.emit_pending_exception_check_after(name_str)?;
 
             return Ok(TypedValue::new(result_val, ret_ty));
         }

@@ -1,14 +1,15 @@
 //! Minimal runtime + standard library support for NTSC-compiled binaries.
 //!
 //! All functions here use `extern "C"` ABI so they can be called from
-//! LLVM-generated code. No raw pointers cross the boundary except through
-//! the cross-adaptor shared-object API (`ntsc_shared_object_*`), where adaptor
-//! crates exchange heap values as opaque pointers with creator-side drop
-//! glue; every other owned heap value (string, array, shared box, future,
+//! LLVM-generated code. Raw pointers cross the boundary through the
+//! cross-adaptor shared-object API (`ntsc_shared_object_*`) and the compiler's
+//! exclusively borrowed local scalar-array buffers. Both have explicit
+//! lifetime contracts; adaptor objects additionally carry creator-side drop
+//! glue. Every owned heap value (string, array, shared box, future,
 //! opaque module value) lives in the handle registry under an `i64` key,
-//! and generated code passes only those keys. `unsafe` appears only in the
-//! shared-object boundary functions, where the caller contracts are
-//! documented per function.
+//! and generated code passes only those keys. `unsafe` appears only in those
+//! two boundary families, where the caller contracts are documented per
+//! function.
 //!
 //! ## Ownership rules
 //!
@@ -26,12 +27,13 @@
 //! ## Exceptions
 //!
 //! Exceptions use a return-check model. `ntsc_throw` stores the message in a
-//! thread-local pending slot and returns `0`; generated code checks
-//! `ntsc_exception_pending()` after every call and branches to its
-//! exception-return path when it is set. `ntsc_exception_take_message`
-//! transfers the message to a catch binding and clears the pending slot;
-//! `ntsc_rethrow` re-arms it (used after a `finally` that ran with a clean
-//! flag).
+//! thread-local pending slot and returns `0`; generated code polls that slot
+//! after every call and branches to its exception-return path when it is set.
+//! The poll is a direct thread-local load where the slot has a link-time-known
+//! name (see `exception_slot`), and `ntsc_exception_pending()` otherwise.
+//! `ntsc_exception_take_message` transfers the message to a catch binding and
+//! clears the pending slot; `ntsc_rethrow` re-arms it (used after a `finally`
+//! that ran with a clean flag).
 
 mod idmap;
 pub mod modules;
@@ -462,17 +464,24 @@ pub extern "C" fn ntsc_array_push(id: i64, elem: i64) -> i64 {
 /// a safe failure returning 0. Returns the array handle on success.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_array_set(id: i64, index: i64, elem: i64) -> i64 {
-    if !registry::is_array(id) {
-        return NULL;
+    match registry::array_set_checked(id, index, elem) {
+        Ok(()) => id,
+        Err(registry::ArraySetError::OutOfBounds) => throw_string("array index out of bounds"),
+        Err(registry::ArraySetError::Unavailable) => NULL,
     }
-    if index < 0 || index >= registry::array_len(id) {
-        return throw_string("array index out of bounds");
-    }
-    if registry::array_set(id, index, elem) {
-        id
-    } else {
-        NULL
-    }
+}
+
+/// Borrow the contiguous slots of an exclusively owned scalar array.
+///
+/// # Safety
+///
+/// The caller must keep the array alive and prevent resizing, replacement,
+/// concurrent access, and ownership transfer while using the pointer.
+/// Accesses must stay within the array's current length. Generated code uses
+/// this only for nonescaping local numeric arrays with inline bounds checks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ntsc_array_scalar_data(id: i64) -> *mut i64 {
+    registry::array_scalar_data(id)
 }
 
 /// Remove and return the last element of an owned array. For a string
@@ -732,12 +741,81 @@ use std::cell::RefCell;
 // Exception state (return-check model)
 // ══════════════════════════════════════════════════════════════════════════
 
-thread_local! {
-    /// The handle of the pending exception message, or `None` when no
-    /// exception is active. The message stays registered for the whole
-    /// propagation; it is removed by `ntsc_exception_take_message` (catch
-    /// binding) or `ntsc_exception_clear`.
-    static PENDING_EXCEPTION: RefCell<Option<i64>> = const { RefCell::new(None) };
+/// The thread-local slot holding the pending-exception message handle, or
+/// `NULL` when no exception is active. The message stays registered for the
+/// whole propagation; it is removed by `ntsc_exception_take_message` (catch
+/// binding) or `ntsc_exception_clear`.
+///
+/// Generated code polls this slot after every call that may throw, which makes
+/// it the hottest runtime state in the language. On x86-64 Linux the slot is a
+/// plain thread-local `i64` with a fixed symbol name, so the generated check is
+/// a single `%fs:`-relative compare instead of a call into the runtime. Every
+/// other target keeps an ordinary `thread_local!` cell and generated code calls
+/// [`ntsc_exception_pending`] instead.
+mod exception_slot {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    mod imp {
+        // The slot is defined here rather than as a Rust `static` because
+        // `#[thread_local]` is not expressible on stable Rust, and generated
+        // code needs a named TLS symbol it can address directly.
+        core::arch::global_asm!(
+            r#"
+            .section .tbss,"awT",@nobits
+            .globl ntsc_pending_exception_slot
+            .hidden ntsc_pending_exception_slot
+            .type ntsc_pending_exception_slot,@object
+            .size ntsc_pending_exception_slot,8
+            .balign 8
+            ntsc_pending_exception_slot:
+            .zero 8
+            .text
+            .globl ntsc_pending_exception_slot_address
+            .hidden ntsc_pending_exception_slot_address
+            .type ntsc_pending_exception_slot_address,@function
+            ntsc_pending_exception_slot_address:
+            mov %fs:0, %rax
+            lea ntsc_pending_exception_slot@tpoff(%rax), %rax
+            ret
+            "#,
+            options(att_syntax)
+        );
+
+        unsafe extern "C" {
+            fn ntsc_pending_exception_slot_address() -> *mut i64;
+        }
+
+        pub fn get() -> i64 {
+            // SAFETY: the accessor returns this thread's slot, which lives in
+            // the thread's TLS block and is only ever accessed by this thread.
+            unsafe { ntsc_pending_exception_slot_address().read() }
+        }
+
+        pub fn set(value: i64) {
+            // SAFETY: see `get`.
+            unsafe { ntsc_pending_exception_slot_address().write(value) };
+        }
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    mod imp {
+        use std::cell::Cell;
+
+        use crate::registry::NULL;
+
+        thread_local! {
+            static SLOT: Cell<i64> = const { Cell::new(NULL) };
+        }
+
+        pub fn get() -> i64 {
+            SLOT.with(Cell::get)
+        }
+
+        pub fn set(value: i64) {
+            SLOT.with(|slot| slot.set(value));
+        }
+    }
+
+    pub use imp::{get, set};
 }
 
 /// Replace the current async task stack with a scheduler-owned stack.
@@ -792,10 +870,9 @@ pub extern "C" fn ntsc_throw(msg: i64) -> i64 {
     } else {
         msg
     };
-    let previous = PENDING_EXCEPTION.with(|pending| pending.borrow_mut().replace(message));
-    if let Some(previous) = previous
-        && previous != message
-    {
+    let previous = exception_slot::get();
+    exception_slot::set(message);
+    if previous != NULL && previous != message {
         // A nested runtime failure may replace an exception before generated
         // code gets a chance to take it. The pending slot owns the old
         // message, so replacing it must release that ownership immediately.
@@ -815,7 +892,7 @@ pub extern "C" fn ntsc_rethrow(msg: i64) -> i64 {
 /// Return 1 when an exception is pending, 0 otherwise.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_exception_pending() -> i8 {
-    PENDING_EXCEPTION.with(|pending| i8::from(pending.borrow().is_some()))
+    i8::from(exception_slot::get() != NULL)
 }
 
 /// Alias of [`ntsc_exception_pending`].
@@ -829,7 +906,7 @@ pub extern "C" fn ntsc_exception_is_active() -> i8 {
 /// pending.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_exception_get_message() -> i64 {
-    PENDING_EXCEPTION.with(|pending| pending.borrow().unwrap_or(NULL))
+    exception_slot::get()
 }
 
 /// Transfer ownership of the pending exception message to the caller and
@@ -837,7 +914,9 @@ pub extern "C" fn ntsc_exception_get_message() -> i64 {
 /// drop the returned string like any owned value.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_exception_take_message() -> i64 {
-    PENDING_EXCEPTION.with(|pending| pending.borrow_mut().take().unwrap_or(NULL))
+    let message = exception_slot::get();
+    exception_slot::set(NULL);
+    message
 }
 
 /// Clear the pending exception, reclaiming its message.
@@ -2080,5 +2159,57 @@ mod tests {
         ntsc_string_drop(src);
         ntsc_string_drop(fresh);
         ntsc_array_drop(strs);
+    }
+
+    #[test]
+    fn array_set_distinguishes_invalid_handles_from_invalid_indices() {
+        ntsc_exception_clear();
+        assert_eq!(ntsc_array_set(0, -1, 7), NULL);
+        assert_eq!(ntsc_exception_pending(), 0);
+        let text = ntsc_i64_to_string(5);
+        assert_eq!(ntsc_array_set(text, 0, 7), NULL);
+        assert_eq!(ntsc_exception_pending(), 0);
+        ntsc_string_drop(text);
+
+        let array = ntsc_array_new(8, 1);
+        ntsc_array_push(array, 9);
+        for index in [-1, 1, i64::MAX] {
+            assert_eq!(ntsc_array_set(array, index, 7), NULL);
+            assert_ne!(ntsc_exception_pending(), 0);
+            let message = ntsc_exception_take_message();
+            assert_eq!(
+                registry::get_string(message).as_deref(),
+                Some("array index out of bounds")
+            );
+            ntsc_string_drop(message);
+        }
+        assert_eq!(ntsc_array_get(array, 0), 9);
+        assert_eq!(ntsc_exception_pending(), 0);
+        ntsc_array_drop(array);
+    }
+
+    #[test]
+    fn array_scalar_buffer_keeps_the_owned_storage_and_rejects_strings() {
+        let array = ntsc_array_new(8, 2);
+        ntsc_array_push(array, 7);
+        ntsc_array_push(array, 11);
+        // SAFETY: this test owns the array, does not resize it, and accesses
+        // only its two initialized slots before dropping it.
+        unsafe {
+            let data = ntsc_array_scalar_data(array);
+            assert!(!data.is_null());
+            assert_eq!(*data, 7);
+            *data.add(1) = 13;
+        }
+        assert_eq!(ntsc_array_get(array, 1), 13);
+        ntsc_array_drop(array);
+
+        let strings = ntsc_array_new_typed(8, 1, 1);
+        // SAFETY: no returned pointer is dereferenced.
+        unsafe {
+            assert!(ntsc_array_scalar_data(strings).is_null());
+            assert!(ntsc_array_scalar_data(NULL).is_null());
+        }
+        ntsc_array_drop(strings);
     }
 }

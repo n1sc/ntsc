@@ -133,9 +133,13 @@ does not fit in a 64-bit signed integer; `/` and `%` on a zero divisor or the
 one overflowing division; `<<` and `>>` with a shift amount below 0 or above 63;
 and an array index that is negative or past the end, on writes as well as reads.
 
-This behavior is the same in debug and release builds. NTSC does not wrap on
-overflow in one build mode and fault in the other, so a program cannot compute a
-different answer once it is optimized.
+The arithmetic faults are a debug-build behaviour. A release build wraps `+`,
+`-`, `*`, `-x`, `x++` and `x--` two's-complement instead, matching C, Go and
+optimized Rust: the guard is a branch on every arithmetic operation, and that
+branch is what a tight numeric loop cannot afford. Division and the shift checks
+are unaffected and run in every build. If a program must detect overflow in
+release too, test the operands explicitly, for example
+`if (a > 0 && b > max - a) { throw "too big" }` before adding.
 
 Float arithmetic follows IEEE-754 and never throws — an out-of-range result is
 infinity and an undefined one is NaN.

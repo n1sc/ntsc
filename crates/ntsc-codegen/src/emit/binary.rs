@@ -743,17 +743,29 @@ pub(crate) fn emit_guard_throw<'ctx>(
 
 /// Emit `lhs op rhs` on 64-bit signed integers with an overflow check.
 ///
-/// NTSC defines integer overflow as a catchable exception in *every* build
-/// mode. Plain `add`/`sub`/`mul` wrap and the `nsw` variants are poison on
-/// overflow, so an optimized build could compute a different value than a
-/// debug build from the same source; the check removes that difference.
-/// Leaves the builder on the non-overflowing path.
+/// A debug build defines integer overflow as a catchable exception. A release
+/// build wraps instead: `add`/`sub`/`mul` are exactly two's-complement
+/// wraparound, and the guard that turns overflow into an exception is a branch
+/// on every arithmetic operation — in a tight numeric loop that branch is the
+/// difference between matching and trailing C. `OverflowPolicy` selects which,
+/// and `Unchecked` is also used inside a versioned loop or its preheader, where
+/// a runtime range guard has already proven the operation cannot overflow (or,
+/// for `Track`, where overflow simply selects the checked loop instead of
+/// throwing).
 pub(crate) fn emit_checked_int_arith<'ctx>(
     fn_ctx: &mut FunctionContext<'ctx, '_>,
     op: IntArith,
     lhs: inkwell::values::IntValue<'ctx>,
     rhs: inkwell::values::IntValue<'ctx>,
 ) -> Result<inkwell::values::IntValue<'ctx>, crate::CodegenError> {
+    if fn_ctx.int_arith_mode == IntArithMode::Unchecked {
+        return Ok(match op {
+            IntArith::Add => fn_ctx.builder.build_int_add(lhs, rhs, "int_add")?,
+            IntArith::Sub => fn_ctx.builder.build_int_sub(lhs, rhs, "int_sub")?,
+            IntArith::Mul => fn_ctx.builder.build_int_mul(lhs, rhs, "int_mul")?,
+        });
+    }
+
     let i64_ty = fn_ctx.context.i64_type();
     let name = op.intrinsic();
     let decl = inkwell::intrinsics::Intrinsic::find(name)
@@ -778,6 +790,15 @@ pub(crate) fn emit_checked_int_arith<'ctx>(
         .builder
         .build_extract_value(pair, 1, &format!("{}_overflow", op.label()))?
         .into_int_value();
+    if fn_ctx.int_arith_mode == IntArithMode::Track {
+        fn_ctx.tracked_overflow = Some(match fn_ctx.tracked_overflow {
+            Some(previous) => fn_ctx
+                .builder
+                .build_or(previous, overflowed, "overflow_any")?,
+            None => overflowed,
+        });
+        return Ok(result);
+    }
     emit_guard_throw(fn_ctx, overflowed, op.message(), op.label())?;
     Ok(result)
 }

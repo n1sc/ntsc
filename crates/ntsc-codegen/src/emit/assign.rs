@@ -7,7 +7,18 @@ pub(crate) fn emit_assign<'ctx>(
     name: &ntsc_ast::token::Token,
     value: &Expr,
 ) -> Result<TypedValue<'ctx>, crate::CodegenError> {
+    // A versioned loop proved its induction variable cannot overflow, so its
+    // own `iv = iv + step` update lowers unchecked.
+    let trusted_iv = fn_ctx
+        .trusted_loop
+        .as_ref()
+        .is_some_and(|trusted| trusted.iv == name.lexeme());
+    let previous_mode = fn_ctx.int_arith_mode;
+    if trusted_iv {
+        fn_ctx.int_arith_mode = IntArithMode::Unchecked;
+    }
     let val = emit_expression(fn_ctx, value)?;
+    fn_ctx.int_arith_mode = previous_mode;
     // Adopt Rust object handles into caller-side ownership: transfer fresh
     // bridge results, retain shares, release what the slot held. This runs
     // before the store below so `x = x` retains first and cannot free

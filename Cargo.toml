@@ -27,7 +27,7 @@ license = "NPL-1.1"
 [profile.dev]
 debug = false
 
-# Release: C-like speed + smallest binaries. `lto=thin` lets LLVM drop
+# Release: C-like speed + small binaries. `lto=thin` lets LLVM drop
 # unused runtime modules that were not imported (`only build what is
 # used`), `codegen-units=1` maximizes optimization, `panic=abort`
 # removes unwinding tables, `strip` drops the 3M of debug symbols that
@@ -38,3 +38,9 @@ codegen-units = 1
 panic = "abort"
 strip = "debuginfo"
 opt-level = "z"
+
+# The staticlib is linked into every generated program, so its hot paths
+# (registry lookups, array access, the per-call exception check) must be
+# optimized for speed; `opt-level = "z"` leaves them as out-of-line calls.
+[profile.release.package.ntsc-runtime]
+opt-level = 3

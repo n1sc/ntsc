@@ -8,7 +8,7 @@
 
 use super::*;
 
-pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
+pub(crate) fn declare_runtime_functions(module: &Module<'_>, target_triple: &str) {
     let ctx = module.get_context();
     let void_ty = ctx.void_type();
     let i64_ty = ctx.i64_type();
@@ -99,6 +99,10 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
 
     declare!("ntsc_exception_clear", void_ty);
 
+    // ── Exception poll slot ──────────────────────────────────────────────
+
+    declare_exception_slot(module, target_triple);
+
     // ── Heap arrays ──────────────────────────────────────────────────────
     // `get` borrows its element, `pop` transfers ownership of the removed
     // element, `set` replaces an element (reclaiming the old one) and
@@ -111,6 +115,11 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_array_set_string_elements", void_ty, i64_ty, i8_ty);
 
     declare!("ntsc_array_len", i64_ty, i64_ty);
+    declare!(
+        "ntsc_array_scalar_data",
+        ctx.ptr_type(AddressSpace::default()),
+        i64_ty
+    );
 
     declare!("ntsc_array_get", i64_ty, i64_ty, i64_ty);
 
@@ -665,4 +674,29 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>) {
     declare!("ntsc_time_now", f64_ty);
     declare!("ntsc_time_sleep", void_ty, f64_ty);
     declare!("ntsc_time_format", i64_ty, f64_ty, i64_ty);
+}
+
+/// Name of the runtime's pending-exception slot, when it is addressable.
+pub(crate) const EXCEPTION_SLOT: &str = "ntsc_pending_exception_slot";
+
+/// Declare the runtime's pending-exception slot as an addressable
+/// thread-local, so the poll after a call is a `%fs:`-relative compare
+/// instead of a call into the runtime.
+///
+/// The runtime defines this symbol with a link-time-known name only on
+/// x86-64 Linux; everywhere else the slot lives behind
+/// `ntsc_exception_pending`. The triple must match the host exactly: the
+/// runtime archive is built for the host, so a cross-compiled object would
+/// reference a symbol that is not there.
+fn declare_exception_slot(module: &Module<'_>, target_triple: &str) {
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        return;
+    }
+    if target_triple != crate::host_triple() {
+        return;
+    }
+    let slot = module.add_global(module.get_context().i64_type(), None, EXCEPTION_SLOT);
+    slot.set_linkage(inkwell::module::Linkage::External);
+    slot.set_thread_local(true);
+    slot.set_thread_local_mode(Some(inkwell::ThreadLocalMode::LocalExecTLSModel));
 }

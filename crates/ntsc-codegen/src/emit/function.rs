@@ -167,6 +167,7 @@ pub(crate) fn emit_function<'ctx>(
         context,
     );
     fn_ctx.stack_allocated = analyze_stack_allocatable(body, module);
+    fn_ctx.scalar_array_candidates = super::scalar_array::nonescaping_scalar_arrays(body, params);
     fn_ctx.class_drops = analyze_class_drops(body, module, params);
     fn_ctx.exception_class_drops = analyze_return_escape_class_drops(body, module, params);
 

@@ -171,6 +171,10 @@ Release builds:
 - Apply LLVM's aggressive optimization pipeline.
 - Skip leak detection.
 - Remove runtime debugging helpers.
+- Wrap on integer overflow instead of throwing. Debug builds trap, so a
+  runaway `+`/`-`/`*` surfaces where it happens while the release build pays
+  nothing for the guard. Division and shift checks run in both modes; see
+  [Numeric faults](../reference/language.md#numeric-faults).
 
 See [Internals](../reference/internals.md) for details of what each mode changes.
 For coding patterns that keep debug builds leak-free, read the [Leak-free

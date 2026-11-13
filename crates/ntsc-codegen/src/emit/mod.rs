@@ -8,7 +8,7 @@
 //! constructs), `helper` (shared conversions), `array` (RC-backed ops),
 //! `drop` (owned-value reclaim), `c_main` (the generated main), and `tests`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 type RustOriginKey = (String, String);
@@ -759,7 +759,9 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
+};
 
 use ntsc_ast::expr::{Expr, LiteralValue};
 use ntsc_ast::stmt::{Program, Stmt};
@@ -800,6 +802,36 @@ impl<'ctx> TypedValue<'ctx> {
 
 // ── Per-function state ──────────────────────────────────────────────────
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntArithMode {
+    /// Throw a catchable exception on overflow (debug builds).
+    Checked,
+    /// Plain wrapping arithmetic: release builds, and operations a preheader
+    /// guard proved safe.
+    Unchecked,
+    /// Wrap and record overflow, without throwing.
+    Track,
+}
+
+/// How a build treats an integer result that does not fit in 64 bits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverflowPolicy {
+    /// Raise a catchable exception. Debug builds do this, so a mistake
+    /// surfaces where it happens instead of silently corrupting a value.
+    Trap,
+    /// Wrap two's-complement, like C, Go and optimized Rust. Release builds do
+    /// this: the guard costs a branch on every arithmetic operation, which
+    /// dominates tight numeric loops.
+    Wrap,
+}
+
+thread_local! {
+    /// The overflow policy for the module being emitted. Set once by
+    /// `emit_module` from the build mode; a test that emits a single function
+    /// keeps the default, which matches a debug build.
+    static OVERFLOW_POLICY: Cell<OverflowPolicy> = const { Cell::new(OverflowPolicy::Trap) };
+}
+
 pub(crate) struct FunctionContext<'ctx, 'm> {
     function: FunctionValue<'ctx>,
     builder: &'m Builder<'ctx>,
@@ -807,6 +839,8 @@ pub(crate) struct FunctionContext<'ctx, 'm> {
     entry_bb: inkwell::basic_block::BasicBlock<'ctx>,
     module: &'m Module<'ctx>,
     variables: HashMap<String, (PointerValue<'ctx>, Ty)>,
+    scalar_array_candidates: HashMap<String, Option<u64>>,
+    scalar_array_buffers: HashMap<String, scalar_array::ScalarArrayBuffer<'ctx>>,
     /// Class elements whose ownership was transferred into tuple locals.
     /// Tuples are LLVM aggregates, so this metadata is needed when a tuple
     /// is stored and destructured later.
@@ -849,6 +883,19 @@ pub(crate) struct FunctionContext<'ctx, 'm> {
 
     /// Whether calls emit pending-exception checks.
     exception_checks: bool,
+
+    /// How integer `+`/`-`/`*` lower. `Track` wraps and records whether any
+    /// operation overflowed, which the loop-versioning guard turns into a
+    /// fallback to the checked loop instead of an exception.
+    int_arith_mode: IntArithMode,
+
+    /// Whether any `Track`-mode integer operation overflowed so far.
+    tracked_overflow: Option<inkwell::values::IntValue<'ctx>>,
+
+    /// Set while emitting the unchecked body of a versioned loop: the
+    /// induction variable and the accesses whose ranges the preheader
+    /// proved.
+    trusted_loop: Option<scalar_array::TrustedLoop>,
 
     /// Bitcast future struct pointer and its struct type when emitting an
     /// async poll function (async locals live in its fields, so they survive
@@ -940,6 +987,8 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
             entry_bb,
             module,
             variables: HashMap::new(),
+            scalar_array_candidates: HashMap::new(),
+            scalar_array_buffers: HashMap::new(),
             tuple_class_elements: HashMap::new(),
             return_type,
             context,
@@ -953,6 +1002,12 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
             exception_defer_depths: Vec::new(),
             exception_return_bb: None,
             exception_checks: true,
+            int_arith_mode: match OVERFLOW_POLICY.with(Cell::get) {
+                OverflowPolicy::Trap => IntArithMode::Checked,
+                OverflowPolicy::Wrap => IntArithMode::Unchecked,
+            },
+            tracked_overflow: None,
+            trusted_loop: None,
             future_base: None,
             async_fields: None,
             async_layout: None,
@@ -989,27 +1044,54 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
     /// throw: on pending, branch to the current exception handler; otherwise
     /// continue in a fresh block so the flag is not re-read by later
     /// instructions. A no-op inside async state machines.
+    ///
+    /// The flag is a thread-local slot the runtime exposes by name, so the
+    /// common case is a single load-and-compare. The load must stay volatile:
+    /// the runtime sets the slot from its own code, which the optimizer cannot
+    /// see, so a plain load would be hoisted above the call that may have
+    /// thrown.
     fn emit_pending_exception_check(&mut self) -> Result<(), crate::CodegenError> {
         if !self.exception_checks {
             return Ok(());
         }
         let handler = self.current_exception_handler();
-        let pending_fn = self
-            .module
-            .get_function("ntsc_exception_pending")
-            .ok_or_else(|| {
-                crate::CodegenError::LLVMError("ntsc_exception_pending not declared".into())
-            })?;
-        let pending = self
-            .builder
-            .build_call(pending_fn, &[], "exc_pending")?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
+        let pending = match self.module.get_global(EXCEPTION_SLOT) {
+            Some(slot) => {
+                let load = self.builder.build_load(
+                    self.context.i64_type(),
+                    slot.as_pointer_value(),
+                    "exc_pending",
+                )?;
+                let instruction = load.as_instruction_value().ok_or_else(|| {
+                    crate::CodegenError::LLVMError(
+                        "exception slot load is not an instruction".into(),
+                    )
+                })?;
+                instruction.set_volatile(true).map_err(|_| {
+                    crate::CodegenError::LLVMError(
+                        "exception slot load cannot be marked volatile".into(),
+                    )
+                })?;
+                load.into_int_value()
+            }
+            None => {
+                let pending_fn = self
+                    .module
+                    .get_function("ntsc_exception_pending")
+                    .ok_or_else(|| {
+                        crate::CodegenError::LLVMError("ntsc_exception_pending not declared".into())
+                    })?;
+                self.builder
+                    .build_call(pending_fn, &[], "exc_pending")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_int_value()
+            }
+        };
         let active = self.builder.build_int_compare(
             inkwell::IntPredicate::NE,
             pending,
-            self.context.i8_type().const_zero(),
+            pending.get_type().const_zero(),
             "exc_active",
         )?;
         let continue_bb = self
@@ -1019,6 +1101,20 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
             .build_conditional_branch(active, handler, continue_bb)?;
         self.builder.position_at_end(continue_bb);
         Ok(())
+    }
+
+    /// Poll for a pending exception after calling the free function `callee`,
+    /// skipping the poll when the callee cannot throw. Callers must only use
+    /// this once the call has resolved to the free function itself, never to a
+    /// function-pointer variable that shares its name.
+    fn emit_pending_exception_check_after(
+        &mut self,
+        callee: &str,
+    ) -> Result<(), crate::CodegenError> {
+        if is_infallible_function(callee) {
+            return Ok(());
+        }
+        self.emit_pending_exception_check()
     }
 
     fn push_defer_scope(&mut self) {
@@ -1410,6 +1506,7 @@ pub(crate) mod member;
 pub(crate) mod module;
 pub(crate) mod result_cell;
 pub(crate) mod runtime;
+pub(crate) mod scalar_array;
 pub(crate) mod stmt;
 #[cfg(test)]
 pub(crate) mod tests;
