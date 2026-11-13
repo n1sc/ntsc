@@ -1,0 +1,334 @@
+use arrays
+use sys
+use fmt
+use math
+
+fun as_float(int value) -> float {
+    var float widened = value;
+    return widened;
+}
+
+fun search(int mask, int columns, int left, int right) -> int {
+    if (columns == mask) {
+        return 1;
+    }
+    var int available = mask & ~(columns | left | right);
+    var int solutions = 0;
+    while (available != 0) {
+        var int bit = available & -available;
+        available = available - bit;
+        solutions = solutions + search(mask, columns | bit, ((left | bit) << 1) & mask, (right | bit) >> 1);
+    }
+    return solutions;
+}
+
+fun queens(int n) -> float {
+    return as_float(search((1 << n) - 1, 0, 0, 0));
+}
+
+fun mandelbrot(int n) -> float {
+    var int total = 0;
+    var int y = 0;
+    while (y < n) {
+        var float cy = as_float(y) * 2.4 / as_float(n) - 1.2;
+        var int x = 0;
+        while (x < n) {
+            var float cx = as_float(x) * 3.2 / as_float(n) - 2.2;
+            var float real = 0.0;
+            var float imag = 0.0;
+            var int iteration = 0;
+            while (iteration < 256 && real * real + imag * imag <= 4.0) {
+                var float next_real = real * real - imag * imag + cx;
+                imag = 2.0 * real * imag + cy;
+                real = next_real;
+                iteration = iteration + 1;
+            }
+            total = total + iteration;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return as_float(total);
+}
+
+fun matmul(int n) -> float {
+    var array[float] a = arrays.fill(0.0, (n * n));
+    var array[float] b = arrays.fill(0.0, (n * n));
+    var array[float] c = arrays.fill(0.0, (n * n));
+    var int i = 0;
+    while (i < n * n) {
+        a[i] = as_float((i * 17 + 3) % 97) / 97.0;
+        b[i] = as_float((i * 7 + 5) % 89) / 89.0;
+        i = i + 1;
+    }
+    var int row_block = 0;
+    while (row_block < n) {
+        var int k_block = 0;
+        while (k_block < n) {
+            var int col_block = 0;
+            while (col_block < n) {
+                var int row_end = row_block + 32;
+                if (row_end > n) { row_end = n; }
+                var int k_end = k_block + 32;
+                if (k_end > n) { k_end = n; }
+                var int col_end = col_block + 32;
+                if (col_end > n) { col_end = n; }
+                var int row = row_block;
+                while (row < row_end) {
+                    var int k = k_block;
+                    while (k < k_end) {
+                        var float value = a[row * n + k];
+                        var int col = col_block;
+                        while (col < col_end) {
+                            c[row * n + col] = c[row * n + col] + value * b[k * n + col];
+                            col = col + 1;
+                        }
+                        k = k + 1;
+                    }
+                    row = row + 1;
+                }
+                col_block = col_block + 32;
+            }
+            k_block = k_block + 32;
+        }
+        row_block = row_block + 32;
+    }
+    var float total = 0.0;
+    i = 0;
+    while (i < n * n) {
+        total = total + c[i];
+        i = i + 1;
+    }
+    return total;
+}
+
+fun radix(int n) -> float {
+    var array[int] a = arrays.fill(0, n);
+    var array[int] b = arrays.fill(0, n);
+    var array[int] counts = arrays.fill(0, 256);
+    var int state = 123456789;
+    var int i = 0;
+    while (i < n) {
+        state = (state * 1664525 + 1013904223) & 2147483647;
+        a[i] = state;
+        i = i + 1;
+    }
+    var int shift = 0;
+    while (shift < 32) {
+        i = 0;
+        while (i < 256) {
+            counts[i] = 0;
+            i = i + 1;
+        }
+        i = 0;
+        while (i < n) {
+            var int bucket = (a[i] >> shift) & 255;
+            counts[bucket] = counts[bucket] + 1;
+            i = i + 1;
+        }
+        var int offset = 0;
+        i = 0;
+        while (i < 256) {
+            var int count = counts[i];
+            counts[i] = offset;
+            offset = offset + count;
+            i = i + 1;
+        }
+        i = 0;
+        while (i < n) {
+            var int value = a[i];
+            var int bucket = (value >> shift) & 255;
+            var int position = counts[bucket];
+            b[position] = value;
+            counts[bucket] = position + 1;
+            i = i + 1;
+        }
+        i = 0;
+        while (i < n) {
+            a[i] = b[i];
+            i = i + 1;
+        }
+        shift = shift + 8;
+    }
+    var int checksum = 0;
+    i = 0;
+    while (i < n) {
+        if (i > 0 && a[i - 1] > a[i]) { return -1.0; }
+        checksum = (checksum + a[i] * (i + 1)) % 1000000007;
+        i = i + 1;
+    }
+    return as_float(checksum);
+}
+
+fun dijkstra(int n) -> float {
+    var array[int] destinations = arrays.fill(0, (n * 8));
+    var array[int] weights = arrays.fill(0, (n * 8));
+    var array[int] distances = arrays.fill(0, n);
+    var array[int] heap_nodes = arrays.fill(0, (n * 8 + 1));
+    var array[int] heap_costs = arrays.fill(0, (n * 8 + 1));
+    var int state = 123456789;
+    var int vertex = 0;
+    while (vertex < n) {
+        distances[vertex] = 1000000000000;
+        var int edge = 0;
+        while (edge < 8) {
+            state = (state * 1664525 + 1013904223) & 2147483647;
+            var int destination = state % n;
+            if (edge == 0) { destination = (vertex + 1) % n; }
+            destinations[vertex * 8 + edge] = destination;
+            weights[vertex * 8 + edge] = 1 + ((state >> 8) & 31);
+            edge = edge + 1;
+        }
+        vertex = vertex + 1;
+    }
+    distances[0] = 0;
+    var int heap_size = 1;
+    heap_nodes[0] = 0;
+    heap_costs[0] = 0;
+    while (heap_size > 0) {
+        var int node = heap_nodes[0];
+        var int cost = heap_costs[0];
+        heap_size = heap_size - 1;
+        if (heap_size > 0) {
+            var int last_node = heap_nodes[heap_size];
+            var int last_cost = heap_costs[heap_size];
+            var int position = 0;
+            while (position * 2 + 1 < heap_size) {
+                var int child = position * 2 + 1;
+                if (child + 1 < heap_size && heap_costs[child + 1] < heap_costs[child]) {
+                    child = child + 1;
+                }
+                if (last_cost <= heap_costs[child]) { break; }
+                heap_nodes[position] = heap_nodes[child];
+                heap_costs[position] = heap_costs[child];
+                position = child;
+            }
+            heap_nodes[position] = last_node;
+            heap_costs[position] = last_cost;
+        }
+        if (cost == distances[node]) {
+            var int edge = 0;
+            while (edge < 8) {
+                var int destination = destinations[node * 8 + edge];
+                var int candidate = cost + weights[node * 8 + edge];
+                if (candidate < distances[destination]) {
+                    distances[destination] = candidate;
+                    var int position = heap_size;
+                    heap_size = heap_size + 1;
+                    while (position > 0) {
+                        var int parent = (position - 1) / 2;
+                        if (heap_costs[parent] <= candidate) { break; }
+                        heap_nodes[position] = heap_nodes[parent];
+                        heap_costs[position] = heap_costs[parent];
+                        position = parent;
+                    }
+                    heap_nodes[position] = destination;
+                    heap_costs[position] = candidate;
+                }
+                edge = edge + 1;
+            }
+        }
+    }
+    var int checksum = 0;
+    vertex = 0;
+    while (vertex < n) {
+        checksum = (checksum + distances[vertex] * (vertex + 1)) % 1000000007;
+        vertex = vertex + 1;
+    }
+    return as_float(checksum);
+}
+
+fun fft(int n) -> float {
+    var array[float] real = arrays.fill(0.0, n);
+    var array[float] imag = arrays.fill(0.0, n);
+    var int i = 0;
+    while (i < n) {
+        real[i] = as_float((i * 17 + 3) % 97) / 97.0 - 0.5;
+        i = i + 1;
+    }
+    var int reversed = 0;
+    i = 1;
+    while (i < n) {
+        var int bit = n >> 1;
+        while ((reversed & bit) != 0) {
+            reversed = reversed ^ bit;
+            bit = bit >> 1;
+        }
+        reversed = reversed ^ bit;
+        if (i < reversed) {
+            var float value = real[i];
+            real[i] = real[reversed];
+            real[reversed] = value;
+        }
+        i = i + 1;
+    }
+    var int width = 2;
+    while (width <= n) {
+        var float angle = -6.283185307179586 / as_float(width);
+        var float root_real = math.cos(angle);
+        var float root_imag = math.sin(angle);
+        var int base = 0;
+        while (base < n) {
+            var float twiddle_real = 1.0;
+            var float twiddle_imag = 0.0;
+            var int k = 0;
+            while (k < width / 2) {
+                var int first = base + k;
+                var int second = first + width / 2;
+                var float product_real = twiddle_real * real[second] - twiddle_imag * imag[second];
+                var float product_imag = twiddle_real * imag[second] + twiddle_imag * real[second];
+                var float first_real = real[first];
+                var float first_imag = imag[first];
+                real[first] = first_real + product_real;
+                imag[first] = first_imag + product_imag;
+                real[second] = first_real - product_real;
+                imag[second] = first_imag - product_imag;
+                var float next_real = twiddle_real * root_real - twiddle_imag * root_imag;
+                twiddle_imag = twiddle_real * root_imag + twiddle_imag * root_real;
+                twiddle_real = next_real;
+                k = k + 1;
+            }
+            base = base + width;
+        }
+        width = width * 2;
+    }
+    var float energy = 0.0;
+    i = 0;
+    while (i < n) {
+        energy = energy + real[i] * real[i] + imag[i] * imag[i];
+        i = i + 1;
+    }
+    return energy;
+}
+
+fun main() {
+    var array[string] args = sys.args();
+    if (arrays.length(args) != 3) {
+        say("usage: kernels WORKLOAD SIZE");
+        sys.exit(2);
+    }
+    view var workload = args[1];
+    var int n = fmt.to_int(args[2]);
+    if (n < 1 || n > 4000000) {
+        say("invalid size");
+        sys.exit(2);
+    }
+    var float output_value = 0.0;
+    if (workload == "queens" && n <= 20) {
+        output_value = queens(n);
+    } else if (workload == "mandelbrot") {
+        output_value = mandelbrot(n);
+    } else if (workload == "matmul" && n <= 1024) {
+        output_value = matmul(n);
+    } else if (workload == "radix") {
+        output_value = radix(n);
+    } else if (workload == "dijkstra") {
+        output_value = dijkstra(n);
+    } else if (workload == "fft" && (n & (n - 1)) == 0) {
+        output_value = fft(n);
+    } else {
+        say("unknown workload or invalid size");
+        sys.exit(2);
+    }
+    say(fmt.f64_to_str(output_value));
+}

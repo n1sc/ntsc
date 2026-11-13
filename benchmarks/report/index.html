@@ -1,0 +1,768 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Neutron — Under Pressure / Native Benchmark Lab</title>
+  <style>
+    :root{--bg:#0c0f0d;--panel:#141916;--line:#2a332d;--text:#eef3ed;--muted:#94a497;--accent:#b6f66b}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    a{color:inherit;text-decoration:none}button,select{font:inherit}button,select,.download{border:1px solid var(--line);background:#1b231d;color:var(--text);padding:9px 15px;border-radius:8px;cursor:pointer}
+    button:hover,.download:hover{border-color:var(--accent)}button[aria-pressed=true]{background:var(--accent);color:#14200d;border-color:var(--accent)}
+    button:focus-visible,select:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+    .wrap{max-width:1240px;margin:auto;padding:0 32px}.nav{display:flex;justify-content:space-between;align-items:center;padding-top:25px;padding-bottom:25px;border-bottom:1px solid var(--line)}
+    .brand{display:flex;align-items:center;gap:12px;font-weight:750;letter-spacing:.16em;font-size:13px}.mark{height:26px;width:26px;border:2px solid var(--accent);border-radius:50%;position:relative}.mark:after{content:"";position:absolute;inset:7px;background:var(--accent);border-radius:50%}
+    .nav-links{display:flex;gap:26px;color:var(--muted);font-size:13px}.status{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:40px;padding:6px 12px;font:11px ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.08em;text-transform:uppercase}
+    .dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}.eyebrow{color:var(--accent);text-transform:uppercase;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.17em}
+    .hero{padding:76px 0 52px;display:grid;grid-template-columns:1.5fr 1fr;gap:70px;align-items:end}.hero h1{font-size:clamp(45px,5.3vw,76px);line-height:1.05;letter-spacing:-.055em;font-weight:600;margin:18px 0 25px}.hero h1 span{color:var(--accent)}.hero p{max-width:600px;color:var(--muted);font-size:17px}.hero-note{padding-left:24px;border-left:1px solid var(--line);color:var(--muted)}.hero-note strong{color:var(--text);font-size:18px;font-weight:500;display:block;margin-bottom:10px}.hero-note .small{font-size:12px;margin-top:20px}
+    .stats{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:64px;background:var(--panel)}.stat{padding:25px 27px;border-right:1px solid var(--line)}.stat:last-child{border:0}.stat b{display:block;font-size:31px;font-weight:550;letter-spacing:-.035em;margin-bottom:2px}.stat span{color:var(--muted);font-size:12px}.stat .accent{color:var(--accent)}
+    .section-head{display:flex;align-items:end;justify-content:space-between;gap:25px;margin-bottom:25px}.section-head h2{font-size:27px;font-weight:550;letter-spacing:-.03em;margin:4px 0}.section-head p{color:var(--muted);font-size:13px;margin:0}.controls{display:flex;gap:7px;align-items:center;flex-wrap:wrap;font-size:12px}.controls span{color:var(--muted);margin-right:7px}.legend{display:flex;gap:26px;flex-wrap:wrap;font-size:13px;margin:24px 0 29px}.legend i{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:8px}
+    .overview{padding:26px 30px;border:1px solid var(--line);border-radius:12px;background:var(--panel);margin-bottom:26px}.overview-top{display:flex;justify-content:space-between;gap:25px}.overview h3{font-weight:500;font-size:18px;margin:0}.overview p{font-size:12px;color:var(--muted);margin:6px 0}.overview .footnote{margin-top:14px;font-size:11px}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}.card{padding:25px 25px 15px;background:var(--panel);border:1px solid var(--line);border-radius:12px;min-width:0}.card-top{display:flex;justify-content:space-between;gap:12px;align-items:start}.card h3{font-size:20px;font-weight:550;letter-spacing:-.02em;margin:9px 0}.index{font:12px ui-monospace,monospace;color:var(--muted)}.badge{font-size:10px;white-space:nowrap;color:var(--accent);border:1px solid #3b4d31;border-radius:30px;padding:4px 8px}.card .description{color:var(--muted);font-size:12px;min-height:40px;margin:0 0 15px}.size{font:11px ui-monospace,monospace;color:#c2cdc1}.chart{width:100%;display:block;overflow:visible}.chart text{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.card-foot{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:13px;margin-top:9px}.card-foot strong{color:var(--text);font-weight:500}
+    details{margin:12px 0 0}summary{font-size:11px;color:var(--muted);cursor:pointer}.details-body{overflow:auto;padding-top:10px}table{border-collapse:collapse;width:100%;font-size:11px}th,td{padding:7px 5px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}th:first-child,td:first-child{text-align:left}th{color:var(--muted);font-weight:400}.checksum{font:10px ui-monospace,monospace;color:var(--muted);overflow-wrap:anywhere;margin-top:12px}
+    .method{margin:65px 0 45px;padding-top:38px;border-top:1px solid var(--line);display:grid;grid-template-columns:.7fr 1.3fr;gap:60px}.method h2{font-size:29px;font-weight:500;letter-spacing:-.03em;margin:8px 0 15px}.method p{color:var(--muted);font-size:13px}.method ol{counter-reset:method;list-style:none;padding:0;margin:0}.method li{counter-increment:method;position:relative;padding:0 0 18px 32px;font-size:12px;color:#becbbd}.method li:before{content:counter(method,decimal-leading-zero);position:absolute;left:0;color:var(--accent);font:11px ui-monospace,monospace;top:3px}
+    .environment{border:1px solid var(--line);border-radius:12px;padding:25px;background:var(--panel);font-size:12px}.environment-grid{display:grid;grid-template-columns:1fr 1fr;gap:35px}.environment h3{font-size:15px;font-weight:500;margin:0 0 15px}.environment dt{color:var(--muted);margin-top:12px;font-size:10px;text-transform:uppercase;letter-spacing:.07em}.environment dd{margin:3px 0;overflow-wrap:anywhere}.environment pre{white-space:pre-wrap;overflow-wrap:anywhere;font:10px/1.6 ui-monospace,monospace;color:var(--muted)}.footer{display:flex;justify-content:space-between;gap:20px;color:var(--muted);font-size:11px;margin-top:35px;padding:25px 0 35px;border-top:1px solid var(--line)}
+    .notice{padding:13px 18px;border:1px solid #715a2a;color:#efd29a;border-radius:10px;margin-bottom:25px;font-size:13px}.hidden{display:none}.download{display:inline-block;font-size:12px}.noscript{padding:35px}.chart-label{font-size:10px;fill:#c4cfc3}.axis-label{font-size:8px;fill:#839385}
+    @media(max-width:850px){.wrap{padding:0 20px}.hero{grid-template-columns:1fr;gap:20px;padding:45px 0 35px}.hero-note{padding-left:18px}.stats{grid-template-columns:1fr 1fr;margin-bottom:40px}.stat:nth-child(2){border-right:0}.stat:nth-child(-n+2){border-bottom:1px solid var(--line)}.grid{grid-template-columns:1fr}.method{grid-template-columns:1fr;gap:20px}.section-head{align-items:start;flex-direction:column}.nav-links a{display:none}.environment-grid{grid-template-columns:1fr}.overview{padding:22px}.legend{gap:14px}.stat{padding:19px}.hero h1{font-size:53px}.footer{flex-direction:column;gap:8px}}
+    @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav class="nav" aria-label="Main navigation">
+      <a href="#" class="brand"><span class="mark" aria-hidden="true"></span>NEUTRON <span style="color:var(--muted);font-weight:400">/ LAB</span></a>
+      <div class="nav-links"><a href="#results">Results</a><a href="#methodology">Methodology</a><span class="status"><span class="dot"></span><span id="status">Measured run</span></span></div>
+    </nav>
+    <header class="hero">
+      <div><div class="eyebrow">Native benchmark lab · edition 001</div><h1>Not toy loops.<br><span>Under pressure.</span></h1><p>Six demanding kernels. Five native toolchains. Identical work, independently verified results, and nowhere to hide the slow paths.</p></div>
+      <aside class="hero-note"><strong>A comparison, not a victory lap.</strong>Exact search. Dense numerics. Large buffers. Real graph traversal. This is where a compiler and its runtime earn their claims.<div class="small" id="measured-date"></div></aside>
+    </header>
+    <div id="notice" class="notice hidden" role="status"></div>
+    <section class="stats" aria-label="Run summary">
+      <div class="stat"><b class="accent" id="verified">—</b><span>workloads oracle-verified</span></div>
+      <div class="stat"><b id="comparisons">—</b><span>workload / toolchain comparisons</span></div>
+      <div class="stat"><b id="sample-count">—</b><span>measured samples per comparison</span></div>
+      <div class="stat"><b id="nearest">—</b><span id="nearest-label">Neutron vs strongest peer overall</span></div>
+    </section>
+    <main id="results">
+      <div class="section-head"><div><div class="eyebrow">01 / The measurements</div><h2>Same work. Different machinery.</h2><p>Lower is better. Whiskers show the full observed min–max range, not confidence intervals.</p></div><div class="controls"><span>View</span><select id="metric" aria-label="Chart metric"><option value="time">Median time · ms</option><option value="relative">Relative to fastest · ×</option></select><button id="linear" aria-pressed="true">Linear</button><button id="log" aria-pressed="false">Log axis</button></div></div>
+      <div id="legend" class="legend" aria-label="Language colors"></div>
+      <section class="overview" aria-label="Aggregate comparison"><div class="overview-top"><div><h3>Whole-suite balance</h3><p>Geometric mean of each toolchain’s slowdown relative to the fastest median on each workload.</p></div><span class="badge">ALL WORKLOADS INCLUDED</span></div><div id="aggregate"></div><p class="footnote">This aggregate gives every workload equal weight. It is not total runtime, an application score, or proof of statistical significance.</p></section>
+      <div id="cards" class="grid"></div>
+    </main>
+    <section class="method" id="methodology"><div><div class="eyebrow">02 / Keep it honest</div><h2>The result is only as good as the experiment.</h2><p>Wins and losses stay in the report. No hand-tuned assembly, compiler-exclusive algorithm shortcuts, or external numerical libraries.</p><a id="download" class="download" download="neutron-native-benchmarks.json">↓ Download raw measurements</a></div><ol id="method-list"></ol></section>
+    <section class="environment" aria-label="Environment and toolchain"><div class="environment-grid"><div><h3>The machine</h3><dl id="machine"></dl></div><div><h3>The toolchains</h3><dl id="toolchains"></dl></div></div><details><summary>Build commands, source hashes & reproducibility</summary><div class="details-body"><pre id="provenance"></pre></div></details></section>
+    <footer class="footer"><span>NEUTRON / NATIVE BENCHMARK LAB</span><span>Measured evidence. No marketing math. Self-contained, offline-ready report.</span></footer>
+    <noscript><p class="noscript">Enable JavaScript to render the embedded measurements, or open results.json for raw data. No network requests are required.</p></noscript>
+  </div>
+  <script id="benchmark-data" type="application/json">{
+  "schema_version": 1,
+  "status": "complete",
+  "total_workloads": 6,
+  "measured_at": "2026-11-05T18:19:46.325160+00:00",
+  "git_revision": "a6712419bbb16fa16d2d40c2511d64bb06df762c",
+  "git_worktree_dirty": true,
+  "profile": "hard",
+  "samples": 7,
+  "warmup": 2,
+  "random_seed": 20261105,
+  "system": {
+    "cpu": "Intel(R) Core(TM) i3-8130U CPU @ 2.20GHz",
+    "logical_cpus": 4,
+    "pinned_cpu": 0,
+    "os": "Linux-7.2.14-arch1-1-x86_64-with-glibc2.44"
+  },
+  "versions": {
+    "Neutron": "ntsc 0.1.0 \u2014 Neutron Type-Safe Compiler\n\nLLVM   23.1.4\nHost   x86_64-unknown-linux-gnu\nBuild ID   dmngaiw1l34yd\nBuild date 2026-11-05T17:24:37Z\nBuild  debug\nCommit a671241",
+    "C \u00b7 GCC": "gcc (GCC) 16.2.1 20260810",
+    "C \u00b7 Clang": "clang version 23.1.4",
+    "Go": "go version go1.27.3-X:nodwarf5 linux/amd64",
+    "Rust": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+  },
+  "source_sha256": {
+    "kernels.c": "1ae302ef9abd5bc6effc4da584fbc2d077b13daacc2b7839e531721135aacc8f",
+    "kernels.go": "68a7efb6dcf48630ead3fcc40608585cbe20d18f426eea2652a9554a0db10756",
+    "kernels.nt": "82d35660ea86d605e8adc0db0d8083e9c850e14f3735c87f616863992141c97e",
+    "kernels.rs": "5a1579d96bcf2c902ec3b87af935546f46bdf4a11c613220130fad4b4256a59d"
+  },
+  "builds": {
+    "Neutron": {
+      "command": [
+        "/home/yasakei/projects/neutron-rs/target/debug/ntsc",
+        "build",
+        "--release"
+      ],
+      "build_seconds": 1.510879991998081,
+      "binary_bytes": 1695624
+    },
+    "C \u00b7 GCC": {
+      "command": [
+        "gcc",
+        "-O3",
+        "-std=c11",
+        "-ffp-contract=off",
+        "/home/yasakei/projects/neutron-rs/benchmarks/hard/kernels.c",
+        "-lm",
+        "-o",
+        "/home/yasakei/projects/neutron-rs/target/bench-hard/gcc"
+      ],
+      "build_seconds": 1.2431924870033981,
+      "binary_bytes": 20656
+    },
+    "C \u00b7 Clang": {
+      "command": [
+        "clang",
+        "-O3",
+        "-std=c11",
+        "-ffp-contract=off",
+        "/home/yasakei/projects/neutron-rs/benchmarks/hard/kernels.c",
+        "-lm",
+        "-o",
+        "/home/yasakei/projects/neutron-rs/target/bench-hard/clang"
+      ],
+      "build_seconds": 1.0273963419967913,
+      "binary_bytes": 20720
+    },
+    "Go": {
+      "command": [
+        "go",
+        "build",
+        "-trimpath",
+        "-o",
+        "/home/yasakei/projects/neutron-rs/target/bench-hard/go",
+        "/home/yasakei/projects/neutron-rs/benchmarks/hard/kernels.go"
+      ],
+      "build_seconds": 0.8179604600009043,
+      "binary_bytes": 2472700
+    },
+    "Rust": {
+      "command": [
+        "rustc",
+        "--edition=2024",
+        "-C",
+        "opt-level=3",
+        "-C",
+        "codegen-units=1",
+        "-C",
+        "panic=abort",
+        "/home/yasakei/projects/neutron-rs/benchmarks/hard/kernels.rs",
+        "-o",
+        "/home/yasakei/projects/neutron-rs/target/bench-hard/rust"
+      ],
+      "build_seconds": 0.8566825210000388,
+      "binary_bytes": 4583616
+    }
+  },
+  "languages": [
+    "Neutron",
+    "C \u00b7 GCC",
+    "C \u00b7 Clang",
+    "Go",
+    "Rust"
+  ],
+  "workloads": [
+    {
+      "id": "queens",
+      "title": "Exact N-Queens",
+      "category": "Combinatorial search",
+      "description": "Exhaustive bitboard backtracking; every solution, no symmetry shortcuts.",
+      "size": 15,
+      "checksum": 2279184,
+      "oracle_verified": true,
+      "results": {
+        "Neutron": {
+          "seconds": [
+            3.68971131,
+            3.604077168,
+            3.739578225,
+            3.94122793,
+            3.61910195,
+            3.839750778,
+            3.96850675
+          ],
+          "median_seconds": 3.739578225,
+          "min_seconds": 3.604077168,
+          "max_seconds": 3.96850675,
+          "stdev_seconds": 0.14789695526071323
+        },
+        "C \u00b7 GCC": {
+          "seconds": [
+            3.476598091,
+            3.152215437,
+            3.050122988,
+            3.134946656,
+            3.050916397,
+            3.14825173,
+            3.225264803
+          ],
+          "median_seconds": 3.14825173,
+          "min_seconds": 3.050122988,
+          "max_seconds": 3.476598091,
+          "stdev_seconds": 0.14565513663846524
+        },
+        "C \u00b7 Clang": {
+          "seconds": [
+            3.711142562,
+            3.936067211,
+            3.831159672,
+            3.802805068,
+            3.636408136,
+            3.929383402,
+            3.77156199
+          ],
+          "median_seconds": 3.802805068,
+          "min_seconds": 3.636408136,
+          "max_seconds": 3.936067211,
+          "stdev_seconds": 0.10927851700245679
+        },
+        "Go": {
+          "seconds": [
+            3.980932573,
+            3.936834784,
+            3.712017217,
+            3.882160912,
+            3.733489836,
+            3.774364546,
+            3.715859576
+          ],
+          "median_seconds": 3.774364546,
+          "min_seconds": 3.712017217,
+          "max_seconds": 3.980932573,
+          "stdev_seconds": 0.11216287247297448
+        },
+        "Rust": {
+          "seconds": [
+            3.576225101,
+            3.535769013,
+            3.801544995,
+            4.103183104,
+            3.713018527,
+            3.752412878,
+            4.489851581
+          ],
+          "median_seconds": 3.752412878,
+          "min_seconds": 3.535769013,
+          "max_seconds": 4.489851581,
+          "stdev_seconds": 0.3360980562939281
+        }
+      }
+    },
+    {
+      "id": "mandelbrot",
+      "title": "Mandelbrot renderer",
+      "category": "Branch-heavy floating point",
+      "description": "A complete square image, up to 256 escape iterations per pixel.",
+      "size": 1024,
+      "checksum": 57998279,
+      "oracle_verified": true,
+      "results": {
+        "Neutron": {
+          "seconds": [
+            0.494993904,
+            0.497087923,
+            0.508604764,
+            0.496396587,
+            0.497197193,
+            0.493100148,
+            0.490615335
+          ],
+          "median_seconds": 0.496396587,
+          "min_seconds": 0.490615335,
+          "max_seconds": 0.508604764,
+          "stdev_seconds": 0.00569991871364387
+        },
+        "C \u00b7 GCC": {
+          "seconds": [
+            0.510162113,
+            0.634911889,
+            0.508992223,
+            0.508905336,
+            0.503671172,
+            0.500096804,
+            0.505994108
+          ],
+          "median_seconds": 0.508905336,
+          "min_seconds": 0.500096804,
+          "max_seconds": 0.634911889,
+          "stdev_seconds": 0.048736795830742356
+        },
+        "C \u00b7 Clang": {
+          "seconds": [
+            0.490570194,
+            0.487664198,
+            0.516878743,
+            0.497376405,
+            0.490484864,
+            0.497441567,
+            0.495105119
+          ],
+          "median_seconds": 0.495105119,
+          "min_seconds": 0.487664198,
+          "max_seconds": 0.516878743,
+          "stdev_seconds": 0.009732328319762472
+        },
+        "Go": {
+          "seconds": [
+            0.525498537,
+            0.52595878,
+            0.534572946,
+            0.530339223,
+            0.526722723,
+            0.527626982,
+            0.523909755
+          ],
+          "median_seconds": 0.526722723,
+          "min_seconds": 0.523909755,
+          "max_seconds": 0.534572946,
+          "stdev_seconds": 0.00359007013438102
+        },
+        "Rust": {
+          "seconds": [
+            0.493002606,
+            0.490498674,
+            0.498327459,
+            0.50332883,
+            0.499174848,
+            0.493406326,
+            0.494136242
+          ],
+          "median_seconds": 0.494136242,
+          "min_seconds": 0.490498674,
+          "max_seconds": 0.50332883,
+          "stdev_seconds": 0.00444702033127112
+        }
+      }
+    },
+    {
+      "id": "matmul",
+      "title": "Blocked matrix product",
+      "category": "Dense numerical computing",
+      "description": "Row-major f64 A\u00d7B, 32\u00d732 tiles; actual buffers, no BLAS or formula shortcut.",
+      "size": 192,
+      "checksum": 1731301.5876288658,
+      "oracle_verified": true,
+      "results": {
+        "Neutron": {
+          "seconds": [
+            0.014475986,
+            0.01480264,
+            0.01447105,
+            0.012910494,
+            0.012116353,
+            0.014285072,
+            0.01316765
+          ],
+          "median_seconds": 0.014285072,
+          "min_seconds": 0.012116353,
+          "max_seconds": 0.01480264,
+          "stdev_seconds": 0.0010127491148724842
+        },
+        "C \u00b7 GCC": {
+          "seconds": [
+            0.008989129,
+            0.014979244,
+            0.013048716,
+            0.010123678,
+            0.010604867,
+            0.010419606,
+            0.010677149
+          ],
+          "median_seconds": 0.010604867,
+          "min_seconds": 0.008989129,
+          "max_seconds": 0.014979244,
+          "stdev_seconds": 0.0020394226571927043
+        },
+        "C \u00b7 Clang": {
+          "seconds": [
+            0.010783943,
+            0.008521635,
+            0.008809452,
+            0.01064852,
+            0.009247195,
+            0.008593043,
+            0.011697598
+          ],
+          "median_seconds": 0.009247195,
+          "min_seconds": 0.008521635,
+          "max_seconds": 0.011697598,
+          "stdev_seconds": 0.0012684643308196765
+        },
+        "Go": {
+          "seconds": [
+            0.025100048,
+            0.023080118,
+            0.026469951,
+            0.027117103,
+            0.023802115,
+            0.026636433,
+            0.025598834
+          ],
+          "median_seconds": 0.025598834,
+          "min_seconds": 0.023080118,
+          "max_seconds": 0.027117103,
+          "stdev_seconds": 0.0015103308976303679
+        },
+        "Rust": {
+          "seconds": [
+            0.01241153,
+            0.014053596,
+            0.018212296,
+            0.015508577,
+            0.013889163,
+            0.014733896,
+            0.012873549
+          ],
+          "median_seconds": 0.014053596,
+          "min_seconds": 0.01241153,
+          "max_seconds": 0.018212296,
+          "stdev_seconds": 0.0019333805043158397
+        }
+      }
+    },
+    {
+      "id": "radix",
+      "title": "Million-key radix sort",
+      "category": "Memory / data processing",
+      "description": "Stable four-pass radix sort of seeded 31-bit keys, including buffers and sortedness verification.",
+      "size": 1000000,
+      "checksum": 65014936,
+      "oracle_verified": true,
+      "results": {
+        "Neutron": {
+          "seconds": [
+            0.088864234,
+            0.086707283,
+            0.073868521,
+            0.074712839,
+            0.07386384,
+            0.067864677,
+            0.071081567
+          ],
+          "median_seconds": 0.073868521,
+          "min_seconds": 0.067864677,
+          "max_seconds": 0.088864234,
+          "stdev_seconds": 0.007934663857125136
+        },
+        "C \u00b7 GCC": {
+          "seconds": [
+            0.092007912,
+            0.081539107,
+            0.091834693,
+            0.08059414,
+            0.090462182,
+            0.10021115,
+            0.082805747
+          ],
+          "median_seconds": 0.090462182,
+          "min_seconds": 0.08059414,
+          "max_seconds": 0.10021115,
+          "stdev_seconds": 0.007162491387768385
+        },
+        "C \u00b7 Clang": {
+          "seconds": [
+            0.068693301,
+            0.060334705,
+            0.074394874,
+            0.060653128,
+            0.060642342,
+            0.061163176,
+            0.060779038
+          ],
+          "median_seconds": 0.060779038,
+          "min_seconds": 0.060334705,
+          "max_seconds": 0.074394874,
+          "stdev_seconds": 0.0055400985976716745
+        },
+        "Go": {
+          "seconds": [
+            0.072255688,
+            0.085154193,
+            0.066657349,
+            0.08680111,
+            0.070263444,
+            0.06594132,
+            0.0670262
+          ],
+          "median_seconds": 0.070263444,
+          "min_seconds": 0.06594132,
+          "max_seconds": 0.08680111,
+          "stdev_seconds": 0.0088563161504762
+        },
+        "Rust": {
+          "seconds": [
+            0.061827741,
+            0.061557223,
+            0.063553568,
+            0.068372951,
+            0.061072397,
+            0.070985846,
+            0.066404148
+          ],
+          "median_seconds": 0.063553568,
+          "min_seconds": 0.061072397,
+          "max_seconds": 0.070985846,
+          "stdev_seconds": 0.0038383630321605178
+        }
+      }
+    },
+    {
+      "id": "dijkstra",
+      "title": "Sparse-graph shortest paths",
+      "category": "Graph / priority queue",
+      "description": "Materialized directed graph with eight weighted edges per vertex; binary min-heap with stale-entry rejection.",
+      "size": 60000,
+      "checksum": 189431054,
+      "oracle_verified": true,
+      "results": {
+        "Neutron": {
+          "seconds": [
+            0.073348455,
+            0.073262693,
+            0.057945331,
+            0.072683269,
+            0.07355927,
+            0.07289464,
+            0.059694473
+          ],
+          "median_seconds": 0.07289464,
+          "min_seconds": 0.057945331,
+          "max_seconds": 0.07355927,
+          "stdev_seconds": 0.0070163887354889026
+        },
+        "C \u00b7 GCC": {
+          "seconds": [
+            0.04989335,
+            0.064720475,
+            0.063012153,
+            0.05625456,
+            0.063191638,
+            0.053708149,
+            0.052232572
+          ],
+          "median_seconds": 0.05625456,
+          "min_seconds": 0.04989335,
+          "max_seconds": 0.064720475,
+          "stdev_seconds": 0.006005725453341391
+        },
+        "C \u00b7 Clang": {
+          "seconds": [
+            0.043416442,
+            0.044414493,
+            0.046270124,
+            0.042245216,
+            0.042135902,
+            0.058118966,
+            0.040843249
+          ],
+          "median_seconds": 0.043416442,
+          "min_seconds": 0.040843249,
+          "max_seconds": 0.058118966,
+          "stdev_seconds": 0.005898980851163994
+        },
+        "Go": {
+          "seconds": [
+            0.076126728,
+            0.075946468,
+            0.069415066,
+            0.070996385,
+            0.064228581,
+            0.080632962,
+            0.063710478
+          ],
+          "median_seconds": 0.070996385,
+          "min_seconds": 0.063710478,
+          "max_seconds": 0.080632962,
+          "stdev_seconds": 0.006359968307088828
+        },
+        "Rust": {
+          "seconds": [
+            0.073500237,
+            0.071504678,
+            0.054519027,
+            0.053828399,
+            0.050304174,
+            0.05002272,
+            0.048930111
+          ],
+          "median_seconds": 0.053828399,
+          "min_seconds": 0.048930111,
+          "max_seconds": 0.073500237,
+          "stdev_seconds": 0.010453359597792271
+        }
+      }
+    },
+    {
+      "id": "fft",
+      "title": "Radix-2 complex FFT",
+      "category": "Signal processing",
+      "description": "In-place Cooley\u2013Tukey transform, bit reversal and complex butterflies; energy checksum.",
+      "size": 262144,
+      "checksum": 5727828234.638325,
+      "oracle_verified": true,
+      "results": {
+        "Neutron": {
+          "seconds": [
+            0.0508307,
+            0.055690319,
+            0.0455262,
+            0.045341468,
+            0.044917687,
+            0.053823879,
+            0.048185426
+          ],
+          "median_seconds": 0.048185426,
+          "min_seconds": 0.044917687,
+          "max_seconds": 0.055690319,
+          "stdev_seconds": 0.004357279448733862
+        },
+        "C \u00b7 GCC": {
+          "seconds": [
+            0.0425646,
+            0.050617827,
+            0.040795463,
+            0.038671342,
+            0.058882621,
+            0.060816191,
+            0.041477051
+          ],
+          "median_seconds": 0.0425646,
+          "min_seconds": 0.038671342,
+          "max_seconds": 0.060816191,
+          "stdev_seconds": 0.009127660484528894
+        },
+        "C \u00b7 Clang": {
+          "seconds": [
+            0.051437424,
+            0.035635953,
+            0.040692588,
+            0.040771104,
+            0.039324194,
+            0.040367983,
+            0.043676387
+          ],
+          "median_seconds": 0.040692588,
+          "min_seconds": 0.035635953,
+          "max_seconds": 0.051437424,
+          "stdev_seconds": 0.004912444119602167
+        },
+        "Go": {
+          "seconds": [
+            0.051584598,
+            0.045538282,
+            0.048189287,
+            0.041787213,
+            0.061688909,
+            0.048961759,
+            0.064219897
+          ],
+          "median_seconds": 0.048961759,
+          "min_seconds": 0.041787213,
+          "max_seconds": 0.064219897,
+          "stdev_seconds": 0.008292485825366288
+        },
+        "Rust": {
+          "seconds": [
+            0.041994155,
+            0.041031644,
+            0.04793146,
+            0.040123487,
+            0.053928083,
+            0.056893392,
+            0.045237178
+          ],
+          "median_seconds": 0.045237178,
+          "min_seconds": 0.040123487,
+          "max_seconds": 0.056893392,
+          "stdev_seconds": 0.006548846450459386
+        }
+      }
+    }
+  ],
+  "methodology": [
+    "Equivalent algorithms and identical seeded inputs; 64-bit integer and f64 arithmetic.",
+    "Optimized native binaries on a generic host ISA: C -O3, Rust opt-level=3, Neutron --release, normal optimized Go build. No -march=native, fast-math, external libraries, unsafe Rust, or parallel kernels.",
+    "C floating-point contraction is disabled. Rust/Go/Neutron use ordinary floating-point semantics; FFT and matrix checks use declared numerical tolerances.",
+    "Each size is passed at runtime. Every run emits and validates a checksum; nonzero exits, invalid output, and timeouts fail the run.",
+    "Independent Python oracles validate all six workloads at smoke sizes and the hard-size checksums. Sortedness is checked inside the sort.",
+    "End-to-end wall time includes process startup, input generation, allocation, kernel computation, checksum and cleanup. It excludes compilation and Python oracle generation.",
+    "Languages execute sequentially on one inherited CPU affinity; randomized interleaved rounds after warmups. Go GOMAXPROCS=1. No concurrent benchmark runs.",
+    "Median and min\u2013max spread are shown. Raw samples are downloadable. Binary size is not RSS; peak RSS is not measured.",
+    "C arrays have no bounds checks; Rust/Go/Neutron use their ordinary safe array APIs. Memory-safety costs are included, not disabled to manufacture parity.",
+    "One machine and one run, not a universal language ranking. No application/server/I/O claims, BLAS comparisons, or cherry-picked omitted results."
+  ]
+}</script>
+  <script>
+    "use strict";
+    const data = JSON.parse(document.getElementById("benchmark-data").textContent);
+    const colors = {"Neutron":"#b6f66b","C · GCC":"#78c9e8","C · Clang":"#b9a3f0","Go":"#efc478","Rust":"#ee9b9b"};
+    const byId = id => document.getElementById(id);
+    const escapeText = value => String(value).replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+    const number = (value, digits=2) => value.toLocaleString("en-US", {maximumFractionDigits:digits,minimumFractionDigits:digits});
+    const geomean = values => Math.exp(values.reduce((sum, value) => sum + Math.log(value), 0) / values.length);
+    const fastest = workload => Math.min(...data.languages.map(name => workload.results[name].median_seconds));
+    let logScale = false;
+    let relative = false;
+    let downloadUrl;
+    function chart(rows, unit, aggregate=false) {
+      const width=650, left=120, right=545, top=17, rowHeight=31, bottom=top+rows.length*rowHeight;
+      const minimum=Math.min(...rows.map(row=>row.min)), maximum=Math.max(...rows.map(row=>row.max));
+      const low=logScale?minimum/1.4:0, high=maximum*1.15;
+      const scale=value => left+(right-left)*(logScale?(Math.log(value)-Math.log(low))/(Math.log(high)-Math.log(low)):value/high);
+      let svg=`<svg class="chart" viewBox="0 0 ${width} ${bottom+33}" role="img" aria-label="${escapeText(rows.map(row=>`${row.name}: ${number(row.value)} ${unit}`).join("; "))}. ${logScale?"Logarithmic":"Linear"} axis."><title>${aggregate?"Whole-suite normalized performance":"Measured runtime comparison"} — ${logScale?"logarithmic":"linear"} scale, lower is better</title>`;
+      for(let tick=0;tick<=4;tick++){
+        const x=left+(right-left)*tick/4, value=logScale?Math.exp(Math.log(low)+(Math.log(high)-Math.log(low))*tick/4):high*tick/4;
+        svg+=`<line x1="${x}" x2="${x}" y1="7" y2="${bottom-3}" stroke="#28322b" stroke-dasharray="2 4"/><text x="${x}" y="${bottom+15}" text-anchor="middle" class="axis-label">${number(value,value<10?2:0)}</text>`;
+      }
+      rows.forEach((row,index)=>{
+        const y=top+index*rowHeight, color=colors[row.name];
+        svg+=`<text x="0" y="${y+5}" class="chart-label" ${row.name==="Neutron"?'style="fill:#b6f66b;font-weight:700"':""}>${escapeText(row.name)}</text>`;
+        if(logScale){svg+=`<line x1="${left}" x2="${right}" y1="${y}" y2="${y}" stroke="#263029"/>`;}
+        else{svg+=`<rect x="${left}" y="${y-7}" width="${Math.max(1,scale(row.value)-left)}" height="14" rx="3" fill="${color}" opacity="${row.name==="Neutron"?"1":".76"}"/>`;}
+        if(!aggregate){svg+=`<line x1="${scale(row.min)}" x2="${scale(row.max)}" y1="${y}" y2="${y}" stroke="${color}" stroke-width="2"/><path d="M${scale(row.min)},${y-4}v8 M${scale(row.max)},${y-4}v8" stroke="${color}"/>`;}
+        if(logScale){svg+=`<circle cx="${scale(row.value)}" cy="${y}" r="4" fill="${color}"/>`;}
+        svg+=`<text x="642" y="${y+5}" text-anchor="end" class="chart-label" style="fill:${color}">${number(row.value)} ${unit}</text>`;
+      });
+      return svg+"</svg>";
+    }
+    function render() {
+      const aggregateRows=data.languages.map(name=>{
+        const value=geomean(data.workloads.map(workload=>workload.results[name].median_seconds/fastest(workload)));
+        return {name,value,min:value,max:value};
+      });
+      byId("aggregate").innerHTML=chart(aggregateRows,"×",true);
+      byId("cards").innerHTML=data.workloads.map((workload,index)=>{
+        const best=fastest(workload), neutron=workload.results.Neutron.median_seconds;
+        const winner=data.languages.reduce((a,b)=>workload.results[a].median_seconds<=workload.results[b].median_seconds?a:b);
+        const rows=data.languages.map(name=>{const result=workload.results[name], factor=relative?1/best:1000;return{name,value:result.median_seconds*factor,min:result.min_seconds*factor,max:result.max_seconds*factor};});
+        const sizes={queens:`${workload.size} queens · exhaustive solutions`,mandelbrot:`${number(workload.size,0)} × ${number(workload.size,0)} pixels · 256 iterations`,matmul:`${workload.size} × ${workload.size} · f64 · 32-wide tiles`,radix:`${number(workload.size,0)} keys · 4 passes · 31-bit`,dijkstra:`${number(workload.size,0)} vertices · ${number(workload.size*8,0)} edges`,fft:`${number(workload.size,0)} complex samples · ${Math.log2(workload.size)} stages`};
+        return `<article class="card"><div class="card-top"><div><span class="index">${String(index+1).padStart(2,"0")} / ${escapeText(workload.category)}</span><h3>${escapeText(workload.title)}</h3></div><span class="badge">✓ VERIFIED</span></div><p class="description">${escapeText(workload.description)}</p><div class="size">${sizes[workload.id]}</div>${chart(rows,relative?"×":"ms")}<div class="card-foot"><span>Lowest median <strong>${escapeText(winner)}</strong></span><span>Neutron / fastest <strong>${number(neutron/best)}×</strong></span></div><details><summary>Inspect samples & checksum</summary><div class="details-body"><table><thead><tr><th>Toolchain</th><th>Median ms</th><th>Min ms</th><th>Max ms</th></tr></thead><tbody>${data.languages.map(name=>{const r=workload.results[name];return`<tr><td>${escapeText(name)}</td><td>${number(r.median_seconds*1000,3)}</td><td>${number(r.min_seconds*1000,3)}</td><td>${number(r.max_seconds*1000,3)}</td></tr>`;}).join("")}</tbody></table><div class="checksum">Independent oracle checksum: ${escapeText(workload.checksum)}<br>Every measured sample was checked against this value.</div></div></details></article>`;
+      }).join("");
+      byId("linear").setAttribute("aria-pressed",String(!logScale));
+      byId("log").setAttribute("aria-pressed",String(logScale));
+    }
+    byId("measured-date").textContent=`Measured ${new Date(data.measured_at).toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"})} · single-machine kernel experiment`;
+    const complete=data.status==="complete"&&data.workloads.length===data.total_workloads;
+    byId("status").textContent=complete?"Run complete":"Partial run";
+    if(data.profile!=="hard"||!complete){byId("notice").classList.remove("hidden");byId("notice").textContent=data.profile!=="hard"?"SMOKE TEST ONLY — these small sizes validate implementations; do not publish these timings as performance claims.":`PARTIAL RESULTS — ${data.workloads.length} of ${data.total_workloads} workloads measured. This is not a complete-suite ranking.`;}
+    byId("verified").textContent=`${data.workloads.length}/${data.total_workloads}`;
+    byId("comparisons").textContent=data.workloads.length*data.languages.length;
+    byId("sample-count").textContent=data.samples;
+    const peer=data.languages.filter(name=>name!=="Neutron").map(name=>({name,ratio:geomean(data.workloads.map(workload=>workload.results.Neutron.median_seconds/workload.results[name].median_seconds))})).sort((a,b)=>b.ratio-a.ratio)[0];
+    byId("nearest").textContent=`${number(peer.ratio)}×`;
+    byId("nearest-label").textContent=`Neutron / ${peer.name} · geometric mean time`;
+    byId("legend").innerHTML=data.languages.map(name=>`<span><i style="background:${colors[name]}"></i>${escapeText(name)}</span>`).join("");
+    byId("method-list").innerHTML=data.methodology.map(item=>`<li>${escapeText(item)}</li>`).join("");
+    const fields={"Processor":data.system.cpu,"Operating system":data.system.os,"Logical CPUs":data.system.logical_cpus,"Benchmark affinity":data.system.pinned_cpu===null?"Not pinned":`CPU ${data.system.pinned_cpu} · single logical core`,"Profile":data.profile,"Source revision":`${data.git_revision.slice(0,12)}${data.git_worktree_dirty?" + benchmark worktree changes":""}`};
+    byId("machine").innerHTML=Object.entries(fields).map(([key,value])=>`<dt>${escapeText(key)}</dt><dd>${escapeText(value)}</dd>`).join("");
+    byId("toolchains").innerHTML=data.languages.map(name=>`<dt>${escapeText(name)}</dt><dd>${escapeText(data.versions[name])}<br><span style="color:var(--muted)">${number(data.builds[name].binary_bytes/1024,0)} KiB executable · not peak RSS</span></dd>`).join("");
+    byId("provenance").textContent=JSON.stringify({revision:data.git_revision,dirty:data.git_worktree_dirty,source_sha256:data.source_sha256,builds:data.builds,random_seed:data.random_seed},null,2);
+    downloadUrl=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}));
+    byId("download").href=downloadUrl;
+    byId("linear").addEventListener("click",()=>{logScale=false;render();});
+    byId("log").addEventListener("click",()=>{logScale=true;render();});
+    byId("metric").addEventListener("change",event=>{relative=event.target.value==="relative";render();});
+    render();
+  </script>
+</body>
+</html>

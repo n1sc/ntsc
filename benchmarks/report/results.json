@@ -1,0 +1,636 @@
+{
+  "schema_version": 1,
+  "status": "complete",
+  "total_workloads": 6,
+  "measured_at": "2026-11-05T18:19:46.325160+00:00",
+  "git_revision": "a6712419bbb16fa16d2d40c2511d64bb06df762c",
+  "git_worktree_dirty": true,
+  "profile": "hard",
+  "samples": 7,
+  "warmup": 2,
+  "random_seed": 20261105,
+  "system": {
+    "cpu": "Intel(R) Core(TM) i3-8130U CPU @ 2.20GHz",
+    "logical_cpus": 4,
+    "pinned_cpu": 0,
+    "os": "Linux-7.2.14-arch1-1-x86_64-with-glibc2.44"
+  },
+  "versions": {
+    "Neutron": "ntsc 0.1.0 \u2014 Neutron Type-Safe Compiler\n\nLLVM   23.1.4\nHost   x86_64-unknown-linux-gnu\nBuild ID   dmngaiw1l34yd\nBuild date 2026-11-05T17:24:37Z\nBuild  debug\nCommit a671241",
+    "C \u00b7 GCC": "gcc (GCC) 16.2.1 20260810",
+    "C \u00b7 Clang": "clang version 23.1.4",
+    "Go": "go version go1.27.3-X:nodwarf5 linux/amd64",
+    "Rust": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+  },
+  "source_sha256": {
+    "kernels.c": "1ae302ef9abd5bc6effc4da584fbc2d077b13daacc2b7839e531721135aacc8f",
+    "kernels.go": "68a7efb6dcf48630ead3fcc40608585cbe20d18f426eea2652a9554a0db10756",
+    "kernels.nt": "82d35660ea86d605e8adc0db0d8083e9c850e14f3735c87f616863992141c97e",
+    "kernels.rs": "5a1579d96bcf2c902ec3b87af935546f46bdf4a11c613220130fad4b4256a59d"
+  },
+  "builds": {
+    "Neutron": {
+      "command": [
+        "/home/yasakei/projects/neutron-rs/target/debug/ntsc",
+        "build",
+        "--release"
+      ],
+      "build_seconds": 1.510879991998081,
+      "binary_bytes": 1695624
+    },
+    "C \u00b7 GCC": {
+      "command": [
+        "gcc",
+        "-O3",
+        "-std=c11",
+        "-ffp-contract=off",
+        "/home/yasakei/projects/neutron-rs/benchmarks/hard/kernels.c",
+        "-lm",
+        "-o",
+        "/home/yasakei/projects/neutron-rs/target/bench-hard/gcc"
+      ],
+      "build_seconds": 1.2431924870033981,
+      "binary_bytes": 20656
+    },
+    "C \u00b7 Clang": {
+      "command": [
+        "clang",
+        "-O3",
+        "-std=c11",
+        "-ffp-contract=off",
+        "/home/yasakei/projects/neutron-rs/benchmarks/hard/kernels.c",
+        "-lm",
+        "-o",
+        "/home/yasakei/projects/neutron-rs/target/bench-hard/clang"
+      ],
+      "build_seconds": 1.0273963419967913,
+      "binary_bytes": 20720
+    },
+    "Go": {
+      "command": [
+        "go",
+        "build",
+        "-trimpath",
+        "-o",
+        "/home/yasakei/projects/neutron-rs/target/bench-hard/go",
+        "/home/yasakei/projects/neutron-rs/benchmarks/hard/kernels.go"
+      ],
+      "build_seconds": 0.8179604600009043,
+      "binary_bytes": 2472700
+    },
+    "Rust": {
+      "command": [
+        "rustc",
+        "--edition=2024",
+        "-C",
+        "opt-level=3",
+        "-C",
+        "codegen-units=1",
+        "-C",
+        "panic=abort",
+        "/home/yasakei/projects/neutron-rs/benchmarks/hard/kernels.rs",
+        "-o",
+        "/home/yasakei/projects/neutron-rs/target/bench-hard/rust"
+      ],
+      "build_seconds": 0.8566825210000388,
+      "binary_bytes": 4583616
+    }
+  },
+  "languages": [
+    "Neutron",
+    "C \u00b7 GCC",
+    "C \u00b7 Clang",
+    "Go",
+    "Rust"
+  ],
+  "workloads": [
+    {
+      "id": "queens",
+      "title": "Exact N-Queens",
+      "category": "Combinatorial search",
+      "description": "Exhaustive bitboard backtracking; every solution, no symmetry shortcuts.",
+      "size": 15,
+      "checksum": 2279184,
+      "oracle_verified": true,
+      "results": {
+        "Neutron": {
+          "seconds": [
+            3.68971131,
+            3.604077168,
+            3.739578225,
+            3.94122793,
+            3.61910195,
+            3.839750778,
+            3.96850675
+          ],
+          "median_seconds": 3.739578225,
+          "min_seconds": 3.604077168,
+          "max_seconds": 3.96850675,
+          "stdev_seconds": 0.14789695526071323
+        },
+        "C \u00b7 GCC": {
+          "seconds": [
+            3.476598091,
+            3.152215437,
+            3.050122988,
+            3.134946656,
+            3.050916397,
+            3.14825173,
+            3.225264803
+          ],
+          "median_seconds": 3.14825173,
+          "min_seconds": 3.050122988,
+          "max_seconds": 3.476598091,
+          "stdev_seconds": 0.14565513663846524
+        },
+        "C \u00b7 Clang": {
+          "seconds": [
+            3.711142562,
+            3.936067211,
+            3.831159672,
+            3.802805068,
+            3.636408136,
+            3.929383402,
+            3.77156199
+          ],
+          "median_seconds": 3.802805068,
+          "min_seconds": 3.636408136,
+          "max_seconds": 3.936067211,
+          "stdev_seconds": 0.10927851700245679
+        },
+        "Go": {
+          "seconds": [
+            3.980932573,
+            3.936834784,
+            3.712017217,
+            3.882160912,
+            3.733489836,
+            3.774364546,
+            3.715859576
+          ],
+          "median_seconds": 3.774364546,
+          "min_seconds": 3.712017217,
+          "max_seconds": 3.980932573,
+          "stdev_seconds": 0.11216287247297448
+        },
+        "Rust": {
+          "seconds": [
+            3.576225101,
+            3.535769013,
+            3.801544995,
+            4.103183104,
+            3.713018527,
+            3.752412878,
+            4.489851581
+          ],
+          "median_seconds": 3.752412878,
+          "min_seconds": 3.535769013,
+          "max_seconds": 4.489851581,
+          "stdev_seconds": 0.3360980562939281
+        }
+      }
+    },
+    {
+      "id": "mandelbrot",
+      "title": "Mandelbrot renderer",
+      "category": "Branch-heavy floating point",
+      "description": "A complete square image, up to 256 escape iterations per pixel.",
+      "size": 1024,
+      "checksum": 57998279,
+      "oracle_verified": true,
+      "results": {
+        "Neutron": {
+          "seconds": [
+            0.494993904,
+            0.497087923,
+            0.508604764,
+            0.496396587,
+            0.497197193,
+            0.493100148,
+            0.490615335
+          ],
+          "median_seconds": 0.496396587,
+          "min_seconds": 0.490615335,
+          "max_seconds": 0.508604764,
+          "stdev_seconds": 0.00569991871364387
+        },
+        "C \u00b7 GCC": {
+          "seconds": [
+            0.510162113,
+            0.634911889,
+            0.508992223,
+            0.508905336,
+            0.503671172,
+            0.500096804,
+            0.505994108
+          ],
+          "median_seconds": 0.508905336,
+          "min_seconds": 0.500096804,
+          "max_seconds": 0.634911889,
+          "stdev_seconds": 0.048736795830742356
+        },
+        "C \u00b7 Clang": {
+          "seconds": [
+            0.490570194,
+            0.487664198,
+            0.516878743,
+            0.497376405,
+            0.490484864,
+            0.497441567,
+            0.495105119
+          ],
+          "median_seconds": 0.495105119,
+          "min_seconds": 0.487664198,
+          "max_seconds": 0.516878743,
+          "stdev_seconds": 0.009732328319762472
+        },
+        "Go": {
+          "seconds": [
+            0.525498537,
+            0.52595878,
+            0.534572946,
+            0.530339223,
+            0.526722723,
+            0.527626982,
+            0.523909755
+          ],
+          "median_seconds": 0.526722723,
+          "min_seconds": 0.523909755,
+          "max_seconds": 0.534572946,
+          "stdev_seconds": 0.00359007013438102
+        },
+        "Rust": {
+          "seconds": [
+            0.493002606,
+            0.490498674,
+            0.498327459,
+            0.50332883,
+            0.499174848,
+            0.493406326,
+            0.494136242
+          ],
+          "median_seconds": 0.494136242,
+          "min_seconds": 0.490498674,
+          "max_seconds": 0.50332883,
+          "stdev_seconds": 0.00444702033127112
+        }
+      }
+    },
+    {
+      "id": "matmul",
+      "title": "Blocked matrix product",
+      "category": "Dense numerical computing",
+      "description": "Row-major f64 A\u00d7B, 32\u00d732 tiles; actual buffers, no BLAS or formula shortcut.",
+      "size": 192,
+      "checksum": 1731301.5876288658,
+      "oracle_verified": true,
+      "results": {
+        "Neutron": {
+          "seconds": [
+            0.014475986,
+            0.01480264,
+            0.01447105,
+            0.012910494,
+            0.012116353,
+            0.014285072,
+            0.01316765
+          ],
+          "median_seconds": 0.014285072,
+          "min_seconds": 0.012116353,
+          "max_seconds": 0.01480264,
+          "stdev_seconds": 0.0010127491148724842
+        },
+        "C \u00b7 GCC": {
+          "seconds": [
+            0.008989129,
+            0.014979244,
+            0.013048716,
+            0.010123678,
+            0.010604867,
+            0.010419606,
+            0.010677149
+          ],
+          "median_seconds": 0.010604867,
+          "min_seconds": 0.008989129,
+          "max_seconds": 0.014979244,
+          "stdev_seconds": 0.0020394226571927043
+        },
+        "C \u00b7 Clang": {
+          "seconds": [
+            0.010783943,
+            0.008521635,
+            0.008809452,
+            0.01064852,
+            0.009247195,
+            0.008593043,
+            0.011697598
+          ],
+          "median_seconds": 0.009247195,
+          "min_seconds": 0.008521635,
+          "max_seconds": 0.011697598,
+          "stdev_seconds": 0.0012684643308196765
+        },
+        "Go": {
+          "seconds": [
+            0.025100048,
+            0.023080118,
+            0.026469951,
+            0.027117103,
+            0.023802115,
+            0.026636433,
+            0.025598834
+          ],
+          "median_seconds": 0.025598834,
+          "min_seconds": 0.023080118,
+          "max_seconds": 0.027117103,
+          "stdev_seconds": 0.0015103308976303679
+        },
+        "Rust": {
+          "seconds": [
+            0.01241153,
+            0.014053596,
+            0.018212296,
+            0.015508577,
+            0.013889163,
+            0.014733896,
+            0.012873549
+          ],
+          "median_seconds": 0.014053596,
+          "min_seconds": 0.01241153,
+          "max_seconds": 0.018212296,
+          "stdev_seconds": 0.0019333805043158397
+        }
+      }
+    },
+    {
+      "id": "radix",
+      "title": "Million-key radix sort",
+      "category": "Memory / data processing",
+      "description": "Stable four-pass radix sort of seeded 31-bit keys, including buffers and sortedness verification.",
+      "size": 1000000,
+      "checksum": 65014936,
+      "oracle_verified": true,
+      "results": {
+        "Neutron": {
+          "seconds": [
+            0.088864234,
+            0.086707283,
+            0.073868521,
+            0.074712839,
+            0.07386384,
+            0.067864677,
+            0.071081567
+          ],
+          "median_seconds": 0.073868521,
+          "min_seconds": 0.067864677,
+          "max_seconds": 0.088864234,
+          "stdev_seconds": 0.007934663857125136
+        },
+        "C \u00b7 GCC": {
+          "seconds": [
+            0.092007912,
+            0.081539107,
+            0.091834693,
+            0.08059414,
+            0.090462182,
+            0.10021115,
+            0.082805747
+          ],
+          "median_seconds": 0.090462182,
+          "min_seconds": 0.08059414,
+          "max_seconds": 0.10021115,
+          "stdev_seconds": 0.007162491387768385
+        },
+        "C \u00b7 Clang": {
+          "seconds": [
+            0.068693301,
+            0.060334705,
+            0.074394874,
+            0.060653128,
+            0.060642342,
+            0.061163176,
+            0.060779038
+          ],
+          "median_seconds": 0.060779038,
+          "min_seconds": 0.060334705,
+          "max_seconds": 0.074394874,
+          "stdev_seconds": 0.0055400985976716745
+        },
+        "Go": {
+          "seconds": [
+            0.072255688,
+            0.085154193,
+            0.066657349,
+            0.08680111,
+            0.070263444,
+            0.06594132,
+            0.0670262
+          ],
+          "median_seconds": 0.070263444,
+          "min_seconds": 0.06594132,
+          "max_seconds": 0.08680111,
+          "stdev_seconds": 0.0088563161504762
+        },
+        "Rust": {
+          "seconds": [
+            0.061827741,
+            0.061557223,
+            0.063553568,
+            0.068372951,
+            0.061072397,
+            0.070985846,
+            0.066404148
+          ],
+          "median_seconds": 0.063553568,
+          "min_seconds": 0.061072397,
+          "max_seconds": 0.070985846,
+          "stdev_seconds": 0.0038383630321605178
+        }
+      }
+    },
+    {
+      "id": "dijkstra",
+      "title": "Sparse-graph shortest paths",
+      "category": "Graph / priority queue",
+      "description": "Materialized directed graph with eight weighted edges per vertex; binary min-heap with stale-entry rejection.",
+      "size": 60000,
+      "checksum": 189431054,
+      "oracle_verified": true,
+      "results": {
+        "Neutron": {
+          "seconds": [
+            0.073348455,
+            0.073262693,
+            0.057945331,
+            0.072683269,
+            0.07355927,
+            0.07289464,
+            0.059694473
+          ],
+          "median_seconds": 0.07289464,
+          "min_seconds": 0.057945331,
+          "max_seconds": 0.07355927,
+          "stdev_seconds": 0.0070163887354889026
+        },
+        "C \u00b7 GCC": {
+          "seconds": [
+            0.04989335,
+            0.064720475,
+            0.063012153,
+            0.05625456,
+            0.063191638,
+            0.053708149,
+            0.052232572
+          ],
+          "median_seconds": 0.05625456,
+          "min_seconds": 0.04989335,
+          "max_seconds": 0.064720475,
+          "stdev_seconds": 0.006005725453341391
+        },
+        "C \u00b7 Clang": {
+          "seconds": [
+            0.043416442,
+            0.044414493,
+            0.046270124,
+            0.042245216,
+            0.042135902,
+            0.058118966,
+            0.040843249
+          ],
+          "median_seconds": 0.043416442,
+          "min_seconds": 0.040843249,
+          "max_seconds": 0.058118966,
+          "stdev_seconds": 0.005898980851163994
+        },
+        "Go": {
+          "seconds": [
+            0.076126728,
+            0.075946468,
+            0.069415066,
+            0.070996385,
+            0.064228581,
+            0.080632962,
+            0.063710478
+          ],
+          "median_seconds": 0.070996385,
+          "min_seconds": 0.063710478,
+          "max_seconds": 0.080632962,
+          "stdev_seconds": 0.006359968307088828
+        },
+        "Rust": {
+          "seconds": [
+            0.073500237,
+            0.071504678,
+            0.054519027,
+            0.053828399,
+            0.050304174,
+            0.05002272,
+            0.048930111
+          ],
+          "median_seconds": 0.053828399,
+          "min_seconds": 0.048930111,
+          "max_seconds": 0.073500237,
+          "stdev_seconds": 0.010453359597792271
+        }
+      }
+    },
+    {
+      "id": "fft",
+      "title": "Radix-2 complex FFT",
+      "category": "Signal processing",
+      "description": "In-place Cooley\u2013Tukey transform, bit reversal and complex butterflies; energy checksum.",
+      "size": 262144,
+      "checksum": 5727828234.638325,
+      "oracle_verified": true,
+      "results": {
+        "Neutron": {
+          "seconds": [
+            0.0508307,
+            0.055690319,
+            0.0455262,
+            0.045341468,
+            0.044917687,
+            0.053823879,
+            0.048185426
+          ],
+          "median_seconds": 0.048185426,
+          "min_seconds": 0.044917687,
+          "max_seconds": 0.055690319,
+          "stdev_seconds": 0.004357279448733862
+        },
+        "C \u00b7 GCC": {
+          "seconds": [
+            0.0425646,
+            0.050617827,
+            0.040795463,
+            0.038671342,
+            0.058882621,
+            0.060816191,
+            0.041477051
+          ],
+          "median_seconds": 0.0425646,
+          "min_seconds": 0.038671342,
+          "max_seconds": 0.060816191,
+          "stdev_seconds": 0.009127660484528894
+        },
+        "C \u00b7 Clang": {
+          "seconds": [
+            0.051437424,
+            0.035635953,
+            0.040692588,
+            0.040771104,
+            0.039324194,
+            0.040367983,
+            0.043676387
+          ],
+          "median_seconds": 0.040692588,
+          "min_seconds": 0.035635953,
+          "max_seconds": 0.051437424,
+          "stdev_seconds": 0.004912444119602167
+        },
+        "Go": {
+          "seconds": [
+            0.051584598,
+            0.045538282,
+            0.048189287,
+            0.041787213,
+            0.061688909,
+            0.048961759,
+            0.064219897
+          ],
+          "median_seconds": 0.048961759,
+          "min_seconds": 0.041787213,
+          "max_seconds": 0.064219897,
+          "stdev_seconds": 0.008292485825366288
+        },
+        "Rust": {
+          "seconds": [
+            0.041994155,
+            0.041031644,
+            0.04793146,
+            0.040123487,
+            0.053928083,
+            0.056893392,
+            0.045237178
+          ],
+          "median_seconds": 0.045237178,
+          "min_seconds": 0.040123487,
+          "max_seconds": 0.056893392,
+          "stdev_seconds": 0.006548846450459386
+        }
+      }
+    }
+  ],
+  "methodology": [
+    "Equivalent algorithms and identical seeded inputs; 64-bit integer and f64 arithmetic.",
+    "Optimized native binaries on a generic host ISA: C -O3, Rust opt-level=3, Neutron --release, normal optimized Go build. No -march=native, fast-math, external libraries, unsafe Rust, or parallel kernels.",
+    "C floating-point contraction is disabled. Rust/Go/Neutron use ordinary floating-point semantics; FFT and matrix checks use declared numerical tolerances.",
+    "Each size is passed at runtime. Every run emits and validates a checksum; nonzero exits, invalid output, and timeouts fail the run.",
+    "Independent Python oracles validate all six workloads at smoke sizes and the hard-size checksums. Sortedness is checked inside the sort.",
+    "End-to-end wall time includes process startup, input generation, allocation, kernel computation, checksum and cleanup. It excludes compilation and Python oracle generation.",
+    "Languages execute sequentially on one inherited CPU affinity; randomized interleaved rounds after warmups. Go GOMAXPROCS=1. No concurrent benchmark runs.",
+    "Median and min\u2013max spread are shown. Raw samples are downloadable. Binary size is not RSS; peak RSS is not measured.",
+    "C arrays have no bounds checks; Rust/Go/Neutron use their ordinary safe array APIs. Memory-safety costs are included, not disabled to manufacture parity.",
+    "One machine and one run, not a universal language ranking. No application/server/I/O claims, BLAS comparisons, or cherry-picked omitted results."
+  ]
+}
