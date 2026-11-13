@@ -417,6 +417,7 @@ fn link_windows(
                 "shell32",
                 "user32",
                 "kernel32",
+                "synchronization",
                 "imagehlp",
                 "comctl32",
                 "comdlg32",
