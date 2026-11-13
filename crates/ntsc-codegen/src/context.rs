@@ -27,7 +27,7 @@ pub fn init_llvm() {
         assert_eq!(
             major, EXPECTED_LLVM_MAJOR,
             "linked LLVM runtime is {major}.{minor}.{patch}, but ntsc-codegen was built for the \
-             LLVM {EXPECTED_LLVM_MAJOR} C API (inkwell `llvm23-1-force-dynamic`). A mismatched system \
+             LLVM {EXPECTED_LLVM_MAJOR} C API (inkwell `llvm23-1`). A mismatched system \
              libLLVM.so silently corrupts memory inside the pass pipeline: install LLVM \
              {EXPECTED_LLVM_MAJOR} and point LLVM_SYS_231_PREFIX at it (see \
              docs/reference/contributing.md)."
@@ -37,7 +37,7 @@ pub fn init_llvm() {
 }
 
 /// The LLVM major version the inkwell C-API bindings were generated for.
-/// Must match the `llvm23-1-force-dynamic` feature in `Cargo.toml`.
+/// Must match the `llvm23-1` bindings selected in `Cargo.toml`.
 const EXPECTED_LLVM_MAJOR: u32 = 23;
 
 /// Serializes every operation that touches LLVM's shared global state.

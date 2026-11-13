@@ -131,7 +131,7 @@ The Homebrew tap, the Scoop bucket and the AUR packages are updated by the
 release workflow on every tag, so `brew upgrade`, `scoop update` and
 `yay -Syu` keep `ntsc` current without reinstalling by hand.
 
-The compiler links LLVM 23 dynamically, so the Linux packages declare a dependency on the system LLVM runtime (`libLLVM-23` / `llvm-libs`), and the macOS and Windows installers bundle the LLVM libraries they need. See [`.github/packaging/`](.github/packaging/README.md) for the full recipe documentation.
+The Unix compiler links LLVM 23 dynamically: Linux packages depend on the system LLVM runtime (`libllvm23` / `llvm-libs`), and macOS installers bundle it. Windows/MSVC builds link LLVM statically. See [`.github/packaging/`](.github/packaging/README.md) for the full recipe documentation.
 
 Or build from source:
 

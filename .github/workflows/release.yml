@@ -201,21 +201,21 @@ jobs:
       - name: Install LLVM 23 (Linux)
         if: runner.os == 'Linux'
         run: |
-          curl -fsSL -o llvm.tar.xz "https://github.com/llvm/llvm-project/releases/download/llvmorg-${{ env.LLVM_VERSION }}/LLVM-${{ env.LLVM_VERSION }}-Linux-X64.tar.xz"
-          tar -xf llvm.tar.xz
-          mv LLVM-*-Linux-X64 "$HOME/llvm"
-          rm -f llvm.tar.xz
-          # Only llvm-config (llvm-sys), the shared libLLVM, and the headers are
-          # needed to build and link. Drop the ~3.5 GB of tools/docs nothing
-          # here invokes so the 14 GB runner disk has room for the release
-          # build and the packaging tools.
-          rm -rf "$HOME/llvm/libexec" "$HOME/llvm/share"
-          rm -rf "$HOME/llvm/lib/clang" "$HOME/llvm/lib/cmake"
-          find "$HOME/llvm/bin" -mindepth 1 -maxdepth 1 ! -name 'llvm-config*' -exec rm -rf {} +
-          # Sanity check that llvm-sys can still find and run llvm-config.
-          "$HOME/llvm/bin/llvm-config" --version
-          echo "LLVM_SYS_231_PREFIX=$HOME/llvm" >> "$GITHUB_ENV"
-          echo "$HOME/llvm/bin" >> "$GITHUB_PATH"
+          set -euo pipefail
+          . /etc/os-release
+          llvm_major="${LLVM_VERSION%%.*}"
+          # Match normal CI: llvm-sys requires the packaged shared library.
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo gpg --dearmor --yes -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] https://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-$llvm_major main" |
+            sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "llvm-$llvm_major-dev"
+          prefix="/usr/lib/llvm-$llvm_major"
+          "$prefix/bin/llvm-config" --version
+          "$prefix/bin/llvm-config" --link-shared --libnames
+          echo "LLVM_SYS_231_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
 
       - name: Install LLVM 23 (macOS)
         if: runner.os == 'macOS'

@@ -12,10 +12,11 @@ the [guide](../guide/getting-started.md) and the [CLI reference](cli.md).
   stable; nightly features are never used.
 - **LLVM development libraries**, version 23. `ntsc-codegen` uses inkwell's
   git source pinned to the release that provides
-  `features = ["llvm23-1-force-dynamic"]` and
-  links only the x86-64 and aarch64
-  targets. `LLVM_SYS_231_PREFIX` must point at an LLVM 23 prefix
-  (e.g. `LLVM_SYS_231_PREFIX=/usr/lib/llvm23` when it is not the default
+  `llvm23-1` bindings and links only the x86-64 and aarch64 targets.
+  Cargo selects `force-dynamic` on Unix and `force-static` on MSVC,
+  where llvm-sys does not support dynamic linking.
+  `LLVM_SYS_231_PREFIX` must point at an LLVM 23 prefix
+  (e.g. `LLVM_SYS_231_PREFIX=/usr/lib/llvm-23` when it is not the default
   `llvm-config` on `PATH`). This must be *LLVM 23 exactly*: a different system LLVM silently
   links its `libLLVM.so` anyway, and the version-skew corrupts memory
   inside the optimization pass pipeline (SIGSEGV in LLVM-heavy code, in
@@ -60,6 +61,8 @@ $ cargo test --workspace
 
 The e2e tests build the runtime automatically when needed. Individual
 crates can be tested with `cargo test -p ntsc-<crate>`.
+Run `arq test_llvm_linkage` after changing LLVM dependencies to verify
+the Cargo features selected for Linux, macOS, and Windows.
 
 ## Repository layout
 

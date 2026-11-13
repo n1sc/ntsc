@@ -87,6 +87,12 @@ task test_runtime_arrays {
     done("runtime array regressions passed")
 }
 
+task test_llvm_linkage {
+    step("LLVM linkage features for the three CI platforms")
+    run "bash scripts/check-llvm-linkage.sh"
+    done("LLVM linkage features passed")
+}
+
 task test_cargo {
     step("Rust adaptor generator unit tests and audit examples")
     run "cargo test -p ntsc-cargo --lib --examples"

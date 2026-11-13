@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # ubuntu-latest has a 14 GB disk, so reclaim the preinstalled SDKs
-      # (Android, .NET, Haskell, CodeQL, Docker images) before downloading LLVM.
+      # (Android, .NET, Haskell, CodeQL, Docker images) before installing LLVM.
       - name: Free disk space (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -45,20 +45,22 @@ jobs:
       - name: Install LLVM 23 (Linux)
         if: runner.os == 'Linux'
         run: |
-          curl -fsSL -o llvm.tar.xz "https://github.com/llvm/llvm-project/releases/download/llvmorg-${{ env.LLVM_VERSION }}/LLVM-${{ env.LLVM_VERSION }}-Linux-X64.tar.xz"
-          mkdir -p "$HOME/llvm"
-          tar -xf llvm.tar.xz -C "$HOME/llvm" --strip-components=1
-          rm -f llvm.tar.xz
-          # Only llvm-config (llvm-sys), the shared libLLVM, and the headers are
-          # needed to build and link. Drop the ~3.5 GB of tools/docs nothing
-          # here invokes so `cargo test` does not fill the runner disk.
-          rm -rf "$HOME/llvm/libexec" "$HOME/llvm/share"
-          rm -rf "$HOME/llvm/lib/clang" "$HOME/llvm/lib/cmake"
-          find "$HOME/llvm/bin" -mindepth 1 -maxdepth 1 ! -name 'llvm-config*' -exec rm -rf {} +
-          # Sanity check that llvm-sys can still find and run llvm-config.
-          "$HOME/llvm/bin/llvm-config" --version
-          echo "LLVM_SYS_231_PREFIX=$HOME/llvm" >> "$GITHUB_ENV"
-          echo "$HOME/llvm/bin" >> "$GITHUB_PATH"
+          set -euo pipefail
+          . /etc/os-release
+          llvm_major="${LLVM_VERSION%%.*}"
+          # The release archive lacks libLLVM-23.so; the apt development
+          # package includes the shared library required by llvm-sys.
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo gpg --dearmor --yes -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] https://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-$llvm_major main" |
+            sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "llvm-$llvm_major-dev"
+          prefix="/usr/lib/llvm-$llvm_major"
+          "$prefix/bin/llvm-config" --version
+          "$prefix/bin/llvm-config" --link-shared --libnames
+          echo "LLVM_SYS_231_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
 
       - name: Install LLVM 23 (macOS)
         if: runner.os == 'macOS'
@@ -96,6 +98,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # ── Gate ─────────────────────────────────────────────────────────────
+      - name: Verify LLVM linkage features
+        if: runner.os == 'Linux'
+        run: bash scripts/check-llvm-linkage.sh
+
       - name: Format
         run: cargo fmt --check
 
