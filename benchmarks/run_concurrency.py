@@ -29,7 +29,7 @@ import run_benchmark as rb
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BUILD_DIR = rb.BUILD_DIR
-RESULTS_FILE = os.path.join(SCRIPT_DIR, "results_concurrency.md")
+RESULTS_FILE = os.path.join(BUILD_DIR, "results_concurrency.md")
 _HAS_PROC = os.name == "posix" and os.path.exists("/proc")
 
 SERVER_PORT = 8080

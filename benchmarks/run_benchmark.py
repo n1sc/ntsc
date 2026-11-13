@@ -49,7 +49,7 @@ REWRITE_DIR = os.path.dirname(SCRIPT_DIR)  # rewrite/
 PROJECT_DIR = os.path.dirname(REWRITE_DIR)  # neutron-rs/
 NEUTRON_BENCH_DIR = os.path.join(SCRIPT_DIR, "ntsc")  # new NTSC-compatible benchmarks
 RUST_BENCH_DIR = os.path.join(SCRIPT_DIR, "rust")
-BUILD_DIR = os.path.join(SCRIPT_DIR, "_build")
+BUILD_DIR = os.path.join(REWRITE_DIR, "target", "bench-legacy")
 
 def find_ntsc():
     """Locate the `ntsc` CLI binary. Prefers release build."""

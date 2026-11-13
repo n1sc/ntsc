@@ -149,26 +149,21 @@ task proj {
 task benchmark_hard {
     step("build current Neutron CLI, then run the five-toolchain hard suite")
     run "cargo build -p ntsc-cli"
-    run "python3 benchmarks/run_hard.py"
-    done("report: benchmarks/report/index.html")
+    run "python3 -B benchmarks/run_hard.py"
+    done("table: benchmarks/results.svg")
 }
 
 task benchmark_smoke {
     step("verify all hard-suite kernels at smoke sizes")
     run "cargo build -p ntsc-cli"
-    run "python3 benchmarks/run_hard.py --quick --samples 3 --warmup 1 --output target/bench-hard/smoke-report"
-    done("smoke report: target/bench-hard/smoke-report/index.html")
+    run "python3 -B benchmarks/run_hard.py --quick --samples 3 --warmup 1 --output target/bench-hard/smoke-report"
+    done("smoke table: target/bench-hard/smoke-report/results.svg")
 }
 
 task test_benchmarks {
     step("native benchmark harness unit tests")
-    run "python3 -m unittest discover -s benchmarks -p test_hard.py"
+    run "python3 -B -m unittest discover -s benchmarks -p test_hard.py"
     done("benchmark harness tests passed")
-}
-
-task benchmark_serve {
-    step("benchmark report at http://127.0.0.1:8765/")
-    run "python3 -m http.server 8765 --bind 127.0.0.1 --directory benchmarks/report"
 }
 
 task quick {

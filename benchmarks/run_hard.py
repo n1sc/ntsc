@@ -16,6 +16,7 @@ import statistics
 import subprocess
 import sys
 import time
+from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = ROOT / "benchmarks/hard"
@@ -164,14 +165,85 @@ def run_binary(binary, workload, size, environment, timeout):
     return elapsed, parse_result(result.stdout)
 
 
-def render_report(report, output):
+def write_results(report, output):
     output.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(report, indent=2, allow_nan=False)
-    (output / "results.json").write_text(data + "\n")
-    template = (ROOT / "benchmarks/report-template.html").read_text()
-    (output / "index.html").write_text(
-        template.replace("__BENCHMARK_DATA__", data.replace("</", "<\\/"))
+    (output / "results.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+
+
+def render_table(report, output):
+    workloads = report["workloads"]
+    if report["status"] != "complete" or not workloads or len(workloads) != report["total_workloads"]:
+        raise ValueError("only complete benchmark runs can be published")
+    medians = [[workload["results"][language]["median_seconds"] for language in LANGUAGES]
+               for workload in workloads]
+    if any(not math.isfinite(value) or value <= 0 for row in medians for value in row):
+        raise ValueError("table timings must be finite and positive")
+    height = 172 + 30 * len(workloads)
+    svg = ElementTree.Element("svg", {
+        "xmlns": "http://www.w3.org/2000/svg", "width": "760", "height": str(height),
+        "viewBox": f"0 0 760 {height}", "role": "img", "aria-labelledby": "title description",
+    })
+    smoke = "smoke" in report["profile"]
+    title = "Benchmark smoke test" if smoke else "Native kernel benchmarks"
+    ElementTree.SubElement(svg, "title", id="title").text = title
+    ElementTree.SubElement(svg, "desc", id="description").text = (
+        "Median wall time in milliseconds; lower is better. "
+        "Green cells mark the fastest result. Bars show geometric-mean slowdown "
+        "relative to the fastest toolchain in each workload; all workloads are included."
     )
+    ElementTree.SubElement(svg, "style").text = (
+        "text{font-family:system-ui,-apple-system,Segoe UI,sans-serif;fill:#334155;font-size:13px}"
+        ".heading{font-size:19px;font-weight:700;fill:#0f172a}"
+        ".muted{font-size:11px;fill:#64748b}.header{font-weight:600}"
+        ".best{fill:#047857;font-weight:700}.number{font-variant-numeric:tabular-nums}"
+    )
+    ElementTree.SubElement(svg, "rect", width="760", height=str(height), rx="12", fill="#ffffff")
+
+    def text(x, y, value, style="", anchor="start"):
+        ElementTree.SubElement(svg, "text", {
+            "x": str(x), "y": str(y), "class": style, "text-anchor": anchor,
+        }).text = str(value)
+
+    text(24, 29, title, "heading")
+    text(24, 49, "Small correctness inputs · not publishable timings" if smoke
+         else "Median milliseconds · lower is better · green = fastest", "muted")
+    labels = ["Neutron", "C / GCC", "C / Clang", "Go", "Rust"]
+    centers = [266 + 104 * index for index in range(len(LANGUAGES))]
+    text(24, 79, "Workload / size", "header")
+    for center, label in zip(centers, labels):
+        text(center, 79, label, "header", "middle")
+    short_titles = {
+        "queens": "N-Queens", "mandelbrot": "Mandelbrot", "matmul": "Matrix product",
+        "radix": "Radix sort", "dijkstra": "Dijkstra", "fft": "FFT",
+    }
+    for index, (workload, row) in enumerate(zip(workloads, medians)):
+        y = 92 + 30 * index
+        ElementTree.SubElement(svg, "rect", x="16", y=str(y), width="728", height="30",
+                               fill="#f8fafc" if index % 2 == 0 else "#ffffff")
+        text(24, y + 20, f'{short_titles[workload["id"]]} · {workload["size"]:,}')
+        fastest = min(row)
+        for center, value in zip(centers, row):
+            text(center, y + 20, f"{value * 1000:,.2f}",
+                 "number best" if value == fastest else "number", "middle")
+    slowdowns = [
+        math.exp(statistics.mean(math.log(row[column] / min(row)) for row in medians))
+        for column in range(len(LANGUAGES))
+    ]
+    y = 108 + 30 * len(workloads)
+    text(24, y, "Overall slowdown", "header")
+    text(24, y + 17, "Fastest per workload = 1×", "muted")
+    for index, (center, slowdown) in enumerate(zip(centers, slowdowns)):
+        text(center, y, f"{slowdown:.2f}×", "number", "middle")
+        ElementTree.SubElement(svg, "rect", x=str(center - 42), y=str(y + 9),
+                               width=f"{84 * slowdown / max(slowdowns):.2f}", height="6", rx="3",
+                               fill="#2563eb" if index == 0 else "#94a3b8")
+    cpu = report["system"]["cpu"].replace("(R)", "").replace("(TM)", "")
+    cpu = cpu.split(" CPU", 1)[0]
+    text(24, height - 16,
+         f'{cpu} · single core · {report["samples"]} samples · {report["measured_at"][:10]}', "muted")
+    ElementTree.indent(svg, space="  ")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    ElementTree.ElementTree(svg).write(output, encoding="utf-8", xml_declaration=True)
 
 
 def main():
@@ -182,11 +254,15 @@ def main():
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--cpu", type=int, help="one allowed logical CPU; default: first allowed CPU")
     parser.add_argument("--compiler", type=Path, default=ROOT / "target/debug/ntsc")
-    parser.add_argument("--output", type=Path, default=ROOT / "benchmarks/report")
+    parser.add_argument("--output", type=Path, default=BUILD / "results", help="local raw measurements")
+    parser.add_argument("--svg", type=Path, help="SVG table path; smoke tables stay under --output")
     parser.add_argument("--render-only", type=Path, help="render existing measured JSON without rerunning")
     args = parser.parse_args()
     if args.render_only:
-        render_report(json.loads(args.render_only.read_text()), args.output)
+        report = json.loads(args.render_only.read_text())
+        svg_path = args.svg or (args.output / "results.svg" if "smoke" in report["profile"]
+                                else ROOT / "benchmarks/results.svg")
+        render_table(report, svg_path)
         return
     if args.samples < 3 or args.warmup < 0 or args.timeout <= 0:
         parser.error("samples must be >= 3; warmup >= 0; timeout > 0")
@@ -267,11 +343,13 @@ def main():
             },
         }
         report["workloads"].append(entry)
-        render_report(report, args.output)
+        write_results(report, args.output)
         print("  " + " | ".join(f"{name}: {statistics.median(samples[name])*1000:.2f} ms" for name in LANGUAGES), flush=True)
     report["status"] = "complete"
-    render_report(report, args.output)
-    print(f"Report: {args.output / 'index.html'}", flush=True)
+    write_results(report, args.output)
+    svg_path = args.svg or (args.output / "results.svg" if args.quick else ROOT / "benchmarks/results.svg")
+    render_table(report, svg_path)
+    print(f"Table: {svg_path}", flush=True)
 
 
 if __name__ == "__main__":

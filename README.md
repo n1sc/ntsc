@@ -22,6 +22,7 @@
 [Getting started](#getting-started) ·
 [Documentation](#documentation) ·
 [Usage](#usage) ·
+[Benchmarks](#benchmarks) ·
 [Contributing](#contributing)
 
 </div>
@@ -61,7 +62,7 @@ sum of squares: 30
 | **Package manager** | `ntsc pkg` installs lockfile-pinned, vendored dependencies from the [NTSC registry](https://github.com/n1sc/registry). |
 | **Async & concurrency** | `async fun` coroutines, goroutines, and message-passing channels. |
 | **C interop** | `extern "C"` declarations called from `unsafe` blocks, linked through `neutron.toml`. |
-| **Native performance** | LLVM backend; release builds run `mem2reg`, `instcombine`, `simplifycfg`, `sccp`, `dce`, and `gvn`, and escape analysis keeps non-escaping objects on the stack. |
+| **Native performance** | LLVM O3 release optimization, guarded scalar-array fast paths, and stack allocation for non-escaping objects. |
 | **Static binaries** | Every output embeds the NTSC runtime — nothing to install on the target machine. |
 
 ### Built with
@@ -70,6 +71,12 @@ sum of squares: 30
 * [LLVM](https://llvm.org) — codegen backend, linked through [inkwell](https://github.com/TheDan64/inkwell)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+## Benchmarks
+
+![Native kernel timings and overall slowdown](benchmarks/results.svg)
+
+Single-machine, single-threaded measurements—not a universal language ranking. [Run the suite](benchmarks/README.md).
 
 ## Documentation
 
@@ -197,7 +204,7 @@ ntsc/
 │   ├── ntsc-lsp            Language server
 │   ├── ntsc-cli            The `ntsc` binary
 │   └── ntsc-diag           Diagnostic rendering
-├── benchmarks/             NTSC vs Rust benchmark suite
+├── benchmarks/             Native benchmark sources and compact SVG results
 └── docs/                   User guide and reference
 ```
 
