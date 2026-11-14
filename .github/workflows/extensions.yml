@@ -2,15 +2,28 @@ name: Editor integrations
 
 on:
   push:
-    paths: ["extensions/**", "scripts/check-extensions.sh", "crates/ntsc-lsp/**", "crates/ntsc-ast/src/token.rs", ".github/workflows/extensions.yml"]
+    paths: ["extensions/**", "scripts/check-extensions.sh", "scripts/extensions-version.py", "scripts/package-extensions.sh", "scripts/publish-*.sh", "scripts/zip-directory.py", "crates/ntsc-lsp/**", "crates/ntsc-ast/src/token.rs", ".github/workflows/extensions.yml", ".github/workflows/extensions-release.yml"]
   pull_request:
-    paths: ["extensions/**", "scripts/check-extensions.sh", "crates/ntsc-lsp/**", "crates/ntsc-ast/src/token.rs", ".github/workflows/extensions.yml"]
+    paths: ["extensions/**", "scripts/check-extensions.sh", "scripts/extensions-version.py", "scripts/package-extensions.sh", "scripts/publish-*.sh", "scripts/zip-directory.py", "crates/ntsc-lsp/**", "crates/ntsc-ast/src/token.rs", ".github/workflows/extensions.yml", ".github/workflows/extensions-release.yml"]
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to test and package"
+        type: string
+        required: false
+      upload_artifacts:
+        description: "Upload the VSIX and Zed WASM for the release pipeline"
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   clients:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -39,11 +52,20 @@ jobs:
           npm run generate --prefix extensions/shared/tree-sitter-neutron
           git diff --exit-code -- extensions/shared/tree-sitter-neutron/src
           npm test --prefix extensions/shared/tree-sitter-neutron
+      - name: Upload VSIX
+        if: ${{ inputs.upload_artifacts }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-vsix
+          path: extensions/vscode/*.vsix
+          if-no-files-found: error
 
   zed:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
@@ -59,3 +81,10 @@ jobs:
         run: |
           cargo test --locked --manifest-path extensions/zed/Cargo.toml
           cargo build --locked --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip1 --release
+      - name: Upload Zed WASM
+        if: ${{ inputs.upload_artifacts }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-wasm
+          path: extensions/zed/target/wasm32-wasip1/release/*.wasm
+          if-no-files-found: error

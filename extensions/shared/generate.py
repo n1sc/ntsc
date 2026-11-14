@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = json.loads((ROOT / "extensions/shared/contract.json").read_text())
+RELEASE = json.loads((ROOT / "extensions/shared/release.json").read_text())
 TOKEN_SOURCE = (ROOT / "crates/ntsc-ast/src/token.rs").read_text()
 KEYWORDS = sorted(set(re.findall(r'=> Some\("([a-z]+)"\)', TOKEN_SOURCE)))
 TYPES = ["int", "float", "string", "bool", "array", "object", "option", "result", "any", "pointer", "slice"]
@@ -192,7 +193,7 @@ def generated_files():
         'roots = ["neutron.toml"]\ncomment-token = "#"\nlanguage-servers = ["ntsc"]\n'
         'indent = { tab-width = 4, unit = "    " }\n\n'
         '[[grammar]]\nname = "neutron"\n'
-        'source = { git = "https://github.com/n1sc/ntsc.git", rev = "main", subpath = "extensions/shared/tree-sitter-neutron" }\n'
+        f'source = {{ git = "{RELEASE["grammar"]["repository"]}.git", rev = "{RELEASE["grammar"]["rev"]}", subpath = "extensions/shared/tree-sitter-neutron" }}\n'
     )
     yield "extensions/other/helix/config.toml", (
         "# Optional bindings; merge into your existing Helix configuration.\n"
@@ -216,7 +217,7 @@ def generated_files():
             "selector": language["scope"],
         })
     license_text = (ROOT / "LICENSE").read_text()
-    for directory in ["vscode", "zed", "nvim", "emacs", "other/vim", "other/sublime", "other/helix", "shared/tree-sitter-neutron"]:
+    for directory in ["vscode", "nvim", "emacs", "other/vim", "other/sublime", "other/helix", "shared/tree-sitter-neutron"]:
         yield f"extensions/{directory}/LICENSE", license_text
 
 

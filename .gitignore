@@ -61,3 +61,6 @@ TODO.md
 /extensions/zed/extension.wasm
 /extensions/zed/grammars/
 /extensions/shared/tree-sitter-neutron/*.so
+
+# Extension release output
+/extensions/dist/

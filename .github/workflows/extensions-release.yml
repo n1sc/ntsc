@@ -1,0 +1,152 @@
+name: Extensions release
+
+# Independent from the compiler release: this workflow only runs for
+# extensions-v* tags, which the compiler's v* trigger does not match.
+
+on:
+  push:
+    tags: ["extensions-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing extensions-vX.Y.Z tag"
+        required: true
+      dry_run:
+        description: "Verify and package only"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extensions-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          case "$tag" in
+            extensions-v*) ;;
+            *) echo "invalid tag: $tag" >&2; exit 1 ;;
+          esac
+          version="${tag#extensions-v}"
+          case "$version" in
+            *[!0-9.]*|.*|*.|*..*) echo "invalid version: $version" >&2; exit 1 ;;
+          esac
+          python3 -B scripts/extensions-version.py check --expect-tag "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: meta
+    uses: ./.github/workflows/extensions.yml
+    with:
+      ref: ${{ needs.meta.outputs.tag }}
+      upload_artifacts: true
+
+  package:
+    needs: [meta, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Verify release metadata
+        run: |
+          python3 -B scripts/extensions-version.py check --strict-grammar --expect-tag "${{ needs.meta.outputs.tag }}"
+          python3 -B extensions/shared/generate.py --check
+          git diff --exit-code -- extensions
+      - name: Package artifacts
+        run: |
+          sh scripts/package-extensions.sh \
+            --version "${{ needs.meta.outputs.version }}" \
+            --out dist/extensions \
+            --vsix "$(find artifacts/vscode-vsix -name '*.vsix' -print -quit)" \
+            --wasm "$(find artifacts/zed-wasm -name '*.wasm' -print -quit)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extensions-dist
+          path: dist/extensions/*
+          if-no-files-found: error
+
+  release:
+    needs: [meta, package]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: extensions-dist
+          path: dist/extensions
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.meta.outputs.tag }}
+          name: Neutron editor extensions v${{ needs.meta.outputs.version }}
+          files: dist/extensions/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+  publish:
+    needs: [meta, package, release]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    environment: registry-publish
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Enable pnpm
+        run: corepack enable pnpm
+      - uses: actions/download-artifact@v4
+        with:
+          name: extensions-dist
+          path: dist/extensions
+      - name: Publish VS Code Marketplace and Open VSX
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          sh scripts/publish-vscode.sh \
+            --version "${{ needs.meta.outputs.version }}" \
+            --vsix "dist/extensions/neutron-${{ needs.meta.outputs.version }}.vsix"
+      - name: Publish Zed registry PR
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRY_GITHUB_TOKEN }}
+        run: sh scripts/publish-zed.sh --version "${{ needs.meta.outputs.version }}"
+      - name: Publish MELPA mirror and recipe PR
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRY_GITHUB_TOKEN }}
+        run: sh scripts/publish-melpa.sh --version "${{ needs.meta.outputs.version }}"
+      - name: Publish Package Control mirror and channel PR
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRY_GITHUB_TOKEN }}
+        run: sh scripts/publish-package-control.sh --version "${{ needs.meta.outputs.version }}"

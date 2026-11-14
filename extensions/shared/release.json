@@ -1,0 +1,7 @@
+{
+  "version": "0.1.0",
+  "grammar": {
+    "repository": "https://github.com/n1sc/ntsc",
+    "rev": "main"
+  }
+}

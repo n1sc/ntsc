@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 
+python3 -B scripts/extensions-version.py check
 python3 -B -m unittest discover -s extensions/tests -p 'test_*.py'
 node --test extensions/vscode/test/*.test.js
 

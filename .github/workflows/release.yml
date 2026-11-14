@@ -31,6 +31,9 @@ name: release
 # only when PUBLISH is "true". Each needs one repository secret:
 # HOMEBREW_TAP_TOKEN, SCOOP_BUCKET_TOKEN, AUR_SSH_KEY.
 
+# Editor extensions release independently in `.github/workflows/extensions-release.yml`
+# under the `extensions-v*` tag namespace, so this workflow only handles compiler tags.
+
 on:
   push:
     tags:

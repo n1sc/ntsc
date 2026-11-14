@@ -22,8 +22,8 @@ it **does not commit your repository** or edit your Zed settings.
 Zed builds the Rust extension and grammar using its normal development tools.
 
 Once the grammar is available remotely, the `extensions/zed` directory itself
-can be installed as a dev extension. Pin the grammar revision before publishing
-an extension-store release.
+can be installed as a dev extension. The release workflow pins the grammar
+revision automatically; see [`../RELEASING.md`](../RELEASING.md).
 
 ## Configure and use
 
@@ -56,5 +56,13 @@ rustup target add wasm32-wasip1
 cargo build --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip1 --release
 ```
 
+The release workflow verifies this target. Zed's registry may use
+`wasm32-wasip2`; see [`../RELEASING.md`](../RELEASING.md) before changing it.
+
 The editor crate has its own Cargo workspace/lockfile so it does not pull
 Zed/WASM dependencies into the compiler's LLVM-linked workspace.
+
+## License
+
+The Zed extension is released under the MIT license. The Neutron compiler and
+the shared Tree-sitter grammar remain under NPL-1.1.

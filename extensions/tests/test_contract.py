@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import plistlib
 import subprocess
 import sys
@@ -17,6 +18,47 @@ CONTRACT = json.loads((EXTENSIONS / "shared/contract.json").read_text())
 class ContractTests(unittest.TestCase):
     def test_generated_files_are_current(self):
         subprocess.run([sys.executable, str(EXTENSIONS / "shared/generate.py"), "--check"], check=True)
+
+    def test_shared_versions_and_grammar_pins(self):
+        subprocess.run(
+            [sys.executable, "-B", str(ROOT / "scripts/extensions-version.py"), "check"],
+            check=True,
+        )
+
+    def test_release_tag_matches_version(self):
+        tag = os.environ.get("EXTENSIONS_RELEASE_TAG")
+        if not tag:
+            self.skipTest("EXTENSIONS_RELEASE_TAG is not set")
+        subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(ROOT / "scripts/extensions-version.py"),
+                "check",
+                "--expect-tag",
+                tag,
+            ],
+            check=True,
+        )
+
+    def test_strict_grammar_pin(self):
+        if os.environ.get("EXTENSIONS_STRICT_GRAMMAR") != "1":
+            self.skipTest("EXTENSIONS_STRICT_GRAMMAR is not set")
+        subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(ROOT / "scripts/extensions-version.py"),
+                "check",
+                "--strict-grammar",
+            ],
+            check=True,
+        )
+
+    def test_zed_license_is_mit(self):
+        self.assertTrue((EXTENSIONS / "zed/LICENSE").read_text().startswith("MIT License"))
+        cargo = tomllib.loads((EXTENSIONS / "zed/Cargo.toml").read_text())
+        self.assertEqual(cargo["package"]["license"], "MIT")
 
     def test_editor_files_are_valid(self):
         for file in EXTENSIONS.rglob("*"):

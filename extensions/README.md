@@ -63,14 +63,25 @@ Generated parser C and headers are committed so Zed and Helix can compile the
 grammar without requiring the grammar generator at install time.
 The generated Tree-sitter support headers retain their upstream MIT notice in
 `shared/tree-sitter-neutron/LICENSE.tree-sitter`.
-Remote grammar manifests use the repository's `main` branch; before publishing
-an editor-store release, pin both Zed and Helix to a commit containing the
-generated grammar. Local development instructions do not require publishing
-or committing your working tree.
+`extensions/shared/release.json` is the single source of truth for the shared
+version and grammar pin. Local development uses `main`; a release pins a
+commit. See [`RELEASING.md`](RELEASING.md) for the prepare, tag, verification,
+and registry-approval flow.
+
+The Zed extension is MIT-licensed so it can be published to the Zed registry.
+The compiler and the shared Tree-sitter grammar remain NPL-1.1.
+
+## Releasing
+
+Extensions release independently from the compiler under the `extensions-v*`
+tag namespace. The workflow verifies every artifact, creates one GitHub Release,
+and waits for approval on the `registry-publish` environment before any registry
+push. See [`RELEASING.md`](RELEASING.md).
 
 ## Verification
 
 ```console
+python3 scripts/extensions-version.py check
 arq test_extensions
 npm ci --prefix extensions/vscode
 npm test --prefix extensions/vscode
@@ -87,4 +98,5 @@ tests. Native Neovim, Vim, and Emacs checks run when those editors are installed
 skips are printed. Neovim's integration test starts the actual `ntsc-lsp`
 binary and checks typed receiver suggestions and signature shadowing.
 VS Code also has an extension-host smoke test in `vscode/test/host.js`; see its
-README. These source integrations are not automatically published to stores.
+README. These source integrations publish only through the approval-gated
+release workflow; a normal push or pull request never publishes to a store.
