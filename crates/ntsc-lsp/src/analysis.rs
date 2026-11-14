@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use crate::value::ValueSource;
 use ntsc_ast::expr::{Expr, FunctionParam};
 use ntsc_ast::span::Span;
 use ntsc_ast::stmt::{Program, Stmt};
@@ -91,6 +92,8 @@ pub struct Reference {
     pub is_definition: bool,
     /// Whether this is a member access (`object.name`).
     pub is_member: bool,
+    pub receiver_span: Option<Span>,
+    pub receiver_source: Option<ValueSource>,
 }
 
 /// A function-call site, used for signature help and inlay hints.
@@ -169,9 +172,17 @@ impl FileAnalysis {
             return self.symbols.get(target);
         }
         if is_member {
-            return self.member_by_name(name);
+            return None;
         }
-        self.symbols.iter().find(|symbol| symbol.name == name)
+        self.visible_symbols_at(offset)
+            .into_iter()
+            .filter(|symbol| symbol.name == name)
+            .min_by_key(|symbol| {
+                (
+                    symbol.scope_range.1.saturating_sub(symbol.scope_range.0),
+                    usize::MAX - symbol.name_span.start,
+                )
+            })
     }
 
     /// All member (method/field/enum-member) symbols with `name`.
@@ -186,10 +197,6 @@ impl FileAnalysis {
                     )
             })
             .collect()
-    }
-
-    fn member_by_name(&self, name: &str) -> Option<&Symbol> {
-        self.members_by_name(name).into_iter().next()
     }
 
     /// Every reference resolving to `symbol_idx`, plus the definition itself.
@@ -273,7 +280,7 @@ impl FileAnalysis {
         let mut best: Option<&CallSite> = None;
         for call in &self.calls {
             let span = call.paren_span;
-            if is_real_span(span) && span.start <= offset {
+            if is_real_span(span) && span.start <= offset && offset < call.full_span.end {
                 let width = call.full_span.end.saturating_sub(call.full_span.start);
                 let is_better = best.is_none_or(|current: &CallSite| {
                     width
@@ -333,6 +340,31 @@ pub fn analyze(text: &str) -> FileAnalysis {
         ..Indexer::default()
     };
     indexer.index_program(&program);
+    for call in &mut indexer.calls {
+        let start = tokens.partition_point(|token| token.span.start < call.paren_span.start);
+        if let Some(open) = tokens[start..]
+            .iter()
+            .position(|token| token.kind == TokenKind::LeftParen)
+        {
+            let start = start + open;
+            let paren = &tokens[start];
+            call.paren_span = paren.span;
+            let mut depth = 0usize;
+            for token in &tokens[start..] {
+                match token.kind {
+                    TokenKind::LeftParen => depth += 1,
+                    TokenKind::RightParen => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            call.full_span.end = token.span.end;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 
     FileAnalysis {
         text: text.to_string(),
@@ -776,6 +808,8 @@ impl Indexer {
                 target: Some(idx),
                 is_definition: true,
                 is_member: matches!(kind, SymbolKind::Method | SymbolKind::Field),
+                receiver_span: None,
+                receiver_source: None,
             });
         }
         if let Some(scope) = self.scopes.last_mut() {
@@ -792,13 +826,7 @@ impl Indexer {
             return None;
         }
         let target = if is_member {
-            self.symbols.iter().position(|symbol| {
-                symbol.name == name
-                    && matches!(
-                        symbol.kind,
-                        SymbolKind::Method | SymbolKind::Field | SymbolKind::EnumMember
-                    )
-            })
+            None
         } else {
             self.scopes
                 .iter()
@@ -811,6 +839,8 @@ impl Indexer {
             target,
             is_definition: false,
             is_member,
+            receiver_span: None,
+            receiver_source: None,
         });
         target
     }
@@ -1428,7 +1458,7 @@ impl Indexer {
             }
             Expr::Call {
                 callee,
-                paren,
+                paren: _,
                 arguments,
             } => {
                 let callee_name = match callee.as_ref() {
@@ -1440,7 +1470,12 @@ impl Indexer {
                 };
                 self.calls.push(CallSite {
                     callee_name,
-                    paren_span: *paren,
+                    paren_span: Span::new(
+                        callee.span().end,
+                        callee.span().end,
+                        callee.span().line,
+                        callee.span().column,
+                    ),
                     arg_spans: arguments.iter().map(Expr::span).collect(),
                     full_span: expr.span(),
                 });
@@ -1450,8 +1485,29 @@ impl Indexer {
                 }
             }
             Expr::Await {
-                callee, arguments, ..
+                callee,
+                arguments,
+                span,
             } => {
+                let callee_name = match callee.as_ref() {
+                    Expr::Variable { name } => Some(name.lexeme().to_string()),
+                    Expr::Member { property, .. } | Expr::OptionalMember { property, .. } => {
+                        Some(property.lexeme().to_string())
+                    }
+                    _ => None,
+                };
+                let callee_span = callee.span();
+                self.calls.push(CallSite {
+                    callee_name,
+                    paren_span: Span::new(
+                        callee_span.end,
+                        callee_span.end,
+                        callee_span.line,
+                        callee_span.column,
+                    ),
+                    arg_spans: arguments.iter().map(Expr::span).collect(),
+                    full_span: *span,
+                });
                 self.walk_expr(callee);
                 for argument in arguments {
                     self.walk_expr(argument);
@@ -1490,6 +1546,10 @@ impl Indexer {
             Expr::Member { object, property } | Expr::OptionalMember { object, property } => {
                 self.walk_expr(object);
                 self.resolve(property.lexeme(), property.span, true);
+                if let Some(reference) = self.references.last_mut() {
+                    reference.receiver_span = Some(object.span());
+                    reference.receiver_source = ValueSource::from_expression(object);
+                }
             }
             Expr::View { target, .. }
             | Expr::Borrow { target, .. }

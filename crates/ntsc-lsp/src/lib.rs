@@ -9,8 +9,12 @@
 pub mod analysis;
 pub mod convert;
 pub mod formatting;
+pub mod metadata;
+pub mod semantic;
 pub mod server;
 pub mod stdlib;
 
 pub use analysis::{FileAnalysis, Symbol, SymbolKind, analyze};
 pub use server::run_stdio;
+
+mod value;

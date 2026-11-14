@@ -80,6 +80,8 @@ Single-machine, single-threaded measurements—not a universal language ranking.
 
 ## Documentation
 
+Browse the hosted documentation at [ntsc.yasakei.dev/docs](https://ntsc.yasakei.dev/docs).
+
 | Guide | Reference |
 | --- | --- |
 | [Getting started](docs/guide/getting-started.md) | [Language reference](docs/reference/language.md) |
@@ -181,7 +183,7 @@ first-class bare-module imports as builtin modules.
 | `ntsc doc` | Generate HTML docs from `##` comments into `build/doc/` |
 | `ntsc pkg [args]` | Run the package manager |
 | `ntsc graph` | Print the module dependency graph as DOT |
-| `ntsc lsp` | Start the language server (LSP over stdio) |
+| `ntsc lsp` | Start the language server ([editor setup](docs/reference/lsp.md), LSP over stdio) |
 | `ntsc help [command]` | Show command help |
 | `ntsc --version` | Print the compiler version |
 

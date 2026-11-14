@@ -161,7 +161,10 @@ pub(crate) const COMMANDS: &[CommandDoc] = &[
         name: "lsp",
         usage: "ntsc lsp",
         summary: "Start the language server",
-        details: &["Speaks LSP over stdio for editor integration."],
+        details: &[
+            "Speaks LSP over stdio for editor integration.",
+            "Editor documentation: https://ntsc.yasakei.dev/docs/next/reference/lsp",
+        ],
         options: &[],
     },
     CommandDoc {

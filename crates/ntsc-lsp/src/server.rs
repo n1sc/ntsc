@@ -32,6 +32,8 @@ use lsp_types::{
 
 use crate::analysis::{FileAnalysis, Symbol, SymbolKind, analyze};
 use crate::convert::LineIndex;
+use crate::metadata::{MetadataCache, project_root};
+use crate::semantic::{SemanticContext, SemanticIndex, SemanticView, ValueSource};
 use crate::stdlib;
 
 const SERVER_NAME: &str = "ntsc-lsp";
@@ -51,7 +53,7 @@ pub fn run_stdio() -> i32 {
             return 1;
         }
     };
-    let _init_params = match connection.initialize(capabilities) {
+    let init_params = match connection.initialize(capabilities) {
         Ok(params) => params,
         Err(error) => {
             eprintln!("{SERVER_NAME}: initialize failed: {error}");
@@ -59,6 +61,56 @@ pub fn run_stdio() -> i32 {
         }
     };
     let mut server = Server::new(&connection);
+    match serde_json::from_value::<lsp_types::InitializeParams>(init_params) {
+        Ok(params) => {
+            server.snippets_supported = params
+                .capabilities
+                .text_document
+                .and_then(|document| document.completion)
+                .and_then(|completion| completion.completion_item)
+                .and_then(|item| item.snippet_support)
+                .unwrap_or(false);
+            if let Some(folders) = params.workspace_folders {
+                server.workspace_roots.extend(
+                    folders
+                        .into_iter()
+                        .filter_map(|folder| folder.uri.to_file_path().ok()),
+                );
+            } else {
+                // Older LSP clients provide rootUri instead of workspace folders.
+                #[allow(deprecated)]
+                if let Some(uri) = params.root_uri
+                    && let Ok(path) = uri.to_file_path()
+                {
+                    server.workspace_roots.push(path);
+                }
+            }
+            server.refresh_workspace_files();
+            if params
+                .capabilities
+                .workspace
+                .and_then(|workspace| workspace.did_change_watched_files)
+                .and_then(|files| files.dynamic_registration)
+                .unwrap_or(false)
+            {
+                let registration = serde_json::json!({"registrations":[{
+                    "id":"ntsc-watch-files","method":"workspace/didChangeWatchedFiles",
+                    "registerOptions":{"watchers":[
+                        {"globPattern":"**/*.nt"},{"globPattern":"**/*.export.json"},
+                        {"globPattern":"**/neutron.toml"}
+                    ]}
+                }]});
+                if let Err(error) = server.sender.send(Message::Request(Request::new(
+                    RequestId::from("ntsc-watch-files".to_string()),
+                    "client/registerCapability".to_string(),
+                    registration,
+                ))) {
+                    eprintln!("{SERVER_NAME}: cannot register file watcher: {error}");
+                }
+            }
+        }
+        Err(error) => eprintln!("{SERVER_NAME}: invalid initialization parameters: {error}"),
+    }
     server.main_loop(&connection);
     // Drop the server (and its cloned sender) plus the connection so the
     // IO threads observe a closed channel and terminate; otherwise `join`
@@ -75,7 +127,21 @@ pub fn run_stdio() -> i32 {
 fn server_capabilities() -> ServerCapabilities {
     ServerCapabilities {
         position_encoding: Some(PositionEncodingKind::UTF16),
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        text_document_sync: Some(TextDocumentSyncCapability::Options(
+            lsp_types::TextDocumentSyncOptions {
+                open_close: Some(true),
+                change: Some(TextDocumentSyncKind::INCREMENTAL),
+                save: Some(lsp_types::TextDocumentSyncSaveOptions::Supported(true)),
+                ..Default::default()
+            },
+        )),
+        workspace: Some(lsp_types::WorkspaceServerCapabilities {
+            workspace_folders: Some(lsp_types::WorkspaceFoldersServerCapabilities {
+                supported: Some(true),
+                change_notifications: Some(OneOf::Left(true)),
+            }),
+            ..Default::default()
+        }),
         completion_provider: Some(CompletionOptions {
             resolve_provider: Some(false),
             trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
@@ -142,18 +208,21 @@ struct Document {
     version: i32,
     text: String,
     analysis: FileAnalysis,
+    semantic: SemanticIndex,
     index: LineIndex,
 }
 
 impl Document {
     fn new(uri: Url, version: i32, text: String) -> Self {
         let analysis = analyze(&text);
+        let semantic = SemanticIndex::new(&analysis);
         let index = LineIndex::new(&text);
         Self {
             uri,
             version,
             text,
             analysis,
+            semantic,
             index,
         }
     }
@@ -161,12 +230,45 @@ impl Document {
     fn update(&mut self, version: i32, text: String) {
         self.version = version;
         self.analysis = analyze(&text);
+        self.semantic = SemanticIndex::new(&self.analysis);
         self.index = LineIndex::new(&text);
         self.text = text;
     }
 
     fn offset(&self, position: lsp_types::Position) -> Option<usize> {
         self.index.offset(&self.text, position)
+    }
+
+    fn apply_changes(
+        &mut self,
+        version: i32,
+        changes: Vec<lsp_types::TextDocumentContentChangeEvent>,
+    ) -> bool {
+        if version <= self.version {
+            return false;
+        }
+        let mut text = self.text.clone();
+        for change in changes {
+            if let Some(range) = change.range {
+                let index = LineIndex::new(&text);
+                let (Some(start), Some(end)) = (
+                    index.offset(&text, range.start),
+                    index.offset(&text, range.end),
+                ) else {
+                    eprintln!("{SERVER_NAME}: invalid document change range");
+                    return false;
+                };
+                if start > end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                    eprintln!("{SERVER_NAME}: invalid document change boundaries");
+                    return false;
+                }
+                text.replace_range(start..end, &change.text);
+            } else {
+                text = change.text;
+            }
+        }
+        self.update(version, text);
+        true
     }
 
     fn range(&self, start: usize, end: usize) -> Range {
@@ -181,6 +283,10 @@ struct Server<'a> {
     /// client, loaded from disk so definition, references, rename, and
     /// symbols work across module boundaries.
     workspace_files: HashMap<String, WorkspaceFile>,
+    reachable_files: HashMap<String, std::collections::HashSet<String>>,
+    metadata: MetadataCache,
+    workspace_roots: Vec<PathBuf>,
+    snippets_supported: bool,
     _marker: std::marker::PhantomData<&'a ()>,
 }
 
@@ -189,14 +295,18 @@ struct WorkspaceFile {
     uri: Url,
     text: String,
     analysis: FileAnalysis,
+    semantic: SemanticIndex,
+    modified: Option<std::time::SystemTime>,
     index: LineIndex,
 }
 
 /// A uniform view over open documents and disk-loaded workspace files.
+#[derive(Clone, Copy)]
 struct DocView<'x> {
     uri: &'x Url,
     text: &'x str,
     analysis: &'x FileAnalysis,
+    semantic: &'x SemanticIndex,
     index: &'x LineIndex,
 }
 
@@ -206,6 +316,10 @@ impl<'a> Server<'a> {
             sender: connection.sender.clone(),
             documents: HashMap::new(),
             workspace_files: HashMap::new(),
+            reachable_files: HashMap::new(),
+            metadata: MetadataCache::default(),
+            workspace_roots: Vec::new(),
+            snippets_supported: false,
             _marker: std::marker::PhantomData,
         }
     }
@@ -217,6 +331,7 @@ impl<'a> Server<'a> {
                 uri: &document.uri,
                 text: &document.text,
                 analysis: &document.analysis,
+                semantic: &document.semantic,
                 index: &document.index,
             });
         }
@@ -225,10 +340,105 @@ impl<'a> Server<'a> {
                 uri: &file.uri,
                 text: &file.text,
                 analysis: &file.analysis,
+                semantic: &file.semantic,
                 index: &file.index,
             });
         }
         views
+    }
+
+    fn relevant_views(&self, document: &Document) -> Vec<DocView<'_>> {
+        let Ok(path) = document.uri.to_file_path() else {
+            return self
+                .all_views()
+                .into_iter()
+                .filter(|view| view.uri == &document.uri)
+                .collect();
+        };
+        let root = project_root(&path);
+        self.all_views()
+            .into_iter()
+            .filter(|view| {
+                view.uri == &document.uri
+                    || (self
+                        .reachable_files
+                        .get(document.uri.as_str())
+                        .is_some_and(|files| files.contains(view.uri.as_str()))
+                        && view
+                            .uri
+                            .to_file_path()
+                            .is_ok_and(|path| path.starts_with(&root)))
+            })
+            .collect()
+    }
+
+    fn native_namespace<'b>(&'b self, view: DocView<'b>, name: &str) -> Option<DocView<'b>> {
+        let file = view.uri.to_file_path().ok()?;
+        let directory = file.parent()?;
+        for statement in &view.analysis.program.as_ref()?.statements {
+            if let ntsc_ast::stmt::Stmt::Use {
+                library,
+                alias,
+                is_file_path,
+                is_rust: false,
+                imported_symbols,
+                ..
+            } = statement
+            {
+                if !imported_symbols.is_empty() || (*is_file_path && alias.is_none()) {
+                    continue;
+                }
+                if alias.as_ref().unwrap_or(library).lexeme() != name {
+                    continue;
+                }
+                let mut path = if *is_file_path {
+                    directory.join(library.lexeme())
+                } else {
+                    ntsc_build::modules::vendored_import(&project_root(&file), library.lexeme())?
+                };
+                if path.extension().is_none() {
+                    path.set_extension("nt");
+                }
+                let path = normalize_path(&path);
+                return self.all_views().into_iter().find(|candidate| {
+                    candidate
+                        .uri
+                        .to_file_path()
+                        .is_ok_and(|candidate| normalize_path(&candidate) == path)
+                });
+            }
+        }
+        None
+    }
+
+    fn semantic_context<'b>(&self, views: &[DocView<'b>], current: usize) -> SemanticContext<'b> {
+        let mut namespaces = HashMap::new();
+        let mut namespaced_files = std::collections::HashSet::new();
+        for (index, view) in views.iter().enumerate() {
+            for symbol in &view.analysis.symbols {
+                if symbol.kind != SymbolKind::Module {
+                    continue;
+                }
+                if let Some(namespace) = self.native_namespace(*view, &symbol.name)
+                    && let Some(target) = views.iter().position(|view| view.uri == namespace.uri)
+                {
+                    namespaces.insert((index, symbol.name.clone()), target);
+                    namespaced_files.insert(target);
+                }
+            }
+        }
+        SemanticContext {
+            current,
+            namespaces,
+            namespaced_files,
+            views: views
+                .iter()
+                .map(|view| SemanticView {
+                    analysis: view.analysis,
+                    index: view.semantic,
+                })
+                .collect(),
+        }
     }
 
     fn main_loop(&mut self, connection: &Connection) {
@@ -239,7 +449,11 @@ impl<'a> Server<'a> {
                         break;
                     }
                 }
-                Message::Response(_) => {}
+                Message::Response(response) => {
+                    if let Some(error) = response.error {
+                        eprintln!("{SERVER_NAME}: client request failed: {}", error.message);
+                    }
+                }
                 Message::Notification(notification) => {
                     if notification.method == "exit" {
                         break;
@@ -263,6 +477,7 @@ impl<'a> Server<'a> {
         macro_rules! dispatch {
             ($request:ty, $params:ty, $handler:expr) => {
                 if let Some(current) = pending.take() {
+                    let invalid_id = current.id.clone();
                     match current
                         .extract::<$params>(<$request as lsp_types::request::Request>::METHOD)
                     {
@@ -278,6 +493,17 @@ impl<'a> Server<'a> {
                         }
                         Err(lsp_server::ExtractError::JsonError { method, error }) => {
                             eprintln!("{SERVER_NAME}: invalid params for {method}: {error}");
+                            if let Err(error) =
+                                self.sender.send(Message::Response(Response::new_err(
+                                    invalid_id,
+                                    lsp_server::ErrorCode::InvalidParams as i32,
+                                    error.to_string(),
+                                )))
+                            {
+                                eprintln!(
+                                    "{SERVER_NAME}: cannot send invalid-params response: {error}"
+                                );
+                            }
                             return false;
                         }
                     }
@@ -451,30 +677,67 @@ impl<'a> Server<'a> {
                 notification.params.clone(),
             ) {
                 let key = params.text_document.uri.as_str().to_string();
-                if let Some(change) = params.content_changes.into_iter().last() {
-                    let uri = params.text_document.uri.clone();
-                    let version = params.text_document.version;
-                    if self.documents.contains_key(&key) {
-                        if let Some(document) = self.documents.get_mut(&key) {
-                            document.update(version, change.text);
-                        }
-                    } else {
-                        let document = Document::new(uri, version, change.text);
-                        self.documents.insert(key.clone(), document);
+                if let Some(document) = self.documents.get_mut(&key) {
+                    if !document.apply_changes(params.text_document.version, params.content_changes)
+                    {
+                        return;
                     }
                     self.refresh_workspace_files();
-                    if let Some(document) = self.documents.get(&key) {
+                    for document in self.documents.values() {
                         self.publish_diagnostics(document);
                     }
                 }
             }
         } else if notification.method == "textDocument/didClose"
-            && let Ok(params) =
-                serde_json::from_value::<lsp_types::DidCloseTextDocumentParams>(notification.params)
+            && let Ok(params) = serde_json::from_value::<lsp_types::DidCloseTextDocumentParams>(
+                notification.params.clone(),
+            )
         {
             let key = params.text_document.uri.as_str().to_string();
             let _ = self.documents.remove(&key);
             self.refresh_workspace_files();
+            let clear = PublishDiagnosticsParams {
+                uri: params.text_document.uri,
+                diagnostics: Vec::new(),
+                version: None,
+            };
+            match serde_json::to_value(clear) {
+                Ok(params) => {
+                    if let Err(error) = self.sender.send(Message::Notification(Notification::new(
+                        "textDocument/publishDiagnostics".to_string(),
+                        params,
+                    ))) {
+                        eprintln!("{SERVER_NAME}: cannot clear diagnostics: {error}");
+                    }
+                }
+                Err(error) => eprintln!("{SERVER_NAME}: cannot encode diagnostics: {error}"),
+            }
+        } else if notification.method == "workspace/didChangeWorkspaceFolders" {
+            if let Ok(params) = serde_json::from_value::<lsp_types::DidChangeWorkspaceFoldersParams>(
+                notification.params,
+            ) {
+                for folder in params.event.removed {
+                    if let Ok(path) = folder.uri.to_file_path() {
+                        self.workspace_roots.retain(|root| root != &path);
+                    }
+                }
+                for folder in params.event.added {
+                    if let Ok(path) = folder.uri.to_file_path()
+                        && !self.workspace_roots.contains(&path)
+                    {
+                        self.workspace_roots.push(path);
+                    }
+                }
+                self.refresh_workspace_files();
+            }
+        } else if matches!(
+            notification.method.as_str(),
+            "textDocument/didSave" | "workspace/didChangeWatchedFiles"
+        ) {
+            self.refresh_workspace_files();
+            for document in self.documents.values() {
+                self.publish_diagnostics(document);
+            }
         }
     }
 
@@ -486,15 +749,66 @@ impl<'a> Server<'a> {
     fn refresh_workspace_files(&mut self) {
         use std::collections::HashSet;
         let mut stack: Vec<(PathBuf, String)> = Vec::new();
+        let mut roots = Vec::new();
+        let mut entries = HashMap::new();
         for document in self.documents.values() {
             if let Ok(path) = document.uri.to_file_path()
                 && let Some(dir) = path.parent()
             {
-                for import in file_imports_of(&document.analysis) {
+                let root = project_root(&path);
+                if !roots.contains(&root) {
+                    match std::fs::read_to_string(root.join("neutron.toml")) {
+                        Ok(source) => match ntsc_build::parse(&source) {
+                            Ok(config) => {
+                                let entry = root.join(config.entry);
+                                if entry.is_file() {
+                                    if let Ok(uri) = Url::from_file_path(&entry) {
+                                        entries.insert(root.clone(), uri.to_string());
+                                    }
+                                    stack
+                                        .push((root.clone(), entry.to_string_lossy().into_owned()));
+                                }
+                            }
+                            Err(errors) => {
+                                eprintln!("{SERVER_NAME}: invalid project manifest: {errors:?}")
+                            }
+                        },
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            eprintln!("{SERVER_NAME}: cannot read project manifest: {error}")
+                        }
+                    }
+                    roots.push(root);
+                }
+                for import in file_imports_of(&document.analysis, dir) {
                     stack.push((dir.to_path_buf(), import));
                 }
             }
         }
+        for root in &self.workspace_roots {
+            if roots.contains(root) {
+                continue;
+            }
+            match std::fs::read_to_string(root.join("neutron.toml")) {
+                Ok(source) => match ntsc_build::parse(&source) {
+                    Ok(config) => {
+                        let entry = root.join(config.entry);
+                        if entry.is_file() {
+                            if let Ok(uri) = Url::from_file_path(&entry) {
+                                entries.insert(root.clone(), uri.to_string());
+                            }
+                            stack.push((root.clone(), entry.to_string_lossy().into_owned()));
+                        }
+                    }
+                    Err(errors) => eprintln!("{SERVER_NAME}: invalid project manifest: {errors:?}"),
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => eprintln!("{SERVER_NAME}: cannot read project manifest: {error}"),
+            }
+            roots.push(root.clone());
+        }
+        self.metadata.refresh(&roots);
+        let mut previous = std::mem::take(&mut self.workspace_files);
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut loaded: HashMap<String, WorkspaceFile> = HashMap::new();
         while let Some((dir, import)) = stack.pop() {
@@ -509,21 +823,60 @@ impl<'a> Server<'a> {
             if !seen.insert(normalized.clone()) {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(&normalized) else {
-                continue;
-            };
-            if text.len() > MAX_WORKSPACE_FILE_BYTES {
-                continue;
-            }
             let Ok(uri) = Url::from_file_path(&normalized) else {
                 continue;
             };
             if self.documents.contains_key(uri.as_str()) {
                 continue;
             }
+            let metadata = match std::fs::metadata(&normalized) {
+                Ok(metadata) if metadata.len() <= MAX_WORKSPACE_FILE_BYTES as u64 => metadata,
+                Ok(_) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "{SERVER_NAME}: cannot read {}: {error}",
+                        normalized.display()
+                    );
+                    continue;
+                }
+            };
+            let modified = match metadata.modified() {
+                Ok(modified) => Some(modified),
+                Err(error) => {
+                    eprintln!(
+                        "{SERVER_NAME}: cannot inspect {}: {error}",
+                        normalized.display()
+                    );
+                    None
+                }
+            };
+            if let Some(cached) = previous.remove(uri.as_str())
+                && modified.is_some()
+                && cached.modified == modified
+                && cached.text.len() as u64 == metadata.len()
+            {
+                if let Some(parent) = normalized.parent() {
+                    for nested in file_imports_of(&cached.analysis, parent) {
+                        stack.push((parent.to_path_buf(), nested));
+                    }
+                }
+                loaded.insert(uri.as_str().to_string(), cached);
+                continue;
+            }
+            let text = match std::fs::read_to_string(&normalized) {
+                Ok(text) => text,
+                Err(error) => {
+                    eprintln!(
+                        "{SERVER_NAME}: cannot read {}: {error}",
+                        normalized.display()
+                    );
+                    continue;
+                }
+            };
             let analysis = analyze(&text);
+            let semantic = SemanticIndex::new(&analysis);
             if let Some(parent) = normalized.parent() {
-                for nested in file_imports_of(&analysis) {
+                for nested in file_imports_of(&analysis, parent) {
                     stack.push((parent.to_path_buf(), nested));
                 }
             }
@@ -534,11 +887,55 @@ impl<'a> Server<'a> {
                     uri,
                     text,
                     analysis,
+                    semantic,
+                    modified,
                     index,
                 },
             );
         }
         self.workspace_files = loaded;
+        let mut edges = HashMap::new();
+        for view in self.all_views() {
+            let Ok(path) = view.uri.to_file_path() else {
+                continue;
+            };
+            let Some(directory) = path.parent() else {
+                continue;
+            };
+            let imports = file_imports_of(view.analysis, directory)
+                .into_iter()
+                .filter_map(|import| {
+                    let mut path = directory.join(import);
+                    if path.extension().is_none() {
+                        path.set_extension("nt");
+                    }
+                    Url::from_file_path(normalize_path(&path))
+                        .ok()
+                        .map(|uri| uri.to_string())
+                })
+                .collect::<Vec<_>>();
+            edges.insert(view.uri.to_string(), imports);
+        }
+        self.reachable_files.clear();
+        for document in self.documents.values() {
+            let mut stack = vec![document.uri.to_string()];
+            if let Ok(path) = document.uri.to_file_path()
+                && let Some(entry) = entries.get(&project_root(&path))
+            {
+                stack.push(entry.clone());
+            }
+            let mut reached = HashSet::new();
+            while let Some(uri) = stack.pop() {
+                if !reached.insert(uri.clone()) {
+                    continue;
+                }
+                if let Some(imports) = edges.get(&uri) {
+                    stack.extend(imports.iter().cloned());
+                }
+            }
+            self.reachable_files
+                .insert(document.uri.to_string(), reached);
+        }
     }
 
     fn document_for(&self, uri: &Url) -> Option<&Document> {
@@ -547,12 +944,16 @@ impl<'a> Server<'a> {
 
     /// Whether any analyzed file defines `name` as a namespace-visible
     /// symbol (i.e. anything but a local variable or parameter).
-    fn workspace_knows(&self, name: &str) -> bool {
-        self.all_views().iter().any(|view| {
-            view.analysis
-                .symbols
-                .iter()
-                .any(|symbol| symbol.name == name && is_cross_file(symbol))
+    fn workspace_knows(&self, document: &Document, name: &str) -> bool {
+        self.relevant_views(document).iter().any(|view| {
+            view.analysis.symbols.iter().any(|symbol| {
+                symbol.name == name
+                    && is_cross_file(symbol)
+                    && !view
+                        .semantic
+                        .private_symbols
+                        .contains(&symbol.name_span.start)
+            })
         })
     }
 
@@ -576,7 +977,7 @@ impl<'a> Server<'a> {
         // suppress it rather than crying wolf on every cross-module call.
         for error in &analysis.resolve_errors {
             if let Some(name) = undefined_name_of(&error.message)
-                && self.workspace_knows(name)
+                && self.workspace_knows(document, name)
             {
                 continue;
             }
@@ -594,7 +995,7 @@ impl<'a> Server<'a> {
         }
         for error in &analysis.type_errors {
             if let Some(name) = undefined_name_of(&error.message)
-                && self.workspace_knows(name)
+                && self.workspace_knows(document, name)
             {
                 continue;
             }
@@ -634,23 +1035,135 @@ impl<'a> Server<'a> {
 
     // ── Hover ──
 
-    fn hover(&self, params: lsp_types::HoverParams) -> Option<Hover> {
-        let uri = &params.text_document_position_params.text_document.uri;
-        let document = self.document_for(uri)?;
-        let offset = document.offset(params.text_document_position_params.position)?;
-        let contents: String = match document.analysis.identifier_at(offset) {
-            Some((name, _, true)) => self.member_hover(document, name),
-            Some((name, _, false)) => self
-                .symbol_hover(document, name, offset)
-                .or_else(|| self.cross_file_hover(document, name)),
-            None => None,
+    fn binding_at<'b>(
+        &'b self,
+        document: &'b Document,
+        name: &str,
+        offset: usize,
+    ) -> Option<(DocView<'b>, &'b Symbol)> {
+        let mut views = self.relevant_views(document);
+        let current = views.iter().position(|view| view.uri == &document.uri)?;
+        views[current] = DocView {
+            uri: &document.uri,
+            text: &document.text,
+            analysis: &document.analysis,
+            semantic: &document.semantic,
+            index: &document.index,
+        };
+        let context = self.semantic_context(&views, current);
+        let (owner, symbol) = context.named(name, offset)?;
+        Some((views[owner], symbol))
+    }
+
+    fn rust_module_for(
+        &self,
+        document: &Document,
+        qualifier: &str,
+        offset: usize,
+    ) -> Option<&crate::metadata::RustModule> {
+        let name = qualifier.trim_start_matches('@');
+        if !qualifier.starts_with('@')
+            && self
+                .binding_at(document, name, offset)
+                .is_some_and(|(_, symbol)| symbol.kind != SymbolKind::Module)
+        {
+            return None;
         }
-        // Keywords are their own token kinds, so they only reach hover
-        // through the token under the cursor.
-        .or_else(|| {
+        let path = document.uri.to_file_path().ok()?;
+        let root = project_root(&path);
+        let mut imported = None;
+        for view in self.relevant_views(document) {
+            let analysis = if view.uri == &document.uri {
+                &document.analysis
+            } else {
+                view.analysis
+            };
+            let Some(program) = &analysis.program else {
+                continue;
+            };
+            for statement in &program.statements {
+                if let ntsc_ast::stmt::Stmt::Use {
+                    library,
+                    alias,
+                    is_rust: true,
+                    ..
+                } = statement
+                {
+                    if alias
+                        .as_ref()
+                        .unwrap_or(library)
+                        .lexeme()
+                        .trim_start_matches('@')
+                        != name
+                    {
+                        continue;
+                    }
+                    let module = self.metadata.module(&root, library.lexeme())?;
+                    if imported.is_some_and(|previous: &crate::metadata::RustModule| {
+                        previous.module != module.module
+                    }) {
+                        return None;
+                    }
+                    imported = Some(module);
+                }
+            }
+        }
+        imported
+    }
+
+    fn rust_function_at(
+        &self,
+        document: &Document,
+        offset: usize,
+    ) -> Option<(&crate::metadata::RustModule, &crate::metadata::RustFunction)> {
+        let (_, span, member) = document.analysis.identifier_at(offset)?;
+        if !member {
+            return None;
+        }
+        let prefix = document.text.get(..span.end)?;
+        let (qualifier, name) = member_context(prefix)?;
+        let module = self.rust_module_for(document, qualifier, offset)?;
+        let function = module
+            .functions
+            .iter()
+            .find(|function| function.name == name && function.callable())?;
+        Some((module, function))
+    }
+
+    fn hover(&self, params: lsp_types::HoverParams) -> Option<Hover> {
+        let position = params.text_document_position_params;
+        let document = self.document_for(&position.text_document.uri)?;
+        let offset = document.offset(position.position)?;
+        let contents = if let Some((module, function)) = self.rust_function_at(document, offset) {
+            format!(
+                "```ntsc\n{}\n```\n\n{}",
+                function.signature(&module.module),
+                function.doc
+            )
+        } else if let Some((_, symbol)) = self.resolved_symbol_at(document, offset) {
+            if symbol.kind == SymbolKind::Module {
+                stdlib::module(symbol.name.trim_start_matches('@'))
+                    .map(|module| module.description.to_string())
+                    .unwrap_or_else(|| symbol_markdown(symbol))
+            } else {
+                symbol_markdown(symbol)
+            }
+        } else if let Some((name, span, true)) = document.analysis.identifier_at(offset) {
+            let (qualifier, _) = member_context(document.text.get(..span.end)?)?;
+            let (_, binding) = self.binding_at(document, qualifier, offset)?;
+            if binding.kind != SymbolKind::Module {
+                return None;
+            }
+            let module = stdlib::module(qualifier)?;
+            let function = module
+                .functions
+                .iter()
+                .find(|function| function.name == name)?;
+            format!("```ntsc\n{}\n```", function.detail)
+        } else {
             let keyword = document.analysis.keyword_at(offset)?;
-            builtin_markdown(keyword).or_else(|| keyword_markdown(keyword))
-        })?;
+            builtin_markdown(keyword).or_else(|| keyword_markdown(keyword))?
+        };
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
@@ -660,97 +1173,17 @@ impl<'a> Server<'a> {
         })
     }
 
-    fn symbol_hover(&self, document: &Document, name: &str, offset: usize) -> Option<String> {
-        if let Some(symbol) = document.analysis.definition_at(offset) {
-            // A `use` statement defines a module symbol whose signature says
-            // nothing beyond its own name; for a stdlib module fall through to
-            // the curated entry, which lists what the module offers.
-            let stdlib_import =
-                symbol.kind == SymbolKind::Module && stdlib::module(&symbol.name).is_some();
-            if !stdlib_import {
-                return Some(symbol_markdown(symbol));
-            }
-        }
-        if let Some(markdown) = builtin_markdown(name) {
-            return Some(markdown);
-        }
-        if let Some(module) = stdlib::module(name) {
-            return Some(format!(
-                "```neutron\nuse {}\n```\n*stdlib module* — {}\n\nFunctions: {}",
-                module.name,
-                module.description,
-                module
-                    .functions
-                    .iter()
-                    .map(|function| format!("`{}`", function.name))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        keyword_markdown(name)
-    }
-
-    /// Hover for a symbol that is not declared in this file: the flat
-    /// namespace means it may live in an imported module.
-    fn cross_file_hover(&self, current: &Document, name: &str) -> Option<String> {
-        for view in self.all_views() {
-            if view.uri == &current.uri {
-                continue;
-            }
-            if let Some(symbol) = view
-                .analysis
-                .symbols
-                .iter()
-                .find(|symbol| symbol.name == name && is_cross_file(symbol))
-            {
-                let mut markdown = symbol_markdown(symbol);
-                markdown.push_str(&format!(
-                    "\n\n*defined in {}*",
-                    view.uri
-                        .path_segments()
-                        .and_then(|mut segments| segments.next_back())
-                        .unwrap_or_default()
-                ));
-                return Some(markdown);
-            }
-        }
-        None
-    }
-
-    fn member_hover(&self, document: &Document, name: &str) -> Option<String> {
-        let mut sections = Vec::new();
-        for symbol in document.analysis.members_by_name(name) {
-            let container = symbol.container.as_deref().unwrap_or("?");
-            sections.push(format!(
-                "```neutron\n{}\n```\n*{} of `{container}`*",
-                symbol.detail,
-                symbol.kind.label()
-            ));
-        }
-        for module in stdlib::MODULES {
-            for function in module.functions {
-                if function.name == name {
-                    sections.push(format!(
-                        "```neutron\n{}\n```\n*stdlib function of `{}`*",
-                        function.detail, module.name,
-                    ));
-                }
-            }
-        }
-        if sections.is_empty() {
-            None
-        } else {
-            sections.dedup();
-            Some(sections.join("\n\n---\n\n"))
-        }
-    }
-
     // ── Completion ──
 
     fn completion(&self, params: lsp_types::CompletionParams) -> Option<CompletionResponse> {
         let uri = &params.text_document_position.text_document.uri;
         let document = self.document_for(uri)?;
         let offset = document.offset(params.text_document_position.position)?;
+        if !completion_code_position(document, offset) {
+            return Some(CompletionResponse::Array(Vec::new()));
+        }
+        let recovered = completion_document(document, offset);
+        let document = recovered.as_ref().unwrap_or(document);
         let line_start = document.text[..offset.min(document.text.len())]
             .rfind('\n')
             .map_or(0, |index| index + 1);
@@ -759,10 +1192,20 @@ impl<'a> Server<'a> {
             .get(line_start..offset.min(document.text.len()))?;
         let mut items = Vec::new();
         if let Some((qualifier, partial)) = member_context(prefix) {
-            items.extend(self.member_completions(document, qualifier, partial));
+            items.extend(self.member_completions(document, qualifier, partial, offset));
             return Some(CompletionResponse::Array(items));
         }
         if is_use_context(prefix) {
+            if let Ok(path) = document.uri.to_file_path() {
+                for module in self.metadata.modules(&project_root(&path)) {
+                    items.push(CompletionItem {
+                        label: format!("@{}", module.module),
+                        kind: Some(CompletionItemKind::MODULE),
+                        detail: Some("Cached Rust adaptor".to_string()),
+                        ..CompletionItem::default()
+                    });
+                }
+            }
             for module in stdlib::MODULES {
                 items.push(CompletionItem {
                     label: module.name.to_string(),
@@ -799,6 +1242,9 @@ impl<'a> Server<'a> {
 
         // Locals and parameters first: they are what the user is writing.
         for symbol in document.analysis.visible_symbols_at(offset) {
+            if matches!(symbol.kind, SymbolKind::Test | SymbolKind::EnumMember) {
+                continue;
+            }
             let Some(tier) = matches(&symbol.name) else {
                 continue;
             };
@@ -808,11 +1254,10 @@ impl<'a> Server<'a> {
                 kind: Some(completion_kind(symbol.kind)),
                 detail: Some(symbol.detail.clone()),
                 documentation: documentation_of(&symbol.docs),
-                sort_text: Some(rank(proximity, &symbol.name)),
+                sort_text: Some(format!("{proximity}{tier}{}", symbol.name)),
                 filter_text: Some(symbol.name.clone()),
                 ..CompletionItem::default()
             });
-            let _ = tier;
         }
 
         // Declaration keywords are noise in the middle of an expression
@@ -830,7 +1275,9 @@ impl<'a> Server<'a> {
                     ..CompletionItem::default()
                 });
             }
-            items.extend(snippet_completions(partial));
+            if self.snippets_supported {
+                items.extend(snippet_completions(partial));
+            }
         }
 
         for (builtin, detail) in stdlib::BUILTINS {
@@ -846,6 +1293,12 @@ impl<'a> Server<'a> {
             });
         }
         for module in stdlib::MODULES {
+            if !self
+                .binding_at(document, module.name, offset)
+                .is_some_and(|(_, symbol)| symbol.kind == SymbolKind::Module)
+            {
+                continue;
+            }
             if matches(module.name).is_none() {
                 continue;
             }
@@ -883,7 +1336,8 @@ impl<'a> Server<'a> {
                 .cmp(&right.sort_text)
                 .then_with(|| left.label.cmp(&right.label))
         });
-        items.dedup_by(|right, left| left.label == right.label);
+        let mut seen = std::collections::HashSet::new();
+        items.retain(|item| seen.insert(item.label.clone()));
         Some(CompletionResponse::Array(items))
     }
 
@@ -891,18 +1345,29 @@ impl<'a> Server<'a> {
     fn workspace_symbols_for(
         &self,
         current: &Document,
-        offset: usize,
+        _offset: usize,
     ) -> Vec<(String, SymbolKind, String, String)> {
         let mut found: Vec<(String, SymbolKind, String, String)> = Vec::new();
-        for view in self.all_views() {
+        let views = self.relevant_views(current);
+        let current_view = views
+            .iter()
+            .position(|view| view.uri == &current.uri)
+            .unwrap_or(0);
+        let context = self.semantic_context(&views, current_view);
+        for (index, view) in views.iter().enumerate() {
             if view.uri == &current.uri {
                 continue;
             }
+            if context.namespaced_files.contains(&index) {
+                continue;
+            }
             for symbol in &view.analysis.symbols {
-                if !is_cross_file(symbol) {
-                    continue;
-                }
-                if symbol.name_span.start < offset && offset < symbol.name_span.end {
+                if !is_cross_file(symbol)
+                    || view
+                        .semantic
+                        .private_symbols
+                        .contains(&symbol.name_span.start)
+                {
                     continue;
                 }
                 if found.iter().any(|(name, ..)| *name == symbol.name) {
@@ -925,9 +1390,55 @@ impl<'a> Server<'a> {
         document: &Document,
         qualifier: &str,
         partial: &str,
+        offset: usize,
     ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
-        if let Some(module) = stdlib::module(qualifier) {
+        if let Some(module) = self.rust_module_for(document, qualifier, offset) {
+            for function in &module.functions {
+                if !function.callable() || !function.name.starts_with(partial) {
+                    continue;
+                }
+                items.push(CompletionItem {
+                    label: function.name.clone(),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some(function.signature(&module.module)),
+                    documentation: documentation_of(&function.doc),
+                    ..CompletionItem::default()
+                });
+            }
+            return items;
+        }
+        let qualifier = qualifier.trim_start_matches('@');
+        let resolved_binding = self.binding_at(document, qualifier, offset);
+        let binding = resolved_binding.as_ref().map(|(_, symbol)| *symbol);
+        if binding.is_some_and(|symbol| symbol.kind == SymbolKind::Module) {
+            let Some((view, _)) = resolved_binding.as_ref() else {
+                return items;
+            };
+            if let Some(namespace) = self.native_namespace(*view, qualifier) {
+                for symbol in &namespace.analysis.symbols {
+                    if is_cross_file(symbol)
+                        && symbol.name.starts_with(partial)
+                        && !namespace
+                            .semantic
+                            .private_symbols
+                            .contains(&symbol.name_span.start)
+                    {
+                        items.push(CompletionItem {
+                            label: symbol.name.clone(),
+                            kind: Some(completion_kind(symbol.kind)),
+                            detail: Some(symbol.detail.clone()),
+                            documentation: documentation_of(&symbol.docs),
+                            ..CompletionItem::default()
+                        });
+                    }
+                }
+                return items;
+            }
+        }
+        if binding.is_some_and(|symbol| symbol.kind == SymbolKind::Module)
+            && let Some(module) = stdlib::module(qualifier)
+        {
             for function in module.functions {
                 if !partial.is_empty() && !function.name.starts_with(partial) {
                     continue;
@@ -941,12 +1452,40 @@ impl<'a> Server<'a> {
             }
             return items;
         }
-        for symbol in &document.analysis.symbols {
-            let is_member = matches!(
-                symbol.kind,
-                SymbolKind::Method | SymbolKind::Field | SymbolKind::EnumMember
-            );
-            if !is_member || (!partial.is_empty() && !symbol.name.starts_with(partial)) {
+        let views = self.relevant_views(document);
+        let Some(current) = views.iter().position(|view| view.uri == &document.uri) else {
+            return items;
+        };
+        let mut context = self.semantic_context(&views, current);
+        context.views = views
+            .iter()
+            .map(|view| {
+                if view.uri == &document.uri {
+                    SemanticView {
+                        analysis: &document.analysis,
+                        index: &document.semantic,
+                    }
+                } else {
+                    SemanticView {
+                        analysis: view.analysis,
+                        index: view.semantic,
+                    }
+                }
+            })
+            .collect();
+        let receiver_end = offset.saturating_sub(partial.len());
+        let Some(base) = document
+            .text
+            .get(..receiver_end)
+            .and_then(|text| text.rfind(qualifier))
+        else {
+            return items;
+        };
+        let Some(source) = ValueSource::parse(qualifier, base) else {
+            return items;
+        };
+        for (_, symbol) in context.members(&source) {
+            if !partial.is_empty() && !symbol.name.starts_with(partial) {
                 continue;
             }
             items.push(CompletionItem {
@@ -961,153 +1500,125 @@ impl<'a> Server<'a> {
 
     // ── Definition / references / highlight ──
 
+    fn resolved_symbol_for_view<'b>(
+        &'b self,
+        document: &'b Document,
+        view: DocView<'b>,
+        offset: usize,
+    ) -> Option<(DocView<'b>, &'b Symbol)> {
+        let mut views = self.relevant_views(document);
+        let current = views
+            .iter()
+            .position(|candidate| candidate.uri == view.uri)?;
+        if view.uri == &document.uri {
+            views[current] = view;
+        }
+        let context = self.semantic_context(&views, current);
+        let (name, _, member) = view.analysis.identifier_at(offset)?;
+        let reference = view.analysis.references.iter().find(|reference| {
+            reference.name == name && reference.span.start <= offset && offset <= reference.span.end
+        });
+        let (owner, symbol) =
+            if member && reference.is_some_and(|reference| !reference.is_definition) {
+                context.member(reference?.receiver_source.as_ref()?, name)
+            } else if let Some(target) = reference.and_then(|reference| reference.target) {
+                view.analysis
+                    .symbols
+                    .get(target)
+                    .map(|symbol| (current, symbol))
+            } else {
+                context.named(name, offset)
+            }?;
+        Some((views[owner], symbol))
+    }
+
+    fn resolved_symbol_at<'b>(
+        &'b self,
+        document: &'b Document,
+        offset: usize,
+    ) -> Option<(DocView<'b>, &'b Symbol)> {
+        let view = DocView {
+            uri: &document.uri,
+            text: &document.text,
+            analysis: &document.analysis,
+            semantic: &document.semantic,
+            index: &document.index,
+        };
+        self.resolved_symbol_for_view(document, view, offset)
+    }
+
     fn goto_definition(
         &self,
         params: lsp_types::GotoDefinitionParams,
     ) -> Option<lsp_types::GotoDefinitionResponse> {
-        let uri = &params.text_document_position_params.text_document.uri;
-        let document = self.document_for(uri)?;
-        let offset = document.offset(params.text_document_position_params.position)?;
-        let (name, _, is_member) = document.analysis.identifier_at(offset)?;
-        let mut locations = Vec::new();
-        if is_member {
-            for symbol in document.analysis.members_by_name(name) {
-                locations.push(Location::new(
-                    document.uri.clone(),
-                    document.range(symbol.name_span.start, symbol.name_span.end),
-                ));
-            }
-        } else if let Some(symbol) = document.analysis.definition_at(offset) {
-            locations.push(Location::new(
-                document.uri.clone(),
-                document.range(symbol.name_span.start, symbol.name_span.end),
-            ));
-        }
-        if locations.is_empty() {
-            // Fall back to the import closure: the definition may live in
-            // another module of the same flat namespace.
-            locations.extend(self.cross_file_definitions(name, is_member, uri));
-        }
-        if locations.is_empty() {
-            None
-        } else {
-            Some(lsp_types::GotoDefinitionResponse::Array(locations))
-        }
-    }
-
-    /// Definitions of `name` in files other than `except`: imported modules
-    /// first, then other open documents. Only namespace-visible symbols
-    /// qualify — locals never cross file boundaries.
-    fn cross_file_definitions(&self, name: &str, is_member: bool, except: &Url) -> Vec<Location> {
-        let mut locations = Vec::new();
-        for view in self.all_views() {
-            if view.uri == except {
-                continue;
-            }
-            if is_member {
-                for symbol in view.analysis.members_by_name(name) {
-                    locations.push(Location::new(
-                        view.uri.clone(),
-                        span_range(&view, symbol.name_span),
-                    ));
-                }
-            } else {
-                for symbol in &view.analysis.symbols {
-                    if symbol.name == name && is_cross_file(symbol) {
-                        locations.push(Location::new(
-                            view.uri.clone(),
-                            span_range(&view, symbol.name_span),
-                        ));
-                        break;
-                    }
-                }
-            }
-        }
-        locations
+        let position = params.text_document_position_params;
+        let document = self.document_for(&position.text_document.uri)?;
+        let offset = document.offset(position.position)?;
+        let (view, symbol) = self.resolved_symbol_at(document, offset)?;
+        Some(lsp_types::GotoDefinitionResponse::Scalar(Location::new(
+            view.uri.clone(),
+            span_range(&view, symbol.name_span),
+        )))
     }
 
     fn symbol_index_at(&self, document: &Document, offset: usize) -> Option<usize> {
-        let (name, _, is_member) = document.analysis.identifier_at(offset)?;
-        if is_member {
-            return document
-                .analysis
-                .members_by_name(name)
-                .into_iter()
-                .next()
-                .and_then(|symbol| {
-                    document
-                        .analysis
-                        .symbols
-                        .iter()
-                        .position(|candidate| candidate.name_span == symbol.name_span)
-                });
+        let (view, symbol) = self.resolved_symbol_at(document, offset)?;
+        if view.uri != &document.uri {
+            return None;
         }
         document
             .analysis
-            .references
+            .symbols
             .iter()
-            .find(|reference| {
-                reference.span.start <= offset
-                    && offset <= reference.span.end
-                    && reference.name == name
-            })
-            .and_then(|reference| reference.target)
-            .or_else(|| {
-                document
-                    .analysis
-                    .symbols
-                    .iter()
-                    .position(|symbol| symbol.name == name)
-            })
+            .position(|candidate| candidate.name_span == symbol.name_span)
     }
 
-    fn find_references(&self, params: lsp_types::ReferenceParams) -> Option<Vec<Location>> {
-        let uri = &params.text_document_position.text_document.uri;
-        let document = self.document_for(uri)?;
-        let offset = document.offset(params.text_document_position.position)?;
-        let symbol_idx = self.symbol_index_at(document, offset)?;
-        let (name, kind) = {
-            let symbol = document.analysis.symbols.get(symbol_idx)?;
-            (symbol.name.clone(), symbol.kind)
-        };
-        let include_declaration = params.context.include_declaration;
+    fn symbol_references(
+        &self,
+        document: &Document,
+        offset: usize,
+        declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let (target_view, target) = self.resolved_symbol_at(document, offset)?;
         let mut locations = Vec::new();
-        // Same-named, same-kind symbols in other files are the same entity:
-        // Neutron merges every module into one flat namespace. References
-        // that failed to resolve locally but textually match are counted
-        // too — their definition lives in another module.
-        for view in self.all_views() {
-            let mut matched = false;
-            for (idx, symbol) in view.analysis.symbols.iter().enumerate() {
-                if symbol.name == name && symbol.kind == kind {
-                    let declaration = symbol.name_span;
-                    for span in view.analysis.references_to(idx) {
-                        let range = span_range(&view, span);
-                        if !include_declaration && span == declaration {
-                            continue;
-                        }
-                        locations.push(Location::new(view.uri.clone(), range));
-                    }
-                    matched = true;
-                    break;
+        if declaration {
+            locations.push(Location::new(
+                target_view.uri.clone(),
+                span_range(&target_view, target.name_span),
+            ));
+        }
+        for view in self.relevant_views(document) {
+            for reference in &view.analysis.references {
+                if reference.is_definition || reference.name != target.name {
+                    continue;
                 }
-            }
-            if !matched {
-                for reference in &view.analysis.references {
-                    if reference.name == name
-                        && !reference.is_definition
-                        && !reference.is_member
-                        && reference.target.is_none()
-                    {
-                        locations.push(Location::new(
-                            view.uri.clone(),
-                            span_range(&view, reference.span),
-                        ));
-                    }
+                if let Some((owner, symbol)) =
+                    self.resolved_symbol_for_view(document, view, reference.span.start)
+                    && owner.uri == target_view.uri
+                    && symbol.name_span == target.name_span
+                {
+                    locations.push(Location::new(
+                        view.uri.clone(),
+                        span_range(&view, reference.span),
+                    ));
                 }
             }
         }
+        locations.sort_by(|left, right| {
+            left.uri
+                .as_str()
+                .cmp(right.uri.as_str())
+                .then_with(|| position_key(left.range.start).cmp(&position_key(right.range.start)))
+        });
+        locations.dedup();
         Some(locations)
+    }
+
+    fn find_references(&self, params: lsp_types::ReferenceParams) -> Option<Vec<Location>> {
+        let position = params.text_document_position;
+        let document = self.document_for(&position.text_document.uri)?;
+        let offset = document.offset(position.position)?;
+        self.symbol_references(document, offset, params.context.include_declaration)
     }
 
     fn document_highlight(
@@ -1152,7 +1663,7 @@ impl<'a> Server<'a> {
         let document = self.document_for(&params.text_document.uri)?;
         let offset = document.offset(params.position)?;
         let (name, span, _) = document.analysis.identifier_at(offset)?;
-        self.symbol_index_at(document, offset)?;
+        self.resolved_symbol_at(document, offset)?;
         Some(PrepareRenameResponse::RangeWithPlaceholder {
             range: document.range(span.start, span.end),
             placeholder: name.to_string(),
@@ -1160,72 +1671,80 @@ impl<'a> Server<'a> {
     }
 
     fn rename(&self, id: RequestId, params: lsp_types::RenameParams) -> Response {
-        let uri = params.text_document_position.text_document.uri.clone();
-        let Some(document) = self.document_for(&uri) else {
+        let position = params.text_document_position;
+        let Some(document) = self.document_for(&position.text_document.uri) else {
             return error_response(id, "document is not open");
         };
-        let Some(offset) = document.offset(params.text_document_position.position) else {
+        let Some(offset) = document.offset(position.position) else {
             return error_response(id, "position is out of range");
-        };
-        let Some(symbol_idx) = self.symbol_index_at(document, offset) else {
-            return error_response(id, "no symbol at position");
         };
         if !is_valid_name(&params.new_name) {
             return error_response(id, "invalid Neutron identifier");
         }
-        let (name, kind) = {
-            let Some(symbol) = document.analysis.symbols.get(symbol_idx) else {
-                return error_response(id, "no symbol at position");
-            };
-            (symbol.name.clone(), symbol.kind)
+        let Some((owner, target)) = self.resolved_symbol_at(document, offset) else {
+            return error_response(id, "no unambiguous symbol at position");
         };
-        let mut changes: HashMap<Url, Vec<lsp_types::TextEdit>> = HashMap::new();
-        for view in self.all_views() {
-            let mut matched = false;
-            for (idx, symbol) in view.analysis.symbols.iter().enumerate() {
-                if symbol.name == name && symbol.kind == kind {
-                    let edits: Vec<lsp_types::TextEdit> = view
-                        .analysis
-                        .references_to(idx)
-                        .into_iter()
-                        .map(|span| lsp_types::TextEdit {
-                            range: span_range(&view, span),
-                            new_text: params.new_name.clone(),
-                        })
-                        .collect();
-                    if !edits.is_empty() {
-                        changes.entry(view.uri.clone()).or_default().extend(edits);
-                    }
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                let edits: Vec<lsp_types::TextEdit> = view
-                    .analysis
-                    .references
-                    .iter()
-                    .filter(|reference| {
-                        reference.name == name
-                            && !reference.is_definition
-                            && !reference.is_member
-                            && reference.target.is_none()
-                    })
-                    .map(|reference| lsp_types::TextEdit {
-                        range: span_range(&view, reference.span),
-                        new_text: params.new_name.clone(),
-                    })
-                    .collect();
-                if !edits.is_empty() {
-                    changes.entry(view.uri.clone()).or_default().extend(edits);
-                }
+        if target.kind == SymbolKind::Method && target.name == "init" {
+            return error_response(id, "constructors cannot be renamed as ordinary methods");
+        }
+        if target.kind == SymbolKind::Module
+            && !owner.analysis.program.as_ref().is_some_and(|program| program.statements.iter().any(|statement| {
+                matches!(statement, ntsc_ast::stmt::Stmt::Use { alias: Some(alias), .. } if alias.span == target.name_span)
+            }))
+        {
+            return error_response(id, "rename a module alias, not a dependency name");
+        }
+        for view in self.relevant_views(document) {
+            if view.analysis.symbols.iter().any(|symbol| {
+                symbol.name == params.new_name
+                    && (view.uri != owner.uri || symbol.name_span != target.name_span)
+                    && ((is_cross_file(target) && is_cross_file(symbol))
+                        || (view.uri == owner.uri
+                            && symbol.container == target.container
+                            && symbol.scope_range.0 <= target.scope_range.1
+                            && target.scope_range.0 <= symbol.scope_range.1))
+            }) {
+                return error_response(id, "the new name conflicts with an existing declaration");
             }
         }
-        let edit = WorkspaceEdit {
-            changes: Some(changes),
-            ..WorkspaceEdit::default()
+        let Some(locations) = self.symbol_references(document, offset, true) else {
+            return error_response(id, "no unambiguous symbol at position");
         };
-        Response::new_ok(id, edit)
+        let mut changes: HashMap<Url, Vec<lsp_types::TextEdit>> = HashMap::new();
+        for location in locations {
+            let preserve_at = self
+                .all_views()
+                .into_iter()
+                .find(|view| view.uri == &location.uri)
+                .and_then(|view| {
+                    view.index
+                        .offset(view.text, location.range.start)
+                        .map(|offset| (view, offset))
+                })
+                .is_some_and(|(view, offset)| {
+                    view.text
+                        .get(offset..)
+                        .is_some_and(|text| text.starts_with('@'))
+                });
+            changes
+                .entry(location.uri)
+                .or_default()
+                .push(lsp_types::TextEdit {
+                    range: location.range,
+                    new_text: if preserve_at {
+                        format!("@{}", params.new_name)
+                    } else {
+                        params.new_name.clone()
+                    },
+                });
+        }
+        Response::new_ok(
+            id,
+            WorkspaceEdit {
+                changes: Some(changes),
+                ..WorkspaceEdit::default()
+            },
+        )
     }
 
     // ── Symbols ──
@@ -1301,29 +1820,88 @@ impl<'a> Server<'a> {
     // ── Signature help ──
 
     fn signature_help(&self, params: lsp_types::SignatureHelpParams) -> Option<SignatureHelp> {
-        let uri = &params.text_document_position_params.text_document.uri;
-        let document = self.document_for(uri)?;
-        let offset = document.offset(params.text_document_position_params.position)?;
+        let position = params.text_document_position_params;
+        let original = self.document_for(&position.text_document.uri)?;
+        let offset = original.offset(position.position)?;
+        let recovered = completion_document(original, offset);
+        let document = recovered.as_ref().unwrap_or(original);
         let call = document.analysis.enclosing_call(offset)?;
-        let name = call.callee_name.as_deref()?;
-        let symbol = document.analysis.callable_at(name, offset)?;
-        let parameters: Vec<ParameterInformation> = symbol
-            .params
-            .iter()
-            .map(|(param, ty)| ParameterInformation {
-                label: lsp_types::ParameterLabel::Simple(format!("{param}: {ty}")),
-                documentation: None,
-            })
-            .collect();
+        let callee_end = call.paren_span.start;
+        let prefix = document.text.get(..callee_end)?.trim_end();
+        let active = active_parameter(&document.text, call, offset);
+        let (label, documentation, parameters) = if let Some((qualifier, name)) =
+            member_context(prefix)
+        {
+            if let Some(module) = self.rust_module_for(document, qualifier, offset) {
+                let function = module
+                    .functions
+                    .iter()
+                    .find(|function| function.name == name && function.callable())?;
+                let parameters = function
+                    .params
+                    .iter()
+                    .map(|parameter| ParameterInformation {
+                        label: lsp_types::ParameterLabel::Simple(format!(
+                            "{}: {}",
+                            parameter.name, parameter.label
+                        )),
+                        documentation: None,
+                    })
+                    .collect();
+                (
+                    function.signature(&module.module),
+                    documentation_of(&function.doc),
+                    parameters,
+                )
+            } else {
+                let (_, symbol) =
+                    self.resolved_symbol_at(document, prefix.len().saturating_sub(1))?;
+                let parameters = symbol
+                    .params
+                    .iter()
+                    .map(|(name, ty)| ParameterInformation {
+                        label: lsp_types::ParameterLabel::Simple(format!("{name}: {ty}")),
+                        documentation: None,
+                    })
+                    .collect();
+                (
+                    symbol.detail.clone(),
+                    documentation_of(&symbol.docs),
+                    parameters,
+                )
+            }
+        } else {
+            let name = call.callee_name.as_deref()?;
+            let (_, symbol) = self.binding_at(document, name, prefix.len().saturating_sub(1))?;
+            if !matches!(
+                symbol.kind,
+                SymbolKind::Function | SymbolKind::AsyncFunction | SymbolKind::Method
+            ) {
+                return None;
+            }
+            let parameters = symbol
+                .params
+                .iter()
+                .map(|(name, ty)| ParameterInformation {
+                    label: lsp_types::ParameterLabel::Simple(format!("{name}: {ty}")),
+                    documentation: None,
+                })
+                .collect();
+            (
+                symbol.detail.clone(),
+                documentation_of(&symbol.docs),
+                parameters,
+            )
+        };
         Some(SignatureHelp {
             signatures: vec![SignatureInformation {
-                label: symbol.detail.clone(),
-                documentation: None,
+                label,
+                documentation,
                 parameters: Some(parameters),
-                active_parameter: Some(active_parameter(&document.text, call, offset)),
+                active_parameter: Some(active),
             }],
             active_signature: Some(0),
-            active_parameter: Some(active_parameter(&document.text, call, offset)),
+            active_parameter: Some(active),
         })
     }
 
@@ -1569,6 +2147,7 @@ impl<'a> Server<'a> {
             uri: &document.uri,
             text: &document.text,
             analysis: &document.analysis,
+            semantic: &document.semantic,
             index: &document.index,
         };
         // On an unresolved call site, jump straight to the callee wherever
@@ -1737,22 +2316,32 @@ impl<'a> Server<'a> {
 
 /// Cap on disk-loaded import-closure files: the server re-reads them on
 /// every keystroke batch, so this bounds both memory and latency.
-const MAX_WORKSPACE_FILES: usize = 64;
+const MAX_WORKSPACE_FILES: usize = 256;
 /// Files larger than this are never pulled into the import closure.
-const MAX_WORKSPACE_FILE_BYTES: usize = 1_000_000;
+const MAX_WORKSPACE_FILE_BYTES: usize = 4_000_000;
 
 /// File paths imported via `use "path"` in top-level statements.
-fn file_imports_of(analysis: &FileAnalysis) -> Vec<String> {
+fn file_imports_of(analysis: &FileAnalysis, directory: &Path) -> Vec<String> {
     let mut imports = Vec::new();
     if let Some(program) = analysis.program.as_ref() {
         for stmt in &program.statements {
             if let ntsc_ast::stmt::Stmt::Use {
                 library,
-                is_file_path: true,
+                is_file_path,
+                is_rust: false,
                 ..
             } = stmt
             {
-                let path = library.lexeme().to_string();
+                let path = if *is_file_path {
+                    library.lexeme().to_string()
+                } else {
+                    let root = project_root(&directory.join("_"));
+                    let Some(path) = ntsc_build::modules::vendored_import(&root, library.lexeme())
+                    else {
+                        continue;
+                    };
+                    path.to_string_lossy().into_owned()
+                };
                 if !path.is_empty() && !imports.contains(&path) {
                     imports.push(path);
                 }
@@ -1799,6 +2388,15 @@ fn symbol_full_range(index: &LineIndex, text: &str, symbol: &Symbol) -> Range {
 /// Neutron merges modules into a single flat namespace, so only locals
 /// (variables, parameters) are file-private.
 fn is_cross_file(symbol: &Symbol) -> bool {
+    if symbol.parent.is_some()
+        || symbol.container.is_some()
+        || matches!(
+            symbol.kind,
+            SymbolKind::Method | SymbolKind::Field | SymbolKind::EnumMember | SymbolKind::Test
+        )
+    {
+        return false;
+    }
     let is_local = matches!(symbol.kind, SymbolKind::Variable | SymbolKind::Parameter);
     if !is_local {
         return true;
@@ -1909,9 +2507,15 @@ fn full_symbol_range_legacy(index: &LineIndex, text: &str, symbol: &Symbol) -> R
 /// member-access position (`qualifier.` or `qualifier.partial`).
 fn member_context(prefix: &str) -> Option<(&str, &str)> {
     let trimmed = prefix.trim_end();
-    let dot = trimmed.rfind('.')?;
-    let (qualifier_part, after_dot) = trimmed.split_at(dot);
-    let after_dot = &after_dot[1..];
+    let tokens = ntsc_lexer::tokenize(trimmed);
+    let dot = tokens.iter().rposition(|token| {
+        matches!(
+            token.kind,
+            ntsc_ast::token::TokenKind::Dot | ntsc_ast::token::TokenKind::QuestionDot
+        )
+    })?;
+    let dot_token = &tokens[dot];
+    let after_dot = trimmed.get(dot_token.span.end..)?;
     if !after_dot.is_empty()
         && !after_dot
             .chars()
@@ -1919,18 +2523,121 @@ fn member_context(prefix: &str) -> Option<(&str, &str)> {
     {
         return None;
     }
-    let qualifier = qualifier_part
-        .rsplit(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '@'))
-        .next()?;
+    let mut start = dot_token.span.start;
+    let mut depth = 0usize;
+    for token in tokens[..dot].iter().rev() {
+        let lexeme = token.lexeme();
+        if matches!(
+            token.kind,
+            ntsc_ast::token::TokenKind::RightParen
+                | ntsc_ast::token::TokenKind::RightBracket
+                | ntsc_ast::token::TokenKind::RightBrace
+        ) {
+            depth += 1;
+        } else if matches!(
+            token.kind,
+            ntsc_ast::token::TokenKind::LeftParen
+                | ntsc_ast::token::TokenKind::LeftBracket
+                | ntsc_ast::token::TokenKind::LeftBrace
+        ) {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        } else if depth == 0
+            && !matches!(
+                token.kind,
+                ntsc_ast::token::TokenKind::Identifier(_)
+                    | ntsc_ast::token::TokenKind::This
+                    | ntsc_ast::token::TokenKind::Super
+            )
+            && !matches!(
+                token.kind,
+                ntsc_ast::token::TokenKind::Dot | ntsc_ast::token::TokenKind::QuestionDot
+            )
+            && lexeme != "@"
+        {
+            break;
+        }
+        start = token.span.start;
+    }
+    let qualifier = trimmed.get(start..dot_token.span.start)?.trim();
     if qualifier.is_empty()
         || !qualifier
             .chars()
             .next()
-            .is_some_and(|ch| ch.is_alphabetic() || ch == '_' || ch == '@')
+            .is_some_and(|ch| ch.is_alphabetic() || matches!(ch, '_' | '@' | '('))
     {
         return None;
     }
-    Some((qualifier.trim_start_matches('@'), after_dot))
+    Some((qualifier, after_dot))
+}
+
+fn completion_code_position(document: &Document, offset: usize) -> bool {
+    if document.analysis.tokens.iter().any(|token| {
+        token.span.start < offset
+            && offset < token.span.end
+            && matches!(token.kind, ntsc_ast::token::TokenKind::StringLiteral(_))
+    }) {
+        return false;
+    }
+    let Some(prefix) = document.text.get(..offset) else {
+        return false;
+    };
+    let line_start = prefix.rfind('\n').map_or(0, |position| position + 1);
+    let previous = document
+        .analysis
+        .tokens
+        .iter()
+        .filter(|token| token.span.end <= offset && token.kind != ntsc_ast::token::TokenKind::Eof)
+        .map(|token| token.span.end)
+        .max()
+        .unwrap_or(0);
+    let gap = &prefix[previous.min(offset)..];
+    if gap
+        .rfind("/*")
+        .is_some_and(|open| gap.rfind("*/").is_none_or(|close| open > close))
+    {
+        return false;
+    }
+    let gap = &prefix[previous.max(line_start).min(offset)..];
+    !gap.contains("//") && !gap.contains('#')
+}
+
+fn completion_document(document: &Document, offset: usize) -> Option<Document> {
+    if document.analysis.parse_errors.is_empty() || !document.text.is_char_boundary(offset) {
+        return None;
+    }
+    let mut text = document.text.clone();
+    text.insert_str(offset, "__ntsc_completion");
+    let mut endings = Vec::new();
+    for token in ntsc_lexer::tokenize(&text) {
+        let ending = match token.kind {
+            ntsc_ast::token::TokenKind::LeftParen => {
+                endings.push(')');
+                None
+            }
+            ntsc_ast::token::TokenKind::LeftBracket => {
+                endings.push(']');
+                None
+            }
+            ntsc_ast::token::TokenKind::LeftBrace => {
+                endings.push('}');
+                None
+            }
+            ntsc_ast::token::TokenKind::RightParen => Some(')'),
+            ntsc_ast::token::TokenKind::RightBracket => Some(']'),
+            ntsc_ast::token::TokenKind::RightBrace => Some('}'),
+            _ => None,
+        };
+        if let Some(ending) = ending
+            && endings.last() == Some(&ending)
+        {
+            endings.pop();
+        }
+    }
+    text.extend(endings.into_iter().rev());
+    Some(Document::new(document.uri.clone(), document.version, text))
 }
 
 /// Markdown hover body for a builtin value: its call signature.
@@ -2094,12 +2801,19 @@ fn snippet_completions(partial: &str) -> Vec<CompletionItem> {
 }
 
 fn is_valid_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(first) if first.is_alphabetic() || first == '_' => {}
-        _ => return false,
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_alphabetic() || character == '_')
+    {
+        return false;
     }
-    chars.all(|ch| ch.is_alphanumeric() || ch == '_')
+    let tokens = ntsc_lexer::tokenize(name);
+    matches!(tokens.first(), Some(token) if matches!(&token.kind, ntsc_ast::token::TokenKind::Identifier(identifier) if identifier == name))
+        && tokens
+            .iter()
+            .skip(1)
+            .all(|token| token.kind == ntsc_ast::token::TokenKind::Eof)
 }
 
 fn ranges_overlap(left: Range, right: Range) -> bool {
@@ -2427,3 +3141,7 @@ fn is_keyword(kind: &ntsc_ast::token::TokenKind) -> bool {
             | K::Close
     )
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod tests;

@@ -89,6 +89,7 @@ required reading order.
 | [Language reference](reference/language.md) | Look up types, statements, expressions, and grammar rules. |
 | [Standard library](reference/stdlib.md) | Find a module, function signature, and its behavior. |
 | [CLI reference](reference/cli.md) | Look up commands, manifest settings, flags, and environment variables. |
+| [Language server](reference/lsp.md) | Configure editor integration, understand completion, and diagnose workspace or Rust API issues. |
 | [Experimental features](reference/experimental.md) | Review the `[experimental]` manifest table and what each unstable feature does. |
 
 ## Compiler development
@@ -100,6 +101,7 @@ Read these when working on NTSC itself or investigating how it is implemented.
 | [Contributing](reference/contributing.md) | Build the compiler, find the relevant crate, and run the checks. |
 | [Internals](reference/internals.md) | Understand the compilation pipeline, ABI, and memory model. |
 | [Rust autogen standard](reference/rust-autogen.md) | Maintain the contract for generated Rust adaptors and export manifests. |
+| [Rust coverage audit](reference/rust-coverage-audit.md) | Read the measured cached-crate audit, its limitations, and verified adaptor checks. |
 
 The chapter tables in this README also define the website's navigation and
 reading order. When adding or moving a page, update its entry here. Keep

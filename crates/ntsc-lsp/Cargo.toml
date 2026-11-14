@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 ntsc-ast = { path = "../ntsc-ast" }
+ntsc-build = { path = "../ntsc-build" }
 ntsc-lexer = { path = "../ntsc-lexer" }
 ntsc-parser = { path = "../ntsc-parser" }
 ntsc-diag = { path = "../ntsc-diag" }

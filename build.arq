@@ -75,6 +75,12 @@ task test_codegen {
     done("codegen unit tests passed")
 }
 
+task test_lsp {
+    step("language-server unit and regression tests")
+    run "cargo test -p ntsc-lsp"
+    done("language-server tests passed")
+}
+
 task test_runtime {
     step("ntsc-runtime unit tests")
     run "cargo test -p ntsc-runtime"

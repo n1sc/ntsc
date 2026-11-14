@@ -874,6 +874,7 @@ dependencies = [
  "lsp-server",
  "lsp-types",
  "ntsc-ast",
+ "ntsc-build",
  "ntsc-diag",
  "ntsc-lexer",
  "ntsc-parser",

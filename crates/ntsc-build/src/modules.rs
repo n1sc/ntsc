@@ -473,7 +473,7 @@ fn is_vendored(root: &Path, path: &Path) -> bool {
 /// A package's entry module is either `lib.nt` at the package root or
 /// `src/lib.nt` for a package that keeps its sources under `src/`. Anything
 /// containing a path separator or an `.nt` suffix stays purely relative.
-fn vendored_import(root: &Path, import: &str) -> Option<PathBuf> {
+pub fn vendored_import(root: &Path, import: &str) -> Option<PathBuf> {
     if import.is_empty() || import.ends_with(".nt") || import.contains('/') || import.contains('\\')
     {
         return None;
