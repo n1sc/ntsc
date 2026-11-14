@@ -1,0 +1,72 @@
+{
+  "name": "neutron",
+  "displayName": "Neutron",
+  "description": "Neutron language support powered by the NTSC language server.",
+  "version": "0.1.0",
+  "publisher": "n1sc",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": { "type": "git", "url": "https://github.com/n1sc/ntsc.git", "directory": "extensions/vscode" },
+  "engines": { "vscode": "^1.82.0" },
+  "categories": ["Programming Languages"],
+  "main": "./src/extension.js",
+  "activationEvents": ["onLanguage:neutron"],
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": false },
+    "virtualWorkspaces": { "supported": false }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "package": "vsce package"
+  },
+  "dependencies": { "vscode-languageclient": "9.0.1" },
+  "devDependencies": { "@vscode/vsce": "4.1.1" },
+  "overrides": { "@vscode/vsce": { "minimatch": "11.0.8" } },
+  "contributes": {
+    "languages": [{
+      "id": "neutron",
+      "aliases": ["Neutron", "neutron"],
+      "extensions": [".nt"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "neutron",
+      "scopeName": "source.neutron",
+      "path": "./syntaxes/neutron.tmLanguage.json"
+    }],
+    "configurationDefaults": {
+      "[neutron]": { "editor.wordBasedSuggestions": "off" }
+    },
+    "configuration": {
+      "title": "Neutron",
+      "properties": {
+        "neutron.serverPath": {
+          "type": "string", "default": "ntsc", "scope": "machine-overridable",
+          "description": "Language-server executable. Set serverArgs to [] when using ntsc-lsp."
+        },
+        "neutron.serverArgs": {
+          "type": "array", "items": { "type": "string" }, "default": ["lsp"],
+          "description": "Arguments passed directly to the language-server executable."
+        },
+        "neutron.cliPath": {
+          "type": "string", "default": "ntsc", "scope": "machine-overridable",
+          "description": "Compiler executable used by explicit Build, Run, and Test commands."
+        }
+      }
+    },
+    "commands": [
+      { "command": "neutron.build", "title": "Neutron: Build" },
+      { "command": "neutron.run", "title": "Neutron: Run" },
+      { "command": "neutron.test", "title": "Neutron: Test" },
+      { "command": "neutron.restartServer", "title": "Neutron: Restart Language Server" },
+      { "command": "neutron.showOutput", "title": "Neutron: Show Language Server Output" }
+    ],
+    "taskDefinitions": [{
+      "type": "neutron",
+      "required": ["action"],
+      "properties": {
+        "action": { "type": "string", "enum": ["build", "run", "test"] },
+        "project": { "type": "string", "description": "Project directory, relative to the workspace folder." }
+      }
+    }]
+  }
+}

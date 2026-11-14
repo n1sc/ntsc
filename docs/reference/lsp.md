@@ -32,6 +32,15 @@ server, not a command-line version browser.
 
 ## Client configuration
 
+Source integrations for [VS Code](../../extensions/vscode/README.md),
+[Zed](../../extensions/zed/README.md),
+[Neovim](../../extensions/nvim/README.md),
+[Emacs](../../extensions/emacs/README.md), and
+[other popular editors](../../extensions/other/README.md) live under
+[`extensions/`](../../extensions/README.md). They share the server and explicit
+Build/Run/Test/Format workflow; installation does not automatically publish
+them to editor stores.
+
 Use these settings when configuring an editor client:
 
 | Setting | Value |
@@ -71,8 +80,8 @@ offers snippet syntax only when the client advertises snippet support.
 
 ### VS Code and other clients
 
-Use a language-client extension that associates `.nt` files with Neutron and
-launches `ntsc lsp` over stdio. VS Code does **not** launch arbitrary language
+The source [VS Code extension](../../extensions/vscode/README.md) associates
+`.nt` files with Neutron and launches `ntsc lsp` over stdio. VS Code does **not** launch arbitrary language
 servers merely because an executable is named in an invented `settings.json`
 key. Check the installed extension's documented executable setting.
 

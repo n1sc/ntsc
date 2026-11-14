@@ -1,0 +1,16 @@
+{
+  "name": "tree-sitter-neutron",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lexical Neutron highlighting grammar; semantics are provided by ntsc lsp.",
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "0.25.10"
+  },
+  "allowScripts": {
+    "tree-sitter-cli": true
+  }
+}

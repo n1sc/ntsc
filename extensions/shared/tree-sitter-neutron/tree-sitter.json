@@ -1,0 +1,16 @@
+{
+  "grammars": [{
+    "name": "neutron",
+    "camelcase": "Neutron",
+    "scope": "source.neutron",
+    "file-types": ["nt"],
+    "path": "."
+  }],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "NPL-1.1",
+    "description": "Neutron lexical highlighting",
+    "authors": [{ "name": "yasakei" }],
+    "links": { "repository": "https://github.com/n1sc/ntsc" }
+  }
+}

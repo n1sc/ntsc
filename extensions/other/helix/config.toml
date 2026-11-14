@@ -1,0 +1,7 @@
+# Optional bindings; merge into your existing Helix configuration.
+[keys.normal.space.n]
+b = [":write-all", ":sh ntsc build"]
+r = [":write-all", ":sh ntsc run"]
+t = [":write-all", ":sh ntsc test"]
+f = ":format"
+s = ":lsp-restart"

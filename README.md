@@ -81,6 +81,8 @@ Single-machine, single-threaded measurements—not a universal language ranking.
 ## Documentation
 
 Browse the hosted documentation at [ntsc.yasakei.dev/docs](https://ntsc.yasakei.dev/docs).
+Editor integrations for VS Code, Zed, Neovim, Emacs, Helix, Sublime Text, and Vim
+are under [`extensions/`](extensions/README.md).
 
 | Guide | Reference |
 | --- | --- |

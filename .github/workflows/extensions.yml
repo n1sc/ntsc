@@ -1,0 +1,61 @@
+name: Editor integrations
+
+on:
+  push:
+    paths: ["extensions/**", "scripts/check-extensions.sh", "crates/ntsc-lsp/**", "crates/ntsc-ast/src/token.rs", ".github/workflows/extensions.yml"]
+  pull_request:
+    paths: ["extensions/**", "scripts/check-extensions.sh", "crates/ntsc-lsp/**", "crates/ntsc-ast/src/token.rs", ".github/workflows/extensions.yml"]
+
+jobs:
+  clients:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Native editor test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y vim emacs-nox
+          curl -fL https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-x86_64.tar.gz -o /tmp/neutron-nvim.tar.gz
+          tar -xf /tmp/neutron-nvim.tar.gz -C /tmp
+          echo /tmp/nvim-linux-x86_64/bin >> "$GITHUB_PATH"
+      - name: Shared contracts and native clients
+        run: sh scripts/check-extensions.sh
+      - name: VS Code package
+        run: |
+          npm ci --prefix extensions/vscode
+          npm test --prefix extensions/vscode
+          npm run package --prefix extensions/vscode
+      - name: Shared highlighting grammar
+        run: |
+          npm ci --prefix extensions/shared/tree-sitter-neutron
+          npm run generate --prefix extensions/shared/tree-sitter-neutron
+          git diff --exit-code -- extensions/shared/tree-sitter-neutron/src
+          npm test --prefix extensions/shared/tree-sitter-neutron
+
+  zed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: extensions/zed
+      - name: Format and lint
+        run: |
+          cargo fmt --manifest-path extensions/zed/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path extensions/zed/Cargo.toml --all-targets -- -D warnings
+      - name: Native tests and WASM build
+        run: |
+          cargo test --locked --manifest-path extensions/zed/Cargo.toml
+          cargo build --locked --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip1 --release

@@ -1,0 +1,25 @@
+{
+  "language": {
+    "id": "neutron",
+    "name": "Neutron",
+    "extension": ".nt",
+    "scope": "source.neutron",
+    "projectMarker": "neutron.toml",
+    "lineComment": "#",
+    "indentWidth": 4
+  },
+  "server": {
+    "id": "ntsc",
+    "command": "ntsc",
+    "args": ["lsp"],
+    "transport": "stdio",
+    "positionEncoding": "utf-16"
+  },
+  "cli": "ntsc",
+  "workflows": {
+    "build": ["build"],
+    "run": ["run"],
+    "test": ["test"]
+  },
+  "documentation": "https://ntsc.yasakei.dev/docs/next/reference/lsp"
+}

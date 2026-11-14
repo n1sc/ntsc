@@ -1,0 +1,58 @@
+{
+  "name": "Neutron",
+  "scopeName": "source.neutron",
+  "fileTypes": [
+    "nt"
+  ],
+  "patterns": [
+    {
+      "name": "comment.line.number-sign.neutron",
+      "match": "#.*$"
+    },
+    {
+      "name": "string.quoted.double.neutron",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.neutron",
+          "match": "\\\\."
+        },
+        {
+          "name": "meta.interpolation.neutron",
+          "begin": "\\$\\{",
+          "end": "\\}",
+          "patterns": [
+            {
+              "include": "$self"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "keyword.control.neutron",
+      "match": "\\b(?:and|as|async|await|break|case|catch|chan|class|close|continue|copy|default|defer|do|elif|else|enum|extern|finally|for|from|fun|go|if|impl|in|match|mut|or|own|private|quiet|retry|return|say|shared|static|test|throw|trait|try|type|unsafe|use|var|view|while)\\b"
+    },
+    {
+      "name": "storage.type.neutron",
+      "match": "\\b(?:int|float|string|bool|array|object|option|result|any|pointer|slice)\\b"
+    },
+    {
+      "name": "constant.language.neutron",
+      "match": "\\b(?:true|false|nil|this|super)\\b"
+    },
+    {
+      "name": "entity.name.function.neutron",
+      "match": "\\b[A-Za-z_][A-Za-z_0-9]*(?=\\s*\\()"
+    },
+    {
+      "name": "entity.name.namespace.neutron",
+      "match": "@[A-Za-z_][A-Za-z_0-9]*"
+    },
+    {
+      "name": "constant.numeric.neutron",
+      "match": "\\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|\\d[\\d_]*(?:\\.[\\d_]+)?(?:[eE][+-]?[\\d_]+)?)\\b"
+    }
+  ]
+}

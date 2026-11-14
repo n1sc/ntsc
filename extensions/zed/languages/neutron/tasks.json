@@ -1,0 +1,38 @@
+[
+  {
+    "label": "Neutron: Build",
+    "command": "ntsc",
+    "args": [
+      "build"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "save": "all"
+  },
+  {
+    "label": "Neutron: Run",
+    "command": "ntsc",
+    "args": [
+      "run"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "save": "all"
+  },
+  {
+    "label": "Neutron: Test",
+    "command": "ntsc",
+    "args": [
+      "test"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "save": "all"
+  }
+]

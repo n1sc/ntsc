@@ -1,0 +1,15 @@
+[package]
+name = "neutron-zed"
+version = "0.1.0"
+edition = "2024"
+license = "NPL-1.1"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
+
+# Editor plugins do not belong to the compiler's LLVM-linked workspace.
+[workspace]

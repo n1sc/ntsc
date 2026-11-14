@@ -1,0 +1,17 @@
+[
+  {
+    "id": "tools",
+    "children": [
+      {
+        "caption": "Neutron",
+        "children": [
+          { "caption": "Build", "command": "neutron_workflow", "args": { "action": "build" } },
+          { "caption": "Run", "command": "neutron_workflow", "args": { "action": "run" } },
+          { "caption": "Test", "command": "neutron_workflow", "args": { "action": "test" } },
+          { "caption": "Format", "command": "lsp_format_document" },
+          { "caption": "Restart server", "command": "lsp_restart_server" }
+        ]
+      }
+    ]
+  }
+]

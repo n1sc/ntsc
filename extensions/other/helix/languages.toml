@@ -1,0 +1,16 @@
+[language-server.ntsc]
+command = "ntsc"
+args = ["lsp"]
+
+[[language]]
+name = "neutron"
+scope = "source.neutron"
+file-types = ["nt"]
+roots = ["neutron.toml"]
+comment-token = "#"
+language-servers = ["ntsc"]
+indent = { tab-width = 4, unit = "    " }
+
+[[grammar]]
+name = "neutron"
+source = { git = "https://github.com/n1sc/ntsc.git", rev = "main", subpath = "extensions/shared/tree-sitter-neutron" }

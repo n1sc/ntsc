@@ -1,0 +1,111 @@
+==================
+Functions and member access
+==================
+fun add(int value) -> int { return value + 1; }
+make().child.read();
+---
+
+(source_file
+  (keyword)
+  (identifier)
+  (parentheses
+    (type)
+    (identifier))
+  (operator)
+  (type)
+  (block
+    (keyword)
+    (identifier)
+    (operator)
+    (number)
+    (operator))
+  (identifier)
+  (parentheses)
+  (operator)
+  (identifier)
+  (operator)
+  (identifier)
+  (parentheses)
+  (operator))
+
+==================
+Async Rust namespaces
+==================
+use @ureq
+async fun main() { var response = await @ureq.get_async("https://example.test"); }
+---
+
+(source_file
+  (keyword)
+  (namespace)
+  (keyword)
+  (keyword)
+  (identifier)
+  (parentheses)
+  (block
+    (keyword)
+    (identifier)
+    (operator)
+    (keyword)
+    (namespace)
+    (operator)
+    (identifier)
+    (parentheses
+      (string))
+    (operator)))
+
+==================
+Strings comments and interpolation
+==================
+# fun ignored() {}
+say("emoji 🌟 # not a comment ${make().value} escaped \" end $")
+---
+
+(source_file
+  (comment)
+  (keyword)
+  (parentheses
+    (string
+      (interpolation
+        (identifier)
+        (parentheses)
+        (operator)
+        (identifier))
+      (escape))))
+
+==================
+Nested interpolation and collections
+==================
+var values = [0xff, 0b10, 0o77, 1_000, 1.25e-2];
+say("${fun() { return { value: 1 }; }}");
+---
+
+(source_file
+  (keyword)
+  (identifier)
+  (operator)
+  (brackets
+    (number)
+    (operator)
+    (number)
+    (operator)
+    (number)
+    (operator)
+    (number)
+    (operator)
+    (number))
+  (operator)
+  (keyword)
+  (parentheses
+    (string
+      (interpolation
+        (keyword)
+        (parentheses)
+        (block
+          (keyword)
+          (block
+            (identifier)
+            (operator)
+            (number))
+          (operator)))))
+  (operator))

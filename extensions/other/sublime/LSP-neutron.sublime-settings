@@ -1,0 +1,8 @@
+{
+  "command": [
+    "ntsc",
+    "lsp"
+  ],
+  "selector": "source.neutron",
+  "enabled": true
+}

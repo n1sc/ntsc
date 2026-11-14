@@ -1,0 +1,27 @@
+// Generated lexical grammar; semantic analysis stays in ntsc lsp.
+module.exports = grammar({
+  name: 'neutron',
+  extras: $ => [/\s/, $.comment],
+  word: $ => $.identifier,
+  rules: {
+    source_file: $ => repeat($._item),
+    _item: $ => choice($.keyword, $.type, $.constant, $.identifier, $.number, $.string,
+      $.namespace, $.block, $.parentheses, $.brackets, $.operator),
+    block: $ => seq('{', repeat($._item), '}'),
+    parentheses: $ => seq('(', repeat($._item), ')'),
+    brackets: $ => seq('[', repeat($._item), ']'),
+    keyword: _ => choice("and", "as", "async", "await", "break", "case", "catch", "chan", "class", "close", "continue", "copy", "default", "defer", "do", "elif", "else", "enum", "extern", "finally", "for", "from", "fun", "go", "if", "impl", "in", "match", "mut", "or", "own", "private", "quiet", "retry", "return", "say", "shared", "static", "test", "throw", "trait", "try", "type", "unsafe", "use", "var", "view", "while"),
+    type: _ => choice("int", "float", "string", "bool", "array", "object", "option", "result", "any", "pointer", "slice"),
+    constant: _ => choice("true", "false", "nil", "this", "super"),
+    identifier: _ => /[A-Za-z_][A-Za-z_0-9]*/,
+    namespace: _ => /@[A-Za-z_][A-Za-z_0-9]*/,
+    number: _ => /(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?)/,
+    comment: _ => token(seq('#', /[^\n]*/)),
+    string: $ => seq('"', repeat(choice($.escape, $.interpolation, /[^"\\$]+/, '$')), '"'),
+    escape: _ => token(seq('\\', /./)),
+    interpolation: $ => seq('${', repeat($._item), '}'),
+    operator: _ => token(choice('...', '..', '?.', '->', '=>', '==', '!=', '<=', '>=',
+      '++', '--', '&&', '||', '<<', '>>', '|>', '<|', '+', '-', '*', '/', '%', '=',
+      '<', '>', '!', '&', '|', '^', '~', '?', ':', ';', ',', '.', '@')),
+  },
+});

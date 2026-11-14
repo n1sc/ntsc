@@ -53,3 +53,11 @@ TODO.md
 
 # Generated Rust-crate adaptors and export manifests
 /.ntsc
+
+# Editor extension dependencies and build artifacts
+/extensions/**/node_modules/
+/extensions/**/*.vsix
+/extensions/emacs/*.elc
+/extensions/zed/extension.wasm
+/extensions/zed/grammars/
+/extensions/shared/tree-sitter-neutron/*.so

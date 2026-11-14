@@ -1,0 +1,19 @@
+id = "neutron"
+name = "Neutron"
+version = "0.1.0"
+schema_version = 1
+authors = ["yasakei"]
+description = "Neutron language support powered by ntsc lsp."
+repository = "https://github.com/n1sc/ntsc"
+
+[language_servers.ntsc]
+name = "Neutron Language Server"
+languages = ["Neutron"]
+
+[language_servers.ntsc.language_ids]
+Neutron = "neutron"
+
+[grammars.neutron]
+repository = "https://github.com/n1sc/ntsc"
+rev = "main"
+path = "extensions/shared/tree-sitter-neutron"

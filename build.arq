@@ -81,6 +81,12 @@ task test_lsp {
     done("language-server tests passed")
 }
 
+task test_extensions {
+    step("shared editor contracts and available native clients")
+    run "sh scripts/check-extensions.sh"
+    done("editor extension checks passed")
+}
+
 task test_runtime {
     step("ntsc-runtime unit tests")
     run "cargo test -p ntsc-runtime"

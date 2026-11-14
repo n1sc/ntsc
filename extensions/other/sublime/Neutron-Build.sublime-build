@@ -1,0 +1,8 @@
+{
+  "cmd": [
+    "ntsc",
+    "build"
+  ],
+  "working_dir": "${folder}",
+  "selector": "source.neutron"
+}
