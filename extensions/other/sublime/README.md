@@ -1,3 +1,5 @@
+<p align="center"><img src="icons/icon.png" alt="Neutron" width="96" height="96"></p>
+
 # Neutron for Sublime Text
 
 Requires Sublime Text 4 and the **LSP** package from Package Control.

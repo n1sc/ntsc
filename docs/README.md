@@ -1,3 +1,5 @@
+<p align="center"><img src="../extensions/shared/branding/neutron.svg" alt="Neutron" width="96" height="96"></p>
+
 # NTSC Documentation
 
 Neutron is a programming language; **NTSC** (the Neutron Type-Safe Compiler)

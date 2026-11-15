@@ -1,3 +1,5 @@
+<p align="center"><img src="icons/icon.png" alt="Neutron" width="96" height="96"></p>
+
 # Neutron for Vim
 
 Requires Vim 8.2 with `+terminal`, plus

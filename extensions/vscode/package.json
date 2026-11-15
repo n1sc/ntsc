@@ -4,6 +4,8 @@
   "description": "Neutron language support powered by the NTSC language server.",
   "version": "0.1.0",
   "publisher": "n1sc",
+  "icon": "icons/icon.png",
+  "galleryBanner": { "color": "#212D50", "theme": "dark" },
   "license": "SEE LICENSE IN LICENSE",
   "repository": { "type": "git", "url": "https://github.com/n1sc/ntsc.git", "directory": "extensions/vscode" },
   "engines": { "vscode": "^1.82.0" },
@@ -26,6 +28,7 @@
       "id": "neutron",
       "aliases": ["Neutron", "neutron"],
       "extensions": [".nt"],
+      "icon": { "light": "./icons/file-white.svg", "dark": "./icons/file-white.svg" },
       "configuration": "./language-configuration.json"
     }],
     "grammars": [{

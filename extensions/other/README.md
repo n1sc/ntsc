@@ -1,3 +1,5 @@
+<p align="center"><img src="../shared/branding/neutron.svg" alt="Neutron" width="96" height="96"></p>
+
 # Other popular editors
 
 These adapters use the same language server as the primary editor extensions:

@@ -1,3 +1,5 @@
+<p align="center"><img src="shared/branding/neutron.svg" alt="Neutron" width="96" height="96"></p>
+
 # Neutron editor integrations
 
 These integrations all use **the same `ntsc lsp` server**, not independent

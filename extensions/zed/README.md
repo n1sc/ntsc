@@ -1,3 +1,5 @@
+<p align="center"><img src="icons/icon.png" alt="Neutron" width="96" height="96"></p>
+
 # Neutron for Zed
 
 This is a native extension using Zed extension API 0.7. The language server is

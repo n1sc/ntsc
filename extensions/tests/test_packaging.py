@@ -22,6 +22,8 @@ class ExtensionPackagingTests(unittest.TestCase):
             with zipfile.ZipFile(vsix, "w") as archive:
                 archive.writestr("extension/package.json", json.dumps({"version": version}))
                 archive.writestr("extension/syntaxes/neutron.tmLanguage.json", "{}")
+                archive.writestr("extension/icons/icon.png", (ROOT / "extensions/shared/branding/neutron.png").read_bytes())
+                archive.writestr("extension/icons/file-white.svg", (ROOT / "extensions/shared/branding/neutron-file-white.svg").read_bytes())
             wasm = fixture / "neutron.wasm"
             wasm.write_bytes(b"\0asm\x01\0\0\0")
             output = fixture / "missing parent/dist/extensions"

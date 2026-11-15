@@ -1,3 +1,5 @@
+<p align="center"><img src="icons/icon.png" alt="Neutron" width="96" height="96"></p>
+
 # Neutron for Emacs
 
 Requires Emacs 29.1 or later, including its built-in Eglot client.

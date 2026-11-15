@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Neutron — Ultraviolet glass</title>
+  <defs>
+    <linearGradient id="background" x1="0.10058188063493989" y1="-0.07042819102789422" x2="0.8994181193650601" y2="1.070428191027894">
+      <stop offset="0%" stop-color="#473564" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#212D50" stop-opacity="1"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0.10058188063493989" y1="-0.07042819102789422" x2="0.8994181193650601" y2="1.070428191027894">
+      <stop offset="0%" stop-color="#F2E7FF" stop-opacity="0.8666666666666667"/>
+      <stop offset="30%" stop-color="#BEA8F4" stop-opacity="0.611764705882353"/>
+      <stop offset="65%" stop-color="#7664BB" stop-opacity="0.5686274509803921"/>
+      <stop offset="100%" stop-color="#D7DDFF" stop-opacity="0.8117647058823529"/>
+    </linearGradient>
+    <linearGradient id="reflection" x1="0.1584936490538904" y1="-0.0915063509461097" x2="0.8415063509461096" y2="1.0915063509461098">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.45098039215686275"/>
+      <stop offset="24%" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="37%" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="41%" stop-color="#FFFFFF" stop-opacity="0.3137254901960784"/>
+      <stop offset="47%" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="75%" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.21568627450980393"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#background)"/>
+  <g transform="translate(87.03999999999999 82.4735135135135) scale(9.132972972972974)">
+    <path fill="url(#mark)" d="M3 3.00H18.25C26.92 3.00 33.75 8.71 33.75 19C33.75 29.29 26.92 35.00 18.25 35.00H3L9.00 29.00H15.51C24.37 29.00 26.29 23.56 26.29 19C26.29 14.44 24.37 9.00 15.51 9.00H9.00Z"/>
+    <path fill="url(#reflection)" d="M3 3.00H18.25C26.92 3.00 33.75 8.71 33.75 19C33.75 29.29 26.92 35.00 18.25 35.00H3L9.00 29.00H15.51C24.37 29.00 26.29 23.56 26.29 19C26.29 14.44 24.37 9.00 15.51 9.00H9.00Z"/>
+  </g>
+</svg>

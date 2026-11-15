@@ -219,6 +219,13 @@ def generated_files():
     license_text = (ROOT / "LICENSE").read_text()
     for directory in ["vscode", "nvim", "emacs", "other/vim", "other/sublime", "other/helix", "shared/tree-sitter-neutron"]:
         yield f"extensions/{directory}/LICENSE", license_text
+    for directory in ["vscode", "zed", "nvim", "emacs", "other/vim", "other/sublime", "other/helix"]:
+        yield f"extensions/{directory}/icons/icon.png", (
+            ROOT / "extensions/shared/branding/neutron.png"
+        ).read_bytes()
+    yield "extensions/vscode/icons/file-white.svg", (
+        ROOT / "extensions/shared/branding/neutron-file-white.svg"
+    ).read_bytes()
 
 
 def main():
@@ -228,12 +235,13 @@ def main():
     stale = []
     for relative, content in generated_files():
         path = ROOT / relative
+        encoded = content if isinstance(content, bytes) else content.encode()
         if arguments.check:
-            if not path.exists() or path.read_text() != content:
+            if not path.exists() or path.read_bytes() != encoded:
                 stale.append(relative)
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
+            path.write_bytes(encoded)
     if stale:
         parser.exit(1, "Stale generated editor files:\n" + "\n".join(stale) + "\n")
 

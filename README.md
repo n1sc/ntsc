@@ -3,6 +3,7 @@
 <br />
 
 <div align="center">
+  <img src="extensions/shared/branding/neutron.svg" alt="Neutron" width="128" height="128">
   <h1 align="center">NTSC</h1>
 
   **Neutron Type-Safe Compiler**
