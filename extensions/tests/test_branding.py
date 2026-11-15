@@ -51,6 +51,15 @@ class BrandingTests(unittest.TestCase):
         image = (BRANDING / "neutron.png").read_bytes()
         self.assertEqual(image[:8], b"\x89PNG\r\n\x1a\n")
         self.assertEqual(struct.unpack(">II", image[16:24]), (512, 512))
+        self.assertEqual(image[25], 6)
+
+    def test_background_has_rounded_corners(self):
+        brand = ET.parse(BRANDING / "neutron.svg")
+        background = brand.find("svg:rect", SVG)
+        self.assertEqual(background.attrib["rx"], "64")
+        self.assertEqual(background.attrib["ry"], "64")
+        self.assertEqual(background.attrib["width"], "512")
+        self.assertEqual(background.attrib["height"], "512")
 
     def test_readme_images_resolve_to_existing_files(self):
         for relative in (

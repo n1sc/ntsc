@@ -21,7 +21,7 @@
       <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.21568627450980393"/>
     </linearGradient>
   </defs>
-  <rect width="512" height="512" fill="url(#background)"/>
+  <rect width="512" height="512" rx="64" ry="64" fill="url(#background)"/>
   <g transform="translate(87.03999999999999 82.4735135135135) scale(9.132972972972974)">
     <path fill="url(#mark)" d="M3 3.00H18.25C26.92 3.00 33.75 8.71 33.75 19C33.75 29.29 26.92 35.00 18.25 35.00H3L9.00 29.00H15.51C24.37 29.00 26.29 23.56 26.29 19C26.29 14.44 24.37 9.00 15.51 9.00H9.00Z"/>
     <path fill="url(#reflection)" d="M3 3.00H18.25C26.92 3.00 33.75 8.71 33.75 19C33.75 29.29 26.92 35.00 18.25 35.00H3L9.00 29.00H15.51C24.37 29.00 26.29 23.56 26.29 19C26.29 14.44 24.37 9.00 15.51 9.00H9.00Z"/>

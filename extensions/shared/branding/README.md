@@ -7,7 +7,8 @@
 - `neutron-file-white.svg`: the same mark in white, on transparency, for `.nt`
   file icons. It has no background, gradient, or shadow.
 
-The background runs from `#473564` to `#212D50`. The translucent mark runs
+The background has a 64 px corner radius on its 512 px canvas; the PNG corners
+are transparent. It runs from `#473564` to `#212D50`. The translucent mark runs
 through `#F2E7FF`, `#BEA8F4`, `#7664BB`, and `#D7DDFF`, with a white reflection.
 Both light and dark VS Code language icons use the white variant as requested.
 
