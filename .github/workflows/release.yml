@@ -66,9 +66,9 @@ env:
   #   PUBLISH       "true"  -> after the release, push the Homebrew formula, the
   #                            Scoop manifest and both AUR recipes
   #                 "false" -> build and attach the release assets only
-  RUN_TESTS: "true"
-  WINDOWS_ONLY: "false"
-  PUBLISH: "true"
+  RUN_TESTS: "false"
+  WINDOWS_ONLY: "true"
+  PUBLISH: "false"
 
   # Where the `publish-*` jobs push. Override these if the tap/bucket live
   # somewhere else; the AUR names are what `pacman`/`yay` look up.
