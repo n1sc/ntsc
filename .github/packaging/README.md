@@ -59,6 +59,11 @@ packaging/
 
 ## Platform notes
 
+Intel macOS builds LLVM 23's shared library, headers, and `llvm-config` from
+the pinned upstream source release because neither Homebrew nor upstream ships
+an Intel macOS binary. The workflow caches that installation before building
+the compiler, so only the first run needs the slower LLVM build.
+
 ### Debian / Ubuntu (.deb)
 
 `build-deb-rpm.sh` stages the binary and a gzipped man page, then runs

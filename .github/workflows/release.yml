@@ -240,11 +240,40 @@ jobs:
           echo "$prefix/bin" >> "$GITHUB_PATH"
 
       - name: Install LLVM 23 (macOS)
-        if: runner.os == 'macOS'
+        if: matrix.name == 'macos-arm64'
         run: |
           brew install llvm@23
           echo "LLVM_SYS_231_PREFIX=$(brew --prefix llvm@23)" >> "$GITHUB_ENV"
           echo "$(brew --prefix llvm@23)/bin" >> "$GITHUB_PATH"
+
+      # LLVM 23 has neither a Homebrew bottle nor an upstream binary for Intel Macs.
+      - name: Restore LLVM 23 (macOS Intel)
+        if: matrix.name == 'macos-x86_64'
+        id: intel-llvm
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/llvm-${{ env.LLVM_VERSION }}-x86_64
+          key: macos-x86_64-llvm-${{ env.LLVM_VERSION }}-shared-v1
+
+      - name: Build LLVM 23 (macOS Intel)
+        if: matrix.name == 'macos-x86_64' && steps.intel-llvm.outputs.cache-hit != 'true'
+        run: bash .github/packaging/macos/build-llvm.sh "$LLVM_VERSION" "$RUNNER_TEMP/llvm-$LLVM_VERSION-x86_64"
+
+      - name: Cache LLVM 23 (macOS Intel)
+        if: matrix.name == 'macos-x86_64' && steps.intel-llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/llvm-${{ env.LLVM_VERSION }}-x86_64
+          key: macos-x86_64-llvm-${{ env.LLVM_VERSION }}-shared-v1
+
+      - name: Configure LLVM 23 (macOS Intel)
+        if: matrix.name == 'macos-x86_64'
+        run: |
+          prefix="$RUNNER_TEMP/llvm-$LLVM_VERSION-x86_64"
+          "$prefix/bin/llvm-config" --version
+          "$prefix/bin/llvm-config" --link-shared --libnames
+          echo "LLVM_SYS_231_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
 
       # The win64 .exe installer is an NSIS stub whose child process can
       # outlive Start-Process -Wait, so the build sometimes found no LLVM. Use

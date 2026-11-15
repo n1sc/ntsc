@@ -91,7 +91,7 @@ $system = @(
 ) | ForEach-Object { $_.ToLower() }
 
 $visited = @{}
-$deps = @()
+$deps = [System.Collections.Generic.List[string]]::new()
 
 function Get-Deps([string]$Path) {
   $output = & dumpbin /DEPENDENTS $Path 2>$null
@@ -100,7 +100,7 @@ function Get-Deps([string]$Path) {
     if ($name -notmatch "\.dll$" -or $visited.ContainsKey($name.ToLower())) { continue }
     if ($system -contains $name.ToLower()) { continue }
     $visited[$name.ToLower()] = $true
-    $deps += $name
+    $deps.Add($name)
     $full = Join-Path $LlvmBin $name
     if (Test-Path $full) { Get-Deps $full }
   }
@@ -108,6 +108,7 @@ function Get-Deps([string]$Path) {
 
 Get-Deps (Join-Path $SourceDir "ntsc.exe")
 Get-Deps $PackageManager
+Get-Deps $LanguageServer
 
 Write-Host "Bundling $($deps.Count) DLL(s):"
 $deps | ForEach-Object { Write-Host "  $_" }
@@ -160,7 +161,7 @@ $lines = @(
   '    <ComponentGroup Id="Libraries" Directory="INSTALLBIN">'
 )
 foreach ($name in $deps) {
-  $id = "lib." + ([System.IO.Path]::GetFileNameWithoutExtension($name))
+  $id = "lib." + ([System.IO.Path]::GetFileNameWithoutExtension($name) -replace "[^A-Za-z0-9_.]", ".")
   $lines += "      <Component Id=`"$id`" Guid=`"*`">"
   $lines += "        <File Id=`"$id.file`" Source=`"`$(var.SourceDir)\$name`" KeyPath=`"yes`" />"
   $lines += "      </Component>"
@@ -182,7 +183,7 @@ $lines = @(
   '    <ComponentGroup Id="Tools" Directory="INSTALLBIN">'
 )
 foreach ($name in @("ntsc-lsp.exe", "ld.lld.exe", "libntsc_runtime.a")) {
-  $id = "tool." + [System.IO.Path]::GetFileNameWithoutExtension($name)
+  $id = "tool." + ([System.IO.Path]::GetFileNameWithoutExtension($name) -replace "[^A-Za-z0-9_.]", ".")
   $lines += "      <Component Id=`"$id`" Guid=`"*`">"
   $lines += "        <File Id=`"$id.file`" Source=`"`$(var.SourceDir)\$name`" KeyPath=`"yes`" />"
   $lines += "      </Component>"

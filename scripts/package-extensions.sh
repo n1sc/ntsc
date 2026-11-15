@@ -196,6 +196,7 @@ PY
         sha256sum -c SHA256SUMS
     )
 
+    mkdir -p "$(dirname "$out")"
     rm -rf "$out"
     mv "$tmp" "$out"
     tmp=
