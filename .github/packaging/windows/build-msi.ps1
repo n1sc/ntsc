@@ -86,52 +86,75 @@ $system = @(
   "KERNEL32.dll", "USER32.dll", "ADVAPI32.dll", "SHELL32.dll", "WS2_32.dll",
   "NTDLL.dll", "GDI32.dll", "OLE32.dll", "RPCRT4.dll", "SHLWAPI.dll",
   "COMDLG32.dll", "OLEAUT32.dll", "IMM32.dll", "MSVCRT.dll", "VERSION.dll",
-  "WINMM.dll", "bcrypt.dll", "CRYPT32.dll", "WTSAPI32.dll", "SETUPAPI.dll",
+  "WINMM.dll", "bcrypt.dll", "bcryptprimitives.dll", "CRYPT32.dll", "WTSAPI32.dll", "SETUPAPI.dll",
   "HID.DLL", "uxtheme.dll", "DWMAPI.dll", "NETAPI32.dll", "UCRTBASE.dll"
 ) | ForEach-Object { $_.ToLower() }
 
-$visited = @{}
-$deps = [System.Collections.Generic.List[string]]::new()
+$deps = [System.Collections.Generic.SortedDictionary[string, string]]::new(
+  [System.StringComparer]::OrdinalIgnoreCase
+)
+
+function Resolve-Dll([string]$Name, [string]$BinaryPath) {
+  foreach ($directory in @((Split-Path -Parent $BinaryPath), $LlvmBin)) {
+    $candidate = Join-Path $directory $Name
+    if (Test-Path $candidate -PathType Leaf) {
+      return (Get-Item $candidate).FullName
+    }
+  }
+  if ($env:VCToolsRedistDir) {
+    $redist = Join-Path $env:VCToolsRedistDir "x64"
+    if (Test-Path $redist -PathType Container) {
+      $directories = Get-ChildItem $redist -Directory |
+        Where-Object { $_.Name -like "Microsoft.VC*.CRT" } |
+        Sort-Object Name
+      foreach ($directory in $directories) {
+        $candidate = Join-Path $directory.FullName $Name
+        if (Test-Path $candidate -PathType Leaf) {
+          return (Get-Item $candidate).FullName
+        }
+      }
+    }
+  }
+  throw "required DLL $Name for $BinaryPath was not found beside the binary, in $LlvmBin, or in the x64 MSVC redistributables"
+}
 
 function Get-Deps([string]$Path) {
   $output = & dumpbin /DEPENDENTS $Path 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    throw "dumpbin failed for $Path with exit code $LASTEXITCODE"
+  }
   foreach ($line in $output) {
     $name = $line.Trim()
-    if ($name -notmatch "\.dll$" -or $visited.ContainsKey($name.ToLower())) { continue }
-    if ($system -contains $name.ToLower()) { continue }
-    $visited[$name.ToLower()] = $true
-    $deps.Add($name)
-    $full = Join-Path $LlvmBin $name
-    if (Test-Path $full) { Get-Deps $full }
+    if ($name -notmatch "^[A-Za-z0-9_.-]+\.dll$" -or $deps.ContainsKey($name)) { continue }
+    if ($system -contains $name.ToLower() -or $name -match "^(api-ms-|ext-ms-)") { continue }
+    $full = Resolve-Dll $name $Path
+    $deps.Add($name, $full)
+    Get-Deps $full
   }
 }
 
+$lld = Join-Path $LlvmBin "ld.lld.exe"
+if (-not (Test-Path $lld -PathType Leaf)) {
+  throw "ld.lld.exe not found in $LlvmBin"
+}
 Get-Deps (Join-Path $SourceDir "ntsc.exe")
 Get-Deps $PackageManager
 Get-Deps $LanguageServer
+Get-Deps $lld
 
 Write-Host "Bundling $($deps.Count) DLL(s):"
-$deps | ForEach-Object { Write-Host "  $_" }
+$deps.Keys | ForEach-Object { Write-Host "  $_" }
 
 # ── Stage files ─────────────────────────────────────────────────────────────
 Copy-Item (Join-Path $SourceDir "ntsc.exe") $Dist
 Copy-Item $PackageManager (Join-Path $Dist "ntsc-pkg.exe")
 Copy-Item $LanguageServer (Join-Path $Dist "ntsc-lsp.exe")
-foreach ($name in $deps) {
-  $full = Join-Path $LlvmBin $name
-  if (Test-Path $full) {
-    Copy-Item $full (Join-Path $Dist $name)
-  } else {
-    Write-Warning "DLL $name not found in $LlvmBin - not bundled"
-  }
+foreach ($name in $deps.Keys) {
+  Copy-Item $deps[$name] (Join-Path $Dist $name)
 }
 
 # ── Stage the bundled linker and runtime ────────────────────────────────────
 # ld.lld links NTSC programs from the MinGW emulation without MSVC or gcc.
-$lld = Join-Path $LlvmBin "ld.lld.exe"
-if (-not (Test-Path $lld)) {
-  throw "ld.lld.exe not found in $LlvmBin"
-}
 Copy-Item $lld $Dist
 
 if (-not (Test-Path $GnuRuntimeLib)) {
@@ -160,7 +183,7 @@ $lines = @(
   '  <Fragment>',
   '    <ComponentGroup Id="Libraries" Directory="INSTALLBIN">'
 )
-foreach ($name in $deps) {
+foreach ($name in $deps.Keys) {
   $id = "lib." + ([System.IO.Path]::GetFileNameWithoutExtension($name) -replace "[^A-Za-z0-9_.]", ".")
   $lines += "      <Component Id=`"$id`" Guid=`"*`">"
   $lines += "        <File Id=`"$id.file`" Source=`"`$(var.SourceDir)\$name`" KeyPath=`"yes`" />"

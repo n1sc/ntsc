@@ -443,6 +443,20 @@ jobs:
           $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
           pwsh .github/packaging/windows/build-msi.ps1 -Version "${{ needs.config.outputs.version }}" -MsiVersion "${{ needs.config.outputs.msiversion }}" -GnuRuntimeLib "target\x86_64-pc-windows-gnu\release\libntsc_runtime.a" -LlvmBin "$env:LLVM_BIN"
 
+      - name: Verify bundled tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:PATH = "$env:SystemRoot\System32"
+          foreach ($name in @("ntsc.exe", "ld.lld.exe")) {
+            $tool = Join-Path $pwd "dist/win/$name"
+            & $tool --version
+            if ($LASTEXITCODE -ne 0) {
+              throw "bundled $name failed with exit code $LASTEXITCODE"
+            }
+          }
+
       # Reuses the self-contained tree build-msi.ps1 staged at dist\win, so it
       # must run after the MSI step.
       - name: Build Windows tarball

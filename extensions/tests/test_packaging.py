@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -54,44 +55,81 @@ class WindowsPackagingTests(unittest.TestCase):
         sources = [element.attrib.get("Source", "") for element in tree.iter()]
         self.assertIn(r"$(var.SourceDir)\ntsc-pkg.exe", sources)
 
-    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is not installed")
-    def test_generated_ids_and_transitive_dll_staging(self):
-        with tempfile.TemporaryDirectory(prefix="ntsc windows packages ") as directory:
-            fixture = Path(directory)
-            scripts = fixture / "scripts"
-            scripts.mkdir()
-            for name in ("build-msi.ps1", "ntsc.wxs"):
-                shutil.copyfile(PACKAGING / "windows" / name, scripts / name)
-            shutil.copyfile(ROOT / "LICENSE", fixture / "LICENSE")
-            source = fixture / "source"
-            llvm = fixture / "llvm"
-            mingw = fixture / "mingw"
-            for path in (source, llvm, mingw):
-                path.mkdir()
-            for name in ("ntsc.exe", "ntsc-pkg.exe", "ntsc-lsp.exe", "libntsc_runtime.a"):
-                (source / name).write_bytes(b"fixture")
-            for name in ("LLVM-C.dll", "support-with-hyphen.dll", "ld.lld.exe"):
-                (llvm / name).write_bytes(b"fixture")
-            (mingw / "libkernel32.a").write_bytes(b"fixture")
-            harness = fixture / "test.ps1"
-            harness.write_text(r'''
+    def test_workflow_checks_bundled_tools_without_toolchain_path(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        verification = workflow.split("      - name: Verify bundled tools (Windows)\n", 1)[1]
+        verification = verification.split("      - name: Build Windows tarball\n", 1)[0]
+        self.assertIn('$env:PATH = "$env:SystemRoot\\System32"', verification)
+        self.assertIn('@("ntsc.exe", "ld.lld.exe")', verification)
+        self.assertIn('Join-Path $pwd "dist/win/$name"', verification)
+        self.assertIn("if ($LASTEXITCODE -ne 0)", verification)
+
+    @staticmethod
+    def prepare_fixture(fixture):
+        scripts = fixture / "scripts"
+        scripts.mkdir()
+        for name in ("build-msi.ps1", "ntsc.wxs"):
+            shutil.copyfile(PACKAGING / "windows" / name, scripts / name)
+        shutil.copyfile(ROOT / "LICENSE", fixture / "LICENSE")
+        source = fixture / "source"
+        llvm = fixture / "llvm"
+        mingw = fixture / "mingw"
+        for path in (source, llvm, mingw):
+            path.mkdir()
+        for name in ("ntsc.exe", "ntsc-pkg.exe", "ntsc-lsp.exe", "libntsc_runtime.a"):
+            (source / name).write_bytes(b"fixture")
+        for name in ("LLVM-C.dll", "support-with-hyphen.dll", "ld.lld.exe"):
+            (llvm / name).write_bytes(b"fixture")
+        (mingw / "libkernel32.a").write_bytes(b"fixture")
+        for architecture in ("x64", "x86"):
+            redist = fixture / "redist" / architecture / "Microsoft.VC145.CRT"
+            redist.mkdir(parents=True)
+            for name in ("VCRUNTIME140.dll", "MSVCP140.dll"):
+                (redist / name).write_bytes(architecture.encode())
+        (fixture / "test.ps1").write_text(r'''
 $ErrorActionPreference = "Stop"
 function dumpbin {
   param($Option, $Binary)
+  $global:LASTEXITCODE = [int]$env:NTSC_TEST_DUMPBIN_EXIT
+  "Microsoft (R) COFF/PE Dumper"
+  "Dump of file $Binary"
+  ""
+  "  Image has the following dependencies:"
   if ([System.IO.Path]::GetFileName($Binary) -eq "LLVM-C.dll") {
-    "support-with-hyphen.dll"
-  } elseif ([System.IO.Path]::GetExtension($Binary) -eq ".exe") {
-    "LLVM-C.dll"
+    "    support-with-hyphen.dll"
+    "    VCRUNTIME140.dll"
+    "    api-ms-win-crt-runtime-l1-1-0.dll"
+  } elseif ([System.IO.Path]::GetFileName($Binary) -eq "ntsc.exe") {
+    "    LLVM-C.dll"
+  } elseif ([System.IO.Path]::GetFileName($Binary) -eq "ntsc-lsp.exe") {
+    "    llvm-c.DLL"
+  } elseif ([System.IO.Path]::GetFileName($Binary) -eq "ld.lld.exe") {
+    "    linker-only.dll"
+  } elseif ([System.IO.Path]::GetFileName($Binary) -eq "VCRUNTIME140.dll") {
+    "    MSVCP140.dll"
+  } elseif ([System.IO.Path]::GetFileName($Binary) -eq "MSVCP140.dll") {
+    "    VCRUNTIME140.dll"
   }
-  "KERNEL32.dll"
+  "    KERNEL32.dll"
+  "    bcryptprimitives.dll"
+  "    api-ms-win-core-synch-l1-2-0.dll"
+  "    ext-ms-win-example-l1-1-0.dll"
+  ""
+  "  Summary"
 }
 function wix {
+  $identifiers = @{}
   foreach ($path in $args | Where-Object { $_ -like "*.wxs" }) {
     [xml]$document = Get-Content $path -Raw
     foreach ($element in $document.SelectNodes("//*[@Id]")) {
       if ($element.Id -notmatch "^[A-Za-z_][A-Za-z0-9_.]*$") {
         throw "invalid WiX identifier: $($element.Id)"
       }
+      $key = "$($element.LocalName):$($element.Id)"
+      if ($identifiers.ContainsKey($key)) {
+        throw "duplicate WiX identifier: $key"
+      }
+      $identifiers[$key] = $true
     }
   }
   $global:LASTEXITCODE = 0
@@ -101,18 +139,63 @@ function wix {
   -GnuRuntimeLib ./source/libntsc_runtime.a `
   -PackageManager ./source/ntsc-pkg.exe -LanguageServer ./source/ntsc-lsp.exe
 ''')
-            result = subprocess.run(
-                ["pwsh", "-NoProfile", "-File", str(harness)],
-                cwd=fixture, text=True, capture_output=True, check=False,
-            )
+        (llvm / "linker-only.dll").write_bytes(b"fixture")
+
+    @staticmethod
+    def run_fixture(fixture, **overrides):
+        return subprocess.run(
+            ["pwsh", "-NoProfile", "-File", str(fixture / "test.ps1")],
+            cwd=fixture, text=True, capture_output=True, check=False,
+            env={
+                **os.environ,
+                "VCToolsRedistDir": str(fixture / "redist"),
+                "NTSC_TEST_DUMPBIN_EXIT": "0",
+                **overrides,
+            },
+        )
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is not installed")
+    def test_generated_ids_and_transitive_dll_staging(self):
+        with tempfile.TemporaryDirectory(prefix="ntsc windows packages ") as directory:
+            fixture = Path(directory)
+            self.prepare_fixture(fixture)
+            result = self.run_fixture(fixture)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            for name in ("LLVM-C.dll", "support-with-hyphen.dll", "ntsc-lsp.exe"):
+            for name in ("LLVM-C.dll", "support-with-hyphen.dll", "ntsc-lsp.exe", "linker-only.dll"):
                 self.assertTrue((fixture / "dist/win" / name).is_file(), name)
+            self.assertEqual((fixture / "dist/win/VCRUNTIME140.dll").read_bytes(), b"x64")
+            self.assertEqual((fixture / "dist/win/MSVCP140.dll").read_bytes(), b"x64")
+            staged_dlls = {path.name for path in (fixture / "dist/win").glob("*.dll")}
+            self.assertEqual(staged_dlls, {
+                "LLVM-C.dll", "support-with-hyphen.dll", "VCRUNTIME140.dll", "MSVCP140.dll",
+                "linker-only.dll",
+            })
             for name in ("dlls.wxs", "tools.wxs"):
-                tree = ET.parse(scripts / name)
+                tree = ET.parse(fixture / "scripts" / name)
                 for element in tree.iter():
                     if "Id" in element.attrib:
                         self.assertRegex(element.attrib["Id"], r"^[A-Za-z_][A-Za-z0-9_.]*$")
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is not installed")
+    def test_missing_x64_runtime_fails_before_wix(self):
+        with tempfile.TemporaryDirectory(prefix="ntsc windows packages ") as directory:
+            fixture = Path(directory)
+            self.prepare_fixture(fixture)
+            (fixture / "redist/x64/Microsoft.VC145.CRT/VCRUNTIME140.dll").unlink()
+            result = self.run_fixture(fixture)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("required DLL VCRUNTIME140.dll", result.stderr)
+            self.assertFalse((fixture / "scripts/dlls.wxs").exists())
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is not installed")
+    def test_dumpbin_failure_is_not_ignored(self):
+        with tempfile.TemporaryDirectory(prefix="ntsc windows packages ") as directory:
+            fixture = Path(directory)
+            self.prepare_fixture(fixture)
+            result = self.run_fixture(fixture, NTSC_TEST_DUMPBIN_EXIT="7")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("dumpbin failed", result.stderr)
+            self.assertFalse((fixture / "scripts/dlls.wxs").exists())
 
 
 class IntelMacPackagingTests(unittest.TestCase):

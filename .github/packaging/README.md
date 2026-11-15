@@ -131,7 +131,7 @@ Artifact: `ntsc-<version>-macos-<arch>.dmg` (`arm64` or `x86_64`)
 ### Windows (.msi)
 
 `build-msi.ps1` runs `dumpbin /DEPENDENTS` to compute the DLL closure of
-`ntsc.exe`, copies the non-system DLLs (from the LLVM install directory) into
+the compiler and bundled tools, copies the non-system DLLs into
 the MSI, and emits a `dlls.wxs` fragment. It also stages a **self-contained
 Windows link path** so `ntsc build` works on a machine with no compiler
 installed:
@@ -145,6 +145,11 @@ installed:
   `x86_64-pc-windows-gnu` lib dir, created by
   `rustup target add x86_64-pc-windows-gnu`) are installed into a `mingw`
   subdirectory.
+
+Windows system and API-set DLLs are not bundled. Other dependencies are resolved
+beside their importing binary, in the LLVM directory, or in the x64 CRT
+directories under `VCToolsRedistDir`. Missing dependencies and `dumpbin` failures
+stop packaging instead of producing an incomplete installer.
 
 `tools.wxs` declares these files. At runtime `ntsc` prefers the bundled
 `ld.lld` (found next to the executable) over `link.exe`/`gcc` on PATH, so an
