@@ -228,6 +228,20 @@ an `archlinux` container as an unprivileged user, and commits as the
 
 ## Building locally
 
+### Artifact-only CI testing
+
+Manual runs default to `dry_run=true`, which runs the CI gate and packages all
+platforms without creating a GitHub Release or updating Homebrew, Scoop, or AUR:
+
+```bash
+gh workflow run release.yml --ref main -F dry_run=true
+```
+
+Select another branch with `--ref`, or override the package version with
+`-f version=X.Y.Z`. Without an override, branch dry runs use the Cargo workspace
+version. Download the `*-installers` artifacts from the Actions run.
+Non-dry runs require a tag; pushing a `v*` tag still releases normally.
+
 Each recipe takes the version as its first argument. The native packages and
 tarballs expect the release compiler and language server, the package-manager
 binary at `crates/ntsc-pkg/build/release/ntsc-pkg` (or `.exe`), and the

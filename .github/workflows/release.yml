@@ -1,4 +1,5 @@
 name: release
+run-name: "Binary release${{ inputs.dry_run && ' dry run' || '' }}: ${{ github.ref_name }}"
 
 # Builds and attaches installers to a GitHub Release when a version tag
 # (`v26.0.0b`, ...) is pushed. Each runner builds the `ntsc` release binary
@@ -41,11 +42,15 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to package (e.g. 26.0.0b). Defaults to the pushed tag."
+        description: "Version to package. Defaults to the tag or Cargo version for a dry run."
         required: false
+      dry_run:
+        description: "Test and package only; do not create a release or publish"
+        type: boolean
+        default: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   # ── RELEASE SWITCHES (consumed by the `config` job below) ──────────────────
@@ -101,30 +106,44 @@ jobs:
       run_tests: ${{ steps.flags.outputs.run_tests }}
       windows_only: ${{ steps.flags.outputs.windows_only }}
       publish: ${{ steps.flags.outputs.publish }}
+      dry_run: ${{ steps.flags.outputs.dry_run }}
       version: ${{ steps.flags.outputs.version }}
       msiversion: ${{ steps.flags.outputs.msiversion }}
       matrix: ${{ steps.flags.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v4
       - id: flags
         shell: bash
         env:
           # Read the dispatch input through the environment instead of
           # interpolating it into the script, so its value cannot inject shell.
           INPUT_VERSION: ${{ github.event.inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
+          dry_run="${DRY_RUN:-false}"
+          if [ "$dry_run" != "true" ] && [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::branch dispatches require dry_run=true"
+            exit 1
+          fi
+          publish="$PUBLISH"
+          if [ "$dry_run" = "true" ]; then
+            publish=false
+          fi
           printf 'run_tests=%s\n' "${RUN_TESTS}" >> "$GITHUB_OUTPUT"
           printf 'windows_only=%s\n' "${WINDOWS_ONLY}" >> "$GITHUB_OUTPUT"
-          printf 'publish=%s\n' "${PUBLISH}" >> "$GITHUB_OUTPUT"
+          printf 'publish=%s\n' "$publish" >> "$GITHUB_OUTPUT"
+          printf 'dry_run=%s\n' "$dry_run" >> "$GITHUB_OUTPUT"
 
-          # A `v*` tag is the normal path (`v0.1.0` -> `0.1.0`). A dispatch can
-          # override the version; without one it falls back to the ref name.
-          version="${INPUT_VERSION:-${GITHUB_REF_NAME#v}}"
+          if [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          fi
           if [ -z "$version" ]; then
             echo "::error::no version: push a v* tag or set the version input"
             exit 1
-          fi
-          if [ "${GITHUB_REF_TYPE}" != "tag" ] && [ -z "${INPUT_VERSION}" ]; then
-            echo "::warning::no version input on a branch dispatch; using '${version}'"
           fi
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           # The MSI ProductVersion is numeric only (`0.1.0`, not `0.1.0b`).
@@ -410,8 +429,11 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [config, build]
+    if: needs.config.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:

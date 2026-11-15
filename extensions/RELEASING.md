@@ -30,6 +30,22 @@ Set `GRAMMAR_REV=<sha>` to pin a different commit. `prepare` refuses a dirty
 
 ## Verification
 
+### Artifact-only testing
+
+Manual runs default to `dry_run=true`. To test an untagged branch:
+
+```console
+gh workflow run extensions-release.yml --ref main -f ref=main -F dry_run=true
+```
+
+Replace `main` with the branch to test. Verification and packaging use the
+resolved commit, and `extensions-dist` is available in the run's Actions
+artifacts. No GitHub Release, registry PR, or mirror push is created.
+Branch dry runs allow the development grammar pin; actual releases still
+require the strict commit pin and matching `extensions-vX.Y.Z` tag.
+To test an existing release tag, pass `-f tag=extensions-vX.Y.Z` instead.
+Do not push a new release tag just to test: tag pushes publish normally.
+
 The workflow runs:
 
 - `scripts/extensions-version.py check --strict-grammar --expect-tag`

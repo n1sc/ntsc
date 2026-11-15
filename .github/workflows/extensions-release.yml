@@ -1,4 +1,5 @@
 name: Extensions release
+run-name: "Extensions release${{ inputs.dry_run && ' dry run' || '' }}: ${{ inputs.tag || inputs.ref || github.ref_name }}"
 
 # Independent from the compiler release: this workflow only runs for
 # extensions-v* tags, which the compiler's v* trigger does not match.
@@ -10,17 +11,20 @@ on:
     inputs:
       tag:
         description: "Existing extensions-vX.Y.Z tag"
-        required: true
+        required: false
+      ref:
+        description: "Branch or commit to verify in dry-run mode; defaults to the selected ref"
+        required: false
       dry_run:
         description: "Verify and package only"
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: extensions-release-${{ inputs.tag || github.ref_name }}
+  group: extensions-release-${{ inputs.tag || inputs.ref || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -29,33 +33,48 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
+      ref: ${{ steps.meta.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag || inputs.ref || github.ref }}
           fetch-depth: 0
       - id: meta
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          INPUT_REF: ${{ inputs.ref }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
-          case "$tag" in
-            extensions-v*) ;;
-            *) echo "invalid tag: $tag" >&2; exit 1 ;;
-          esac
-          version="${tag#extensions-v}"
-          case "$version" in
-            *[!0-9.]*|.*|*.|*..*) echo "invalid version: $version" >&2; exit 1 ;;
-          esac
-          python3 -B scripts/extensions-version.py check --expect-tag "$tag"
+          tag=
+          if [ "$DRY_RUN" = "true" ]; then
+            python3 -B scripts/extensions-version.py check
+            version=$(python3 -B -c 'import json; print(json.load(open("extensions/shared/release.json"))["version"])')
+            if [ -n "$INPUT_TAG" ]; then
+              tag="$INPUT_TAG"
+              python3 -B scripts/extensions-version.py check --expect-tag "$tag"
+            fi
+          else
+            if [ -n "$INPUT_REF" ] && [ -z "$INPUT_TAG" ]; then
+              echo "branch or commit inputs require dry_run=true" >&2
+              exit 1
+            fi
+            tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
+            case "$tag" in
+              extensions-v*) ;;
+              *) echo "invalid tag: $tag" >&2; exit 1 ;;
+            esac
+            version="${tag#extensions-v}"
+            python3 -B scripts/extensions-version.py check --expect-tag "$tag"
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   verify:
     needs: meta
     uses: ./.github/workflows/extensions.yml
     with:
-      ref: ${{ needs.meta.outputs.tag }}
+      ref: ${{ needs.meta.outputs.ref }}
       upload_artifacts: true
 
   package:
@@ -64,7 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.meta.outputs.tag }}
+          ref: ${{ needs.meta.outputs.ref }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -73,8 +92,15 @@ jobs:
         with:
           path: artifacts
       - name: Verify release metadata
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          RELEASE_TAG: ${{ needs.meta.outputs.tag }}
         run: |
-          python3 -B scripts/extensions-version.py check --strict-grammar --expect-tag "${{ needs.meta.outputs.tag }}"
+          if [ "$DRY_RUN" = "true" ]; then
+            python3 -B scripts/extensions-version.py check
+          else
+            python3 -B scripts/extensions-version.py check --strict-grammar --expect-tag "$RELEASE_TAG"
+          fi
           python3 -B extensions/shared/generate.py --check
           git diff --exit-code -- extensions
       - name: Package artifacts
@@ -119,7 +145,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.meta.outputs.tag }}
+          ref: ${{ needs.meta.outputs.ref }}
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
