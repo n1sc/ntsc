@@ -226,6 +226,8 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>, target_triple: &str
     declare!("ntask_chan_retain", i64_ty, i64_ty);
     declare!("ntask_chan_send", i8_ty, i64_ty, i64_ty);
     declare!("ntask_chan_recv", i8_ty, i64_ty);
+    declare!("ntask_chan_send_poll", i8_ty, i64_ty, i64_ty);
+    declare!("ntask_chan_recv_poll", i8_ty, i64_ty);
     declare!("ntask_chan_recv_result", i64_ty);
     declare!("ntask_chan_recv_ok", i8_ty);
     declare!("ntask_chan_close", void_ty, i64_ty);

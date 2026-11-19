@@ -85,6 +85,124 @@ async fun main() -> int {
 }
 
 #[test]
+fn buffered_and_rendezvous_channel_continuations_preserve_delivery() {
+    for capacity in [0, 1, 64] {
+        let source = format!(
+            r#"
+async fun producer(chan[int] values) {{
+    var int i = 0
+    while (i < 1000) {{
+        i |> values
+        i = i + 1
+    }}
+    close(values)
+}}
+
+async fun main() -> int {{
+    var chan[int] values = chan.new({capacity})
+    go producer(values)
+    var int expected = 0
+    var int total = 0
+    for value in values {{
+        if (value != expected) {{
+            return 1
+        }}
+        total = total + value
+        expected = expected + 1
+    }}
+    if (expected != 1000 || total != 499500) {{
+        return 2
+    }}
+    say("channel delivery ok")
+    return 0
+}}
+"#
+        );
+        let name = format!("ntroutine_channel_continuation_{capacity}");
+        let (stdout, stderr, output) = build_and_run(&source, &name);
+        assert_clean(&stdout, &stderr, &output, &["channel delivery ok"]);
+    }
+}
+
+#[test]
+fn buffered_and_rendezvous_channels_transfer_owned_strings() {
+    for capacity in [0, 1, 64] {
+        let source = format!(
+            r#"
+use fmt
+
+async fun producer(chan[string] words) {{
+    var int i = 0
+    while (i < 1000) {{
+        var string word = "word-" + fmt.i64_to_str(i)
+        word |> words
+        i = i + 1
+    }}
+    close(words)
+}}
+
+async fun main() -> int {{
+    var chan[string] words = chan.new({capacity})
+    go producer(words)
+    var int received = 0
+    for word in words {{
+        if (word != "word-" + fmt.i64_to_str(received)) {{
+            return 1
+        }}
+        received = received + 1
+    }}
+    if (received != 1000) {{
+        return 2
+    }}
+    say("owned channel delivery ok")
+    return 0
+}}
+"#
+        );
+        let name = format!("ntroutine_owned_channel_delivery_{capacity}");
+        let (stdout, stderr, output) = build_and_run(&source, &name);
+        assert_clean(&stdout, &stderr, &output, &["owned channel delivery ok"]);
+    }
+}
+
+#[test]
+fn immediate_closed_channel_sends_yield_to_timers_and_shutdown() {
+    let source = r#"
+use fmt
+
+async fun discard_forever(chan[string] discarded) {
+    var int i = 0
+    while (true) {
+        var string value = "discard-" + fmt.i64_to_str(i)
+        value |> discarded
+        i = i + 1
+    }
+}
+
+async fun heartbeat(chan[int] done) {
+    await async.sleep(5)
+    7 |> done
+}
+
+async fun main() -> int {
+    var chan[string] discarded = chan.new(1)
+    close(discarded)
+    var chan[int] done = chan.new(1)
+    go discard_forever(discarded)
+    go heartbeat(done)
+    value <| done
+    if (value != 7) {
+        return 1
+    }
+    say("channel budget fairness ok")
+    return 0
+}
+"#;
+    let (stdout, stderr, output) = build_and_run(source, "ntroutine_channel_budget_fairness");
+    assert_clean(&stdout, &stderr, &output, &["channel budget fairness ok"]);
+}
+
+#[test]
 fn go_block_captures_and_for_in_chan() {
     let source = r#"
 async fun main() -> int {

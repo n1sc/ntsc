@@ -127,9 +127,8 @@ pub(crate) enum SuspKind {
 }
 
 /// One channel send/receive suspension point in an async body. Channel ops
-/// park the running goroutine: `ntask_chan_send`/`ntask_chan_recv` set the
-/// goroutine's park state and the poll returns 0; on resume the operation has
-/// been completed by the scheduler. A receive reads its result through
+/// may complete immediately or park the running goroutine until another
+/// scheduler poll. A receive reads its result through
 /// `ntask_chan_recv_result`.
 pub(crate) struct ChanInfo {
     stmt: Stmt,
@@ -1544,10 +1543,13 @@ pub(crate) fn emit_async_suspend_statement<'ctx>(
         .context
         .append_basic_block(fn_ctx.function, &format!("async_resume_{ordinal}"));
     fn_ctx.async_resume_blocks.push(resume_bb);
-    match kind {
-        SuspKind::Await(await_idx) => emit_await_suspend(fn_ctx, layout, await_idx)?,
-        SuspKind::Chan(chan_idx) => emit_chan_suspend(fn_ctx, layout, chan_idx)?,
-    }
+    let completed = match kind {
+        SuspKind::Await(await_idx) => {
+            emit_await_suspend(fn_ctx, layout, await_idx)?;
+            None
+        }
+        SuspKind::Chan(chan_idx) => Some(emit_chan_suspend(fn_ctx, layout, chan_idx)?),
+    };
     let pending_bb = fn_ctx
         .context
         .append_basic_block(fn_ctx.function, "async_pending");
@@ -1558,7 +1560,13 @@ pub(crate) fn emit_async_suspend_statement<'ctx>(
     {
         return Ok(());
     }
-    fn_ctx.builder.build_unconditional_branch(pending_bb)?;
+    if let Some(completed) = completed {
+        fn_ctx
+            .builder
+            .build_conditional_branch(completed, resume_bb, pending_bb)?;
+    } else {
+        fn_ctx.builder.build_unconditional_branch(pending_bb)?;
+    }
     fn_ctx.builder.position_at_end(pending_bb);
     fn_ctx
         .builder
@@ -2236,14 +2244,13 @@ pub(crate) fn emit_await_resume<'ctx>(
 }
 
 /// Suspend on a channel send/receive `chan_idx`: evaluate the channel (and
-/// value), park the goroutine via `ntask_chan_send`/`ntask_chan_recv`, store
-/// the resume state, and return 0. On the next poll the scheduler has
-/// completed the op and `emit_chan_resume` reads any received value.
+/// value), attempt the operation, and store the resume state. The returned
+/// condition selects immediate resumption or suspension to the scheduler.
 pub(crate) fn emit_chan_suspend<'ctx>(
     fn_ctx: &mut FunctionContext<'ctx, '_>,
     layout: &AsyncLayout,
     chan_idx: usize,
-) -> Result<(), crate::CodegenError> {
+) -> Result<inkwell::values::IntValue<'ctx>, crate::CodegenError> {
     let info = &layout.chan_infos[chan_idx];
     let stmt = &info.stmt;
     let channel_expr = chan_stmt_channel(stmt)?;
@@ -2268,9 +2275,9 @@ pub(crate) fn emit_chan_suspend<'ctx>(
             let value_arg = value.value.into_int_value();
             let send_fn = fn_ctx
                 .module
-                .get_function("ntask_chan_send")
+                .get_function("ntask_chan_send_poll")
                 .ok_or_else(|| {
-                    crate::CodegenError::LLVMError("ntask_chan_send not declared".into())
+                    crate::CodegenError::LLVMError("ntask_chan_send_poll not declared".into())
                 })?;
             fn_ctx.builder.build_call(
                 send_fn,
@@ -2281,22 +2288,34 @@ pub(crate) fn emit_chan_suspend<'ctx>(
         ChanOpKind::Recv | ChanOpKind::Loop => {
             let recv_fn = fn_ctx
                 .module
-                .get_function("ntask_chan_recv")
+                .get_function("ntask_chan_recv_poll")
                 .ok_or_else(|| {
-                    crate::CodegenError::LLVMError("ntask_chan_recv not declared".into())
+                    crate::CodegenError::LLVMError("ntask_chan_recv_poll not declared".into())
                 })?;
             fn_ctx
                 .builder
                 .build_call(recv_fn, &[channel_arg.into()], "chan_recv")?
         }
     };
-    let returned = call_result_to_value(fn_ctx, &result).into_int_value();
-    // `ntask_chan_send`/`ntask_chan_recv` return 1 on an invalid channel
-    // handle; assert so a corrupt handle surfaces as a panic. 0 is success.
+    let completed = emit_channel_poll_result(fn_ctx, &result)?;
+    let state_ptr = fn_ctx.future_field(0)?;
+    let next_state = fn_ctx
+        .context
+        .i32_type()
+        .const_int((layout.chan_state_index[chan_idx] as u64) + 1, false);
+    fn_ctx.builder.build_store(state_ptr, next_state)?;
+    Ok(completed)
+}
+
+fn emit_channel_poll_result<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    result: &inkwell::values::CallSiteValue<'ctx>,
+) -> Result<inkwell::values::IntValue<'ctx>, crate::CodegenError> {
+    let returned = call_result_to_value(fn_ctx, result).into_int_value();
     let handle_ok = fn_ctx.builder.build_int_compare(
-        inkwell::IntPredicate::EQ,
+        inkwell::IntPredicate::ULE,
         returned,
-        fn_ctx.context.i8_type().const_zero(),
+        fn_ctx.context.i8_type().const_int(1, false),
         "chan_handle_ok",
     )?;
     let handle_ok_i8 = fn_ctx.builder.build_int_z_extend(
@@ -2315,14 +2334,12 @@ pub(crate) fn emit_chan_suspend<'ctx>(
         ],
         "chan_handle_assert",
     )?;
-
-    let state_ptr = fn_ctx.future_field(0)?;
-    let next_state = fn_ctx
-        .context
-        .i32_type()
-        .const_int((layout.chan_state_index[chan_idx] as u64) + 1, false);
-    fn_ctx.builder.build_store(state_ptr, next_state)?;
-    Ok(())
+    Ok(fn_ctx.builder.build_int_compare(
+        inkwell::IntPredicate::EQ,
+        returned,
+        fn_ctx.context.i8_type().const_int(1, false),
+        "chan_completed",
+    )?)
 }
 
 /// On resume after a channel receive, read the completed value through
@@ -2338,6 +2355,9 @@ pub(crate) fn emit_chan_resume<'ctx>(
         return Ok(());
     }
     let stmt = &info.stmt;
+    let receive_bb = fn_ctx.builder.get_insert_block().ok_or_else(|| {
+        crate::CodegenError::LLVMError("channel resume without a basic block".into())
+    })?;
 
     let result_fn = fn_ctx
         .module
@@ -2402,48 +2422,32 @@ pub(crate) fn emit_chan_resume<'ctx>(
             .get_insert_block()
             .is_some_and(|block| block.get_terminator().is_none())
         {
-            // Back-edge: suspend on the next receive, exactly like the
-            // initial suspension (recv, assert handle, store state, yield).
             let channel = emit_expression(fn_ctx, &stmt_channel_clone(stmt)?)?;
             let channel_arg = channel.value.into_int_value();
             let recv_fn = fn_ctx
                 .module
-                .get_function("ntask_chan_recv")
+                .get_function("ntask_chan_recv_poll")
                 .ok_or_else(|| {
-                    crate::CodegenError::LLVMError("ntask_chan_recv not declared".into())
+                    crate::CodegenError::LLVMError("ntask_chan_recv_poll not declared".into())
                 })?;
             let result =
                 fn_ctx
                     .builder
                     .build_call(recv_fn, &[channel_arg.into()], "chan_recv_next")?;
-            let returned = call_result_to_value(fn_ctx, &result).into_int_value();
-            let handle_ok = fn_ctx.builder.build_int_compare(
-                inkwell::IntPredicate::EQ,
-                returned,
-                fn_ctx.context.i8_type().const_zero(),
-                "chan_handle_ok_next",
-            )?;
-            let handle_ok_i8 = fn_ctx.builder.build_int_z_extend(
-                handle_ok,
-                fn_ctx.context.i8_type(),
-                "chan_handle_ok_next_i8",
-            )?;
-            fn_ctx.builder.build_call(
-                fn_ctx.module.get_function("ntsc_assert").ok_or_else(|| {
-                    crate::CodegenError::LLVMError("ntsc_assert not declared".into())
-                })?,
-                &[
-                    handle_ok_i8.into(),
-                    fn_ctx.context.i64_type().const_zero().into(),
-                ],
-                "chan_handle_assert_next",
-            )?;
+            let completed = emit_channel_poll_result(fn_ctx, &result)?;
             let state_ptr = fn_ctx.future_field(0)?;
             let next_state = fn_ctx
                 .context
                 .i32_type()
                 .const_int((layout.chan_state_index[chan_idx] as u64) + 1, false);
             fn_ctx.builder.build_store(state_ptr, next_state)?;
+            let pending_bb = fn_ctx
+                .context
+                .append_basic_block(fn_ctx.function, "chan_loop_pending");
+            fn_ctx
+                .builder
+                .build_conditional_branch(completed, receive_bb, pending_bb)?;
+            fn_ctx.builder.position_at_end(pending_bb);
             fn_ctx
                 .builder
                 .build_return(Some(&fn_ctx.context.i8_type().const_int(0, false)))?;

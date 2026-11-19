@@ -1,11 +1,10 @@
 //! Core state types of the ntroutine substrate: the global scheduling and
 //! parking registry, channels, goroutines, and reactor interests.
 //!
-//! All blocking coordination (which goroutine is parked on which channel, the
-//! channel buffers, timers, and file-descriptor interests) lives under a single
-//! [`Mutex`] guarded [`Global`] state, so a block/unblock decision and the
-//! registration of a waiter are one atomic critical section — there is no lost
-//! wakeup. Runnable goroutines are handed to per-worker local queues (see
+//! Channel buffers, timers, descriptor interests, and waiter registration use
+//! one [`Mutex`] guarded [`Global`] state. Task lifecycle state uses [`TASKS`];
+//! parking acquires Global before a task shard, while ordinary polls and
+//! completions need only a shard. Runnable goroutines use per-worker queues (see
 //! [`crate::ntask::scheduler`]), so CPU-bound work spreads across the OS-thread
 //! pool while I/O-bound goroutines park without tying up a thread.
 
@@ -13,6 +12,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 
+use super::task_stack::TaskStack;
+use super::task_table::TaskTable;
 use crate::idmap::IdMap;
 use crate::registry::{self, NULL};
 
@@ -56,7 +57,7 @@ pub(crate) enum ChanOp {
 #[derive(Debug)]
 pub(crate) struct Goroutine {
     /// Nested async task stack. It moves with the goroutine between workers.
-    pub(crate) tasks: Vec<(PollFn, i64)>,
+    pub(crate) tasks: TaskStack,
     /// Registry id of this goroutine's `Handle::Goroutine` wrapper, so it is
     /// reclaimed by one removal when the goroutine finishes.
     pub(crate) handle: i64,
@@ -145,14 +146,13 @@ pub(crate) struct AsyncOp {
     pub(crate) done: bool,
 }
 
-/// The global scheduling + parking state, guarded by one mutex.
+/// Shared ready-queue and parking state, guarded by one mutex.
 pub(crate) struct Global {
     pub(crate) next_core: i64,
     /// Ready goroutine ids, shared queue consumed by workers. A global queue
     /// keeps the block/unblock path deadlock-free and still lets many workers
     /// run CPU-bound goroutines in parallel.
     pub(crate) ready: VecDeque<i64>,
-    pub(crate) goroutines: IdMap<Goroutine>,
     pub(crate) chans: IdMap<Chan>,
     pub(crate) ios: IdMap<AsyncIo>,
     /// Offloaded blocking jobs not yet completed (or awaiting a reader).
@@ -165,13 +165,14 @@ pub(crate) static GLOBAL: LazyLock<Mutex<Global>> = LazyLock::new(|| {
     Mutex::new(Global {
         next_core: 1,
         ready: VecDeque::new(),
-        goroutines: IdMap::default(),
         chans: IdMap::default(),
         ios: IdMap::default(),
         ops: IdMap::default(),
         timers: std::collections::BTreeMap::new(),
     })
 });
+
+pub(crate) static TASKS: LazyLock<TaskTable> = LazyLock::new(TaskTable::default);
 
 /// Number of goroutines currently parked on timers.
 static TIMER_PENDING: AtomicI64 = AtomicI64::new(0);
@@ -245,8 +246,7 @@ pub(crate) fn pop_ready_batch(workers: usize) -> Vec<i64> {
         return Vec::new();
     }
     let mut guard = GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
-    let share = guard.ready.len() / workers.max(1) + 1;
-    let take = share.min(guard.ready.len()).min(READY_BATCH_CAP);
+    let take = ready_batch_size(guard.ready.len(), workers);
     let batch: Vec<i64> = guard.ready.drain(..take).collect();
     READY_LEN.store(guard.ready.len(), Ordering::Release);
     batch
@@ -254,6 +254,10 @@ pub(crate) fn pop_ready_batch(workers: usize) -> Vec<i64> {
 
 /// Upper bound on one refill, so a worker never holds the shared lock long.
 const READY_BATCH_CAP: usize = 128;
+
+fn ready_batch_size(ready: usize, workers: usize) -> usize {
+    (ready / workers.max(1) + 1).min(ready).min(READY_BATCH_CAP)
+}
 
 /// Clear the shared ready queue, keeping [`READY_LEN`] in step.
 pub(crate) fn clear_ready(guard: &mut Global) {
@@ -271,10 +275,8 @@ pub(crate) fn sync_ready_len(guard: &Global) {
 /// Register a new goroutine and return its core id. The goroutine is not
 /// scheduled until [`crate::ntask::scheduler::make_runnable`] is called for it.
 pub(crate) fn register_goroutine(g: Goroutine) -> i64 {
-    let mut guard = GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
-    let id = guard.next_core;
-    guard.next_core = guard.next_core.saturating_add(1);
-    guard.goroutines.insert(id, g);
+    let id = reserve_core_ids(1);
+    TASKS.insert(id, g);
     id
 }
 
@@ -285,7 +287,7 @@ pub(crate) fn register_goroutine_runnable(g: Goroutine) -> i64 {
     let mut guard = GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
     let id = guard.next_core;
     guard.next_core = guard.next_core.saturating_add(1);
-    guard.goroutines.insert(id, g);
+    TASKS.insert(id, g);
     guard.ready.push_back(id);
     sync_ready_len(&guard);
     id
@@ -336,7 +338,7 @@ pub(crate) fn register_io() -> i64 {
 /// reactor spinning. The same applies to `chan`/`io`/`job` waiters.
 pub(crate) fn drop_goroutine(core: i64) {
     let mut guard = GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
-    let Some(removed) = guard.goroutines.remove(&core) else {
+    let Some(removed) = TASKS.remove(core) else {
         return;
     };
     let mut abandoned = Vec::new();
@@ -509,6 +511,16 @@ pub(crate) fn drop_op(core: i64) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn shared_queue_batch_size_preserves_fairness_and_capacity() {
+        assert_eq!(ready_batch_size(0, 4), 0);
+        assert_eq!(ready_batch_size(1, 4), 1);
+        assert_eq!(ready_batch_size(64, 4), 17);
+        assert_eq!(ready_batch_size(64, 5), 13);
+        assert_eq!(ready_batch_size(1000, 4), READY_BATCH_CAP);
+        assert_eq!(ready_batch_size(10, 0), 10);
+    }
+
     /// A goroutine dropped while parked on a timer must leave no deadline
     /// behind: a stale entry would keep `TIMER_PENDING` above zero and the
     /// reactor scanning forever.
@@ -586,7 +598,7 @@ mod tests {
             0
         }
         let core = register_goroutine(Goroutine {
-            tasks: vec![(never_done as PollFn, NULL)],
+            tasks: TaskStack::single(never_done, NULL),
             handle: NULL,
             cleanup: None,
             pending_send: NULL,
@@ -611,7 +623,7 @@ mod tests {
 
         let guard = GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
         assert!(!guard.timers.contains_key(&deadline));
-        assert!(!guard.goroutines.contains_key(&core));
+        assert!(!TASKS.contains(core));
         drop(guard);
         assert!(!has_pending_timers());
     }
@@ -625,7 +637,7 @@ mod tests {
         }
         let chan_core = register_chan(0, false);
         let core = register_goroutine(Goroutine {
-            tasks: vec![(never_done as PollFn, NULL)],
+            tasks: TaskStack::single(never_done, NULL),
             handle: NULL,
             cleanup: None,
             pending_send: NULL,
@@ -663,7 +675,7 @@ mod tests {
         let recv_value = registry::put_string("recv".to_string());
         let exception = registry::put_string("exception".to_string());
         let core = register_goroutine(Goroutine {
-            tasks: vec![(never_done as PollFn, NULL)],
+            tasks: TaskStack::single(never_done, NULL),
             handle: NULL,
             cleanup: None,
             pending_send: send_value,

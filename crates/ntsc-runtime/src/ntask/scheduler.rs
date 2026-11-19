@@ -4,15 +4,15 @@
 //! Each worker owns a lock-free run queue (see [`super::runqueue`]); a spawn
 //! from a worker lands on that worker's queue, a full ring overflows to the
 //! shared queue under [`core::GLOBAL`], and idle workers steal from peers. A
-//! worker pops a goroutine, runs its poll function without the lock held, then
-//! re-locks to read its wait target and requeue it, park it on a
+//! worker takes a goroutine's stack from a task shard and polls without a
+//! lock held, then stores its state and requeues it or parks it on a
 //! channel/timer/descriptor, or finish it. Because a goroutine is a single
 //! stackless future (no worker thread-local async stack), a torn-out
 //! goroutine can be picked up by any worker — that is what lets CPU work
 //! spread across the pool.
 //!
 //! Blocking coordination (channel buffers, parked waiters, timers, fd
-//! interests) is all inside the same [`GLOBAL`] mutex as the shared queue, so
+//! interests) remains inside the [`GLOBAL`] mutex with the shared queue, so
 //! a block/unblock decision is one atomic critical section: there is no lost
 //! wakeup. Idle workers sleep on a condition variable; any spawn, channel
 //! handoff, timer expiry, or fd-ready event re-notifies them.
@@ -24,6 +24,7 @@ use std::thread::JoinHandle;
 
 use super::core::{self, ChanOp, Goroutine, Park};
 use super::runqueue::RunQueue;
+use super::task_stack::TaskStack;
 use crate::registry::NULL;
 
 /// Idle-worker sleep signal. Workers wait on this when the ready queue is
@@ -44,9 +45,11 @@ static OFFLOAD_THREADS: LazyLock<Mutex<Vec<JoinHandle<()>>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+const CHANNEL_POLL_BUDGET: u32 = 8;
 
 thread_local! {
     static CURRENT_GID: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+    static CHANNEL_POLLS_LEFT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 
     /// Number of consecutive local-queue spawns on this worker. Large spawn
     /// bursts already have runnable work in the owner's queue, so waking an
@@ -198,6 +201,14 @@ impl TaskState {
         recv_result_owned: false,
         recv_ok: false,
     };
+
+    fn store(self, goroutine: &mut Goroutine) {
+        goroutine.pending_send = self.pending_send;
+        goroutine.pending_send_owned = self.pending_send_owned;
+        goroutine.recv_result = self.recv_result;
+        goroutine.recv_result_owned = self.recv_result_owned;
+        goroutine.recv_ok = self.recv_ok;
+    }
 }
 
 /// Workers launched by [`start`]; kept so [`shutdown`] can join them.
@@ -569,10 +580,7 @@ fn spawn_detached_batched(goroutine: Goroutine) -> i64 {
     // hot `while (true)` poll loop), because the flush only runs after a
     // poll returns. `notify_one` already skips its futex when no worker is
     // parked, so the amortization bought nothing here.
-    {
-        let mut guard = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
-        guard.goroutines.insert(gid, goroutine);
-    }
+    core::TASKS.insert(gid, goroutine);
     if let Some(queue) = local_queue() {
         if let Some(displaced) = queue.push_next(gid)
             && !queue.push(displaced)
@@ -587,7 +595,7 @@ fn spawn_detached_batched(goroutine: Goroutine) -> i64 {
     gid
 }
 
-/// Publish the current worker's detached tasks under one global lock and then
+/// Publish the current worker's detached tasks in the task table and then
 /// enqueue them locally without issuing one wakeup per child.
 fn flush_detached_batch() {
     let pending = DETACHED_BATCH.with(|batch| std::mem::take(&mut *batch.borrow_mut()));
@@ -595,11 +603,8 @@ fn flush_detached_batch() {
         return;
     }
     let ids: Vec<i64> = pending.iter().map(|(gid, _)| *gid).collect();
-    {
-        let mut guard = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
-        for (gid, goroutine) in pending {
-            guard.goroutines.insert(gid, goroutine);
-        }
+    for (gid, goroutine) in pending {
+        core::TASKS.insert(gid, goroutine);
     }
     if let Some(queue) = local_queue() {
         for gid in ids {
@@ -623,7 +628,7 @@ fn new_goroutine(
     handle: i64,
 ) -> Goroutine {
     Goroutine {
-        tasks: vec![(poll, future)],
+        tasks: TaskStack::single(poll, future),
         handle,
         cleanup: cleanup.map(|f| (f, future)),
         pending_send: NULL,
@@ -693,10 +698,21 @@ fn overflow_to_shared(queue: &RunQueue, gid: i64) {
 /// and this load both read stale, losing the wakeup. Go's `wakep` and Tokio's
 /// `notify_should_wakeup` use exactly this pattern.
 fn should_wake() -> bool {
+    // Temporary workers decrement the unparked count before the live count.
+    // Read the live count first so an exit cannot hide an idle worker.
+    let workers = live_worker_count();
     let state = IDLE_STATE.fetch_add(0, Ordering::SeqCst);
+    needs_idle_worker_wakeup(state, workers)
+}
+
+fn live_worker_count() -> usize {
+    REGULAR_WORKERS.load(Ordering::Acquire) + EXTRA_WORKERS.load(Ordering::SeqCst)
+}
+
+fn needs_idle_worker_wakeup(state: usize, workers: usize) -> bool {
     let searching = state & SEARCHING_MASK;
     let unparked = state >> UNPARKED_SHIFT;
-    searching == 0 && unparked < queues().len()
+    searching == 0 && unparked < workers
 }
 
 /// Notify a single idle worker, if waking one can help.
@@ -845,7 +861,7 @@ fn pop_ready(index: usize, tick: u32) -> Option<i64> {
     if let Some(gid) = queue.pop() {
         return Some(gid);
     }
-    if let Some(gid) = refill_from_shared(queue, all.len()) {
+    if let Some(gid) = refill_from_shared(queue, live_worker_count()) {
         return Some(gid);
     }
     steal_from_peers(queue, index, all)
@@ -962,26 +978,23 @@ fn has_work() -> bool {
 /// runs without the global lock held, so it may call back into the runtime.
 fn drive(gid: i64) {
     LOCAL_SPAWN_COUNT.with(|count| count.set(0));
-    let tasks = {
-        let mut g = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
-        match g.goroutines.get_mut(&gid) {
-            Some(gr) => {
-                // Take the suspension state onto this worker for the poll, so
-                // the runtime calls the poll makes stay lock-free.
-                CURRENT_STATE.with(|state| {
-                    state.set(TaskState {
-                        park: Park::None,
-                        pending_send: gr.pending_send,
-                        pending_send_owned: gr.pending_send_owned,
-                        recv_result: gr.recv_result,
-                        recv_result_owned: gr.recv_result_owned,
-                        recv_ok: gr.recv_ok,
-                    })
-                });
-                std::mem::take(&mut gr.tasks)
-            }
-            None => return,
-        }
+    CHANNEL_POLLS_LEFT.with(|budget| budget.set(CHANNEL_POLL_BUDGET));
+    let Some(tasks) = core::TASKS.with_mut(gid, |gr| {
+        // Take the suspension state onto this worker for the poll, so
+        // the runtime calls the poll makes stay lock-free.
+        CURRENT_STATE.with(|state| {
+            state.set(TaskState {
+                park: Park::None,
+                pending_send: gr.pending_send,
+                pending_send_owned: gr.pending_send_owned,
+                recv_result: gr.recv_result,
+                recv_result_owned: gr.recv_result_owned,
+                recv_ok: gr.recv_ok,
+            })
+        });
+        std::mem::take(&mut gr.tasks)
+    }) else {
+        return;
     };
     CURRENT_GID.with(|cur| cur.set(Some(gid)));
     let poll_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -998,17 +1011,15 @@ fn drive(gid: i64) {
             CURRENT_STATE.with(|state| state.set(TaskState::IDLE));
             let message = crate::registry::put_string("goroutine panicked".to_string());
             let mut g = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
-            let found = g.goroutines.contains_key(&gid);
+            let found = core::TASKS.contains(gid);
             if !found {
                 drop(g);
                 let _ = crate::registry::remove(message);
                 return;
             }
-            let joiners = g
-                .goroutines
-                .get_mut(&gid)
-                .map(|gr| {
-                    gr.tasks = Vec::new();
+            let joiners = core::TASKS
+                .with_mut(gid, |gr| {
+                    gr.tasks = TaskStack::new();
                     gr.done = true;
                     gr.cleanup = None;
                     gr.pending_exception = message;
@@ -1023,6 +1034,7 @@ fn drive(gid: i64) {
             eprintln!(
                 "[sched] goroutine {gid} panicked; parked as failed (never silently dropped)"
             );
+            core::TASKS.notify_completion(gid);
             notify_all();
             return;
         }
@@ -1037,28 +1049,21 @@ fn drive(gid: i64) {
     // reaches here, but a multi-poll body hits it every turn), so keeping the
     // global lock out of it removes one acquisition per poll.
     if !done && matches!(state.park, Park::None) {
+        if core::TASKS
+            .with_mut(gid, |gr| {
+                gr.tasks = tasks;
+                state.store(gr);
+            })
+            .is_none()
         {
-            let mut g = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
-            let Some(gr) = g.goroutines.get_mut(&gid) else {
-                return;
-            };
-            gr.tasks = tasks;
-            gr.pending_send = state.pending_send;
-            gr.pending_send_owned = state.pending_send_owned;
-            gr.recv_result = state.recv_result;
-            gr.recv_result_owned = state.recv_result_owned;
-            gr.recv_ok = state.recv_ok;
+            return;
         }
         requeue_instant(gid);
         return;
     }
-    let mut g = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
     if done {
         watchdog_note_settled(gid);
-        let (joiners, reclaim, handle) = {
-            let Some(gr) = g.goroutines.get_mut(&gid) else {
-                return;
-            };
+        let Some((joiners, reclaim)) = core::TASKS.with_mut(gid, |gr| {
             gr.tasks = tasks;
             gr.done = true;
             // The trampoline already reclaimed the future on this path.
@@ -1077,37 +1082,35 @@ fn drive(gid: i64) {
             // completes before its caller reaches `ntask_join`. Detached
             // goroutines have a null wrapper and can be reclaimed eagerly.
             let reclaim = gr.handle == NULL && gr.pending_exception == NULL && joiners.is_empty();
-            (joiners, reclaim, gr.handle)
-        };
-        for j in &joiners {
-            g.ready.push_back(*j);
-        }
-        core::sync_ready_len(&g);
-        if reclaim {
-            g.goroutines.remove(&gid);
-        }
-        drop(g);
-        if reclaim {
-            crate::registry::remove_goroutine_handle(handle);
-        }
-        // Reaches a woken joiner and any `join_blocking` caller; the main
-        // thread waits on this for every program's root future.
-        notify_all();
-        return;
-    }
-    let park = {
-        let Some(gr) = g.goroutines.get_mut(&gid) else {
+            (joiners, reclaim)
+        }) else {
             return;
         };
+        if reclaim {
+            core::TASKS.reclaim_detached(gid);
+            // Detached completion has no joiners and made no work runnable.
+            return;
+        }
+        if !joiners.is_empty() {
+            let mut g = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
+            g.ready.extend(joiners.iter().copied());
+            core::sync_ready_len(&g);
+        }
+        core::TASKS.notify_completion(gid);
+        if !joiners.is_empty() {
+            notify_all();
+        }
+        return;
+    }
+    let mut g = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(park) = core::TASKS.with_mut(gid, |gr| {
         gr.tasks = tasks;
         // Flush the state the poll produced; `park` is consumed here, so the
         // stored copy always reads `Park::None` between polls.
-        gr.pending_send = state.pending_send;
-        gr.pending_send_owned = state.pending_send_owned;
-        gr.recv_result = state.recv_result;
-        gr.recv_result_owned = state.recv_result_owned;
-        gr.recv_ok = state.recv_ok;
+        state.store(gr);
         state.park
+    }) else {
+        return;
     };
     let mut woke = false;
     let mut requeue_local = false;
@@ -1119,7 +1122,13 @@ fn drive(gid: i64) {
             // Handoff or park: either way this drive settled (a handoff
             // completed its operation; a park waits).
             watchdog_note_settled(gid);
-            woke = chan_op(&mut g, gid, core, op);
+            let mut channel_state = state;
+            let progress = chan_op(&mut g, gid, core, op, &mut channel_state);
+            core::TASKS.with_mut(gid, |gr| channel_state.store(gr));
+            if progress != ChannelProgress::Blocked {
+                g.ready.push_back(gid);
+            }
+            woke = progress == ChannelProgress::Handoff;
         }
         Park::Timer { at } => {
             watchdog_note_settled(gid);
@@ -1197,161 +1206,152 @@ fn drive(gid: i64) {
 /// Park on a sibling goroutine's completion. Returns `true` if the target
 /// already finished and this goroutine was requeued (so a wake must be sent).
 fn join_park(g: &mut core::Global, gid: i64, target: i64) -> bool {
-    let Some(done_result) = g
-        .goroutines
-        .get(&target)
-        .map(|target_g| (target_g.done, target_g.result))
-    else {
-        g.ready.push_back(gid);
-        return true;
-    };
-    if done_result.0 {
-        if let Some(joiner) = g.goroutines.get_mut(&gid) {
-            joiner.result = done_result.1;
+    let result = core::TASKS.with_mut(target, |task| {
+        if task.done {
+            Some(task.result)
+        } else {
+            task.joiners.push(gid);
+            None
         }
-        g.ready.push_back(gid);
-        true
-    } else {
-        if let Some(target_g) = g.goroutines.get_mut(&target) {
-            target_g.joiners.push(gid);
+    });
+    match result {
+        Some(None) => false,
+        Some(Some(result)) => {
+            core::TASKS.with_mut(gid, |joiner| joiner.result = result);
+            g.ready.push_back(gid);
+            true
         }
-        false
+        None => {
+            g.ready.push_back(gid);
+            true
+        }
     }
 }
 
 /// Perform a channel send/recv for a goroutine that just parked on it. Returns
 /// `true` if an opposite waiter was woken (so a wake must be sent).
-fn chan_op(g: &mut core::Global, gid: i64, core_id: i64, op: ChanOp) -> bool {
+#[derive(PartialEq, Eq)]
+enum ChannelProgress {
+    Blocked,
+    Completed,
+    Handoff,
+}
+
+fn chan_op(
+    g: &mut core::Global,
+    gid: i64,
+    core_id: i64,
+    op: ChanOp,
+    caller: &mut TaskState,
+) -> ChannelProgress {
     match op {
-        ChanOp::Send => chan_send(g, gid, core_id),
-        ChanOp::Recv => chan_recv(g, gid, core_id),
+        ChanOp::Send => chan_send(g, gid, core_id, caller),
+        ChanOp::Recv => chan_recv(g, gid, core_id, caller),
     }
 }
 
-fn chan_send(g: &mut core::Global, gid: i64, core_id: i64) -> bool {
-    let value = g
-        .goroutines
-        .get(&gid)
-        .map(|gr| gr.pending_send)
-        .unwrap_or(NULL);
+fn chan_send(
+    g: &mut core::Global,
+    gid: i64,
+    core_id: i64,
+    caller: &mut TaskState,
+) -> ChannelProgress {
+    let value = caller.pending_send;
     let Some(chan) = g.chans.get_mut(&core_id) else {
         // Channel gone: treat as a no-op send (value released by caller).
-        if let Some(gr) = g.goroutines.get_mut(&gid) {
-            gr.pending_send = NULL;
-            gr.pending_send_owned = false;
-        }
-        g.ready.push_back(gid);
-        return false;
+        caller.pending_send = NULL;
+        caller.pending_send_owned = false;
+        return ChannelProgress::Completed;
     };
     if chan.closed {
         if chan.owns_elements {
             let _ = crate::registry::remove(value);
         }
-        if let Some(gr) = g.goroutines.get_mut(&gid) {
-            gr.pending_send = NULL;
-            gr.pending_send_owned = false;
-        }
-        g.ready.push_back(gid);
-        return false;
+        caller.pending_send = NULL;
+        caller.pending_send_owned = false;
+        return ChannelProgress::Completed;
     }
     let cap = chan.cap;
     if let Some(receiver) = chan.receivers.pop_front() {
-        if let Some(gr) = g.goroutines.get_mut(&receiver) {
+        core::TASKS.with_mut(receiver, |gr| {
             gr.recv_result = value;
             gr.recv_result_owned = chan.owns_elements;
             gr.recv_ok = true;
-        }
-        if let Some(gr) = g.goroutines.get_mut(&gid) {
-            gr.pending_send = NULL;
-            gr.pending_send_owned = false;
-        }
+        });
+        caller.pending_send = NULL;
+        caller.pending_send_owned = false;
         g.ready.push_back(receiver);
-        g.ready.push_back(gid);
-        return true;
+        return ChannelProgress::Handoff;
     }
     if cap > 0 && chan.buf.len() < cap {
         chan.buf.push_back(value);
-        if let Some(gr) = g.goroutines.get_mut(&gid) {
-            gr.pending_send = NULL;
-            gr.pending_send_owned = false;
-        }
-        g.ready.push_back(gid);
-        return false;
+        caller.pending_send = NULL;
+        caller.pending_send_owned = false;
+        return ChannelProgress::Completed;
     }
-    if let Some(gr) = g.goroutines.get_mut(&gid) {
-        gr.pending_send_owned = chan.owns_elements;
-    }
+    caller.pending_send_owned = chan.owns_elements;
     chan.senders.push_back(gid);
-    false
+    ChannelProgress::Blocked
 }
 
-fn chan_recv(g: &mut core::Global, gid: i64, core_id: i64) -> bool {
+fn chan_recv(
+    g: &mut core::Global,
+    gid: i64,
+    core_id: i64,
+    caller: &mut TaskState,
+) -> ChannelProgress {
     let Some(chan) = g.chans.get_mut(&core_id) else {
         // Channel gone: receive returns the zero value.
-        if let Some(gr) = g.goroutines.get_mut(&gid) {
-            gr.recv_result = NULL;
-            gr.recv_result_owned = false;
-            gr.recv_ok = false;
-        }
-        g.ready.push_back(gid);
-        return false;
+        caller.recv_result = NULL;
+        caller.recv_result_owned = false;
+        caller.recv_ok = false;
+        return ChannelProgress::Completed;
     };
     let mut woke = false;
     if let Some(v) = chan.buf.pop_front() {
-        if let Some(gr) = g.goroutines.get_mut(&gid) {
-            gr.recv_result = v;
-            gr.recv_result_owned = chan.owns_elements;
-            gr.recv_ok = true;
-        }
+        caller.recv_result = v;
+        caller.recv_result_owned = chan.owns_elements;
+        caller.recv_ok = true;
         if let Some(s) = chan.senders.pop_front() {
-            let sv = g
-                .goroutines
-                .get_mut(&s)
-                .map(|sg| sg.pending_send)
+            let sv = core::TASKS
+                .with_mut(s, |sg| {
+                    sg.pending_send_owned = false;
+                    std::mem::replace(&mut sg.pending_send, NULL)
+                })
                 .unwrap_or(NULL);
-            if let Some(sg) = g.goroutines.get_mut(&s) {
-                sg.pending_send = NULL;
-                sg.pending_send_owned = false;
-            }
             chan.buf.push_back(sv);
             g.ready.push_back(s);
             woke = true;
         }
-        g.ready.push_back(gid);
-        return woke;
+        return if woke {
+            ChannelProgress::Handoff
+        } else {
+            ChannelProgress::Completed
+        };
     }
     if let Some(s) = chan.senders.pop_front() {
         // Unbuffered: take the parked sender's value directly.
-        let sv = g
-            .goroutines
-            .get_mut(&s)
-            .map(|sg| sg.pending_send)
+        let sv = core::TASKS
+            .with_mut(s, |sg| {
+                sg.pending_send_owned = false;
+                std::mem::replace(&mut sg.pending_send, NULL)
+            })
             .unwrap_or(NULL);
-        if let Some(sg) = g.goroutines.get_mut(&s) {
-            sg.pending_send = NULL;
-            sg.pending_send_owned = false;
-        }
-        if let Some(gr) = g.goroutines.get_mut(&gid) {
-            gr.recv_result = sv;
-            gr.recv_result_owned = chan.owns_elements;
-            gr.recv_ok = true;
-        }
+        caller.recv_result = sv;
+        caller.recv_result_owned = chan.owns_elements;
+        caller.recv_ok = true;
         g.ready.push_back(s);
-        g.ready.push_back(gid);
-        return true;
+        return ChannelProgress::Handoff;
     }
     if chan.closed {
-        if let Some(gr) = g.goroutines.get_mut(&gid) {
-            gr.recv_result = NULL;
-            gr.recv_result_owned = false;
-            gr.recv_ok = false;
-        }
-        g.ready.push_back(gid);
-        return false;
+        caller.recv_result = NULL;
+        caller.recv_result_owned = false;
+        caller.recv_ok = false;
+        return ChannelProgress::Completed;
     }
     // Empty and open — park as a receiver.
     chan.receivers.push_back(gid);
-    false
+    ChannelProgress::Blocked
 }
 
 /// Close a channel: no more sends; parked receivers are woken to drain or see
@@ -1381,22 +1381,22 @@ pub(crate) fn chan_close(core_id: i64) {
     };
     let mut abandoned = Vec::new();
     for (r, got) in drained {
-        let has_gr = g.goroutines.contains_key(&r);
+        let has_gr = core::TASKS.contains(r);
         match (got, has_gr, owns_elements) {
             (Some(value), true, _) => {
-                if let Some(gr) = g.goroutines.get_mut(&r) {
+                core::TASKS.with_mut(r, |gr| {
                     gr.recv_result = value;
                     gr.recv_result_owned = owns_elements;
                     gr.recv_ok = true;
-                }
+                });
             }
             (Some(value), false, true) => abandoned.push(value),
             (None, true, _) => {
-                if let Some(gr) = g.goroutines.get_mut(&r) {
+                core::TASKS.with_mut(r, |gr| {
                     gr.recv_result = NULL;
                     gr.recv_result_owned = false;
                     gr.recv_ok = false;
-                }
+                });
             }
             (None, false, _) => {}
             (Some(_), false, false) => {}
@@ -1404,13 +1404,13 @@ pub(crate) fn chan_close(core_id: i64) {
         g.ready.push_back(r);
     }
     for s in senders {
-        if let Some(gr) = g.goroutines.get_mut(&s) {
+        core::TASKS.with_mut(s, |gr| {
             if gr.pending_send != NULL {
                 abandoned.push(gr.pending_send);
             }
             gr.pending_send = NULL;
             gr.pending_send_owned = false;
-        }
+        });
         g.ready.push_back(s);
     }
     core::sync_ready_len(&g);
@@ -1478,6 +1478,66 @@ pub(crate) fn park_chan_recv(core_id: i64) {
     });
 }
 
+#[repr(i8)]
+pub(crate) enum ChannelPoll {
+    Pending = 0,
+    Ready = 1,
+    Invalid = 2,
+}
+
+pub(crate) fn poll_chan_send(core_id: i64, value: i64) -> ChannelPoll {
+    park_chan_send(core_id, value);
+    poll_channel(core_id, ChanOp::Send)
+}
+
+pub(crate) fn poll_chan_recv(core_id: i64) -> ChannelPoll {
+    park_chan_recv(core_id);
+    poll_channel(core_id, ChanOp::Recv)
+}
+
+fn poll_channel(core_id: i64, op: ChanOp) -> ChannelPoll {
+    if CHANNEL_POLLS_LEFT.with(|budget| budget.get()) == 0 {
+        return ChannelPoll::Pending;
+    }
+    let Some(gid) = current_gid() else {
+        return ChannelPoll::Pending;
+    };
+    let mut g = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(chan) = g.chans.get(&core_id) else {
+        return ChannelPoll::Pending;
+    };
+    let ready = chan.closed
+        || match op {
+            ChanOp::Send => !chan.receivers.is_empty() || chan.buf.len() < chan.cap,
+            ChanOp::Recv => !chan.senders.is_empty() || !chan.buf.is_empty(),
+        };
+    if !ready {
+        return ChannelPoll::Pending;
+    }
+    if !core::TASKS.contains(gid) {
+        return ChannelPoll::Pending;
+    }
+    let mut state = CURRENT_STATE.with(|state| state.get());
+
+    // Readiness and completion share GLOBAL. Only an immediately completed
+    // operation runs here; a blocked caller is not published until its poll ends.
+    CHANNEL_POLLS_LEFT.with(|budget| budget.set(budget.get() - 1));
+    let progress = chan_op(&mut g, gid, core_id, op, &mut state);
+    state.park = Park::None;
+    if core::TASKS.with_mut(gid, |gr| state.store(gr)).is_none() {
+        return ChannelPoll::Pending;
+    }
+    CURRENT_STATE.with(|current| current.set(state));
+    if progress == ChannelProgress::Handoff {
+        core::sync_ready_len(&g);
+    }
+    drop(g);
+    if progress == ChannelProgress::Handoff {
+        notify_all();
+    }
+    ChannelPoll::Ready
+}
+
 /// Park the current goroutine until `deadline_ms` (wall clock).
 pub(crate) fn park_timer(deadline_ms: i64) {
     park_self(Park::Timer { at: deadline_ms });
@@ -1520,42 +1580,13 @@ pub(crate) fn recv_ok() -> bool {
 /// result handle. Used by the synchronous runtime bridge when a caller wants to
 /// wait on a spawned goroutine.
 pub(crate) fn join_blocking(gid: i64) -> i64 {
-    loop {
-        let state = {
-            let mut guard = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
-            guard.goroutines.get_mut(&gid).map(|gr| {
-                if gr.done {
-                    // Joining transfers the exception handle to the caller's
-                    // TLS. Clear the scheduler copy so a later drop cannot
-                    // reclaim a handle that the caller now owns.
-                    let exception = std::mem::take(&mut gr.pending_exception);
-                    (true, gr.result, exception)
-                } else {
-                    (false, gr.result, NULL)
-                }
-            })
-        };
-        match state {
-            Some((true, r, exception)) => {
-                if exception != NULL {
-                    crate::rearm_pending_exception(exception);
-                }
-                return r;
-            }
-            Some((false, _, _)) => {
-                // Counted as idle so the completing worker still wakes us,
-                // instead of this thread sitting out the full quantum.
-                IDLE_STATE.fetch_sub(1 << UNPARKED_SHIFT, Ordering::SeqCst);
-                let (lock, cvar) = &*SIGNAL;
-                let guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-                let _ = cvar
-                    .wait_timeout(guard, std::time::Duration::from_millis(10))
-                    .unwrap_or_else(|p| p.into_inner());
-                IDLE_STATE.fetch_add(1 << UNPARKED_SHIFT, Ordering::SeqCst);
-            }
-            None => return NULL,
-        }
+    let Some((result, exception)) = core::TASKS.join(gid) else {
+        return NULL;
+    };
+    if exception != NULL {
+        crate::rearm_pending_exception(exception);
     }
+    result
 }
 
 /// Join worker threads, abandoning (detaching) any still blocked past the
@@ -1644,17 +1675,12 @@ pub(crate) fn shutdown() {
         cleanup: Option<(core::CleanupFn, i64)>,
     }
     let mut g = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
-    let pending: Vec<Abandoned> = g
-        .goroutines
-        .values()
-        .map(|gr| Abandoned {
-            handle: gr.handle,
-            exception: gr.pending_exception,
-            result: if gr.done { gr.result } else { NULL },
-            cleanup: gr.cleanup,
-        })
-        .collect();
-    g.goroutines.clear();
+    let pending: Vec<Abandoned> = core::TASKS.drain(|gr| Abandoned {
+        handle: gr.handle,
+        exception: gr.pending_exception,
+        result: if gr.done { gr.result } else { NULL },
+        cleanup: gr.cleanup,
+    });
     core::clear_ready(&mut g);
     g.timers.clear();
     let abandoned_ops: Vec<i64> = g
@@ -1725,6 +1751,234 @@ pub(crate) fn wake_workers(count: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_poll_and_completion_do_not_need_the_parking_lock() {
+        extern "C" fn completed(_: i64) -> i8 {
+            1
+        }
+        let handle = crate::registry::reserve_id();
+        let gid = core::register_goroutine(new_goroutine(completed, NULL, None, handle));
+        crate::registry::insert_reserved(handle, crate::registry::Handle::Goroutine { core: gid });
+        let parking = core::GLOBAL.lock().unwrap();
+        let (send, recv) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            drive(gid);
+            send.send(()).unwrap();
+        });
+        recv.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(join_blocking(gid), NULL);
+        drop(parking);
+        worker.join().unwrap();
+        crate::registry::goroutine_drop(handle);
+    }
+
+    #[test]
+    fn async_join_registration_cannot_miss_concurrent_completion_on_the_same_shard() {
+        extern "C" fn completed(_: i64) -> i8 {
+            1
+        }
+        for _ in 0..64 {
+            let offset = super::super::task_table::SHARD_COUNT as i64;
+            let target = core::reserve_core_ids(offset as usize + 1);
+            let joiner = target + offset;
+            core::TASKS.insert(target, new_goroutine(completed, NULL, None, NULL));
+            core::TASKS.insert(joiner, new_goroutine(completed, NULL, None, NULL));
+            let mut parking = core::Global {
+                next_core: 1,
+                ready: Default::default(),
+                chans: Default::default(),
+                ios: Default::default(),
+                ops: Default::default(),
+                timers: Default::default(),
+            };
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let other = Arc::clone(&barrier);
+            let worker = std::thread::spawn(move || {
+                other.wait();
+                core::TASKS
+                    .with_mut(target, |task| {
+                        task.done = true;
+                        std::mem::take(&mut task.joiners)
+                    })
+                    .unwrap()
+            });
+            barrier.wait();
+            let already_done = join_park(&mut parking, joiner, target);
+            let woken = worker.join().unwrap();
+            if already_done {
+                assert!(parking.ready.contains(&joiner));
+                assert!(woken.is_empty());
+            } else {
+                assert_eq!(woken, [joiner]);
+            }
+            core::TASKS.remove(target);
+            core::TASKS.remove(joiner);
+        }
+    }
+
+    #[test]
+    fn immediate_channel_polls_have_a_budget_and_do_not_publish_the_caller() {
+        extern "C" fn completed(_: i64) -> i8 {
+            1
+        }
+
+        let channel = register_chan(CHANNEL_POLL_BUDGET as usize + 1, false);
+        let gid = core::register_goroutine(new_goroutine(completed, NULL, None, NULL));
+        let previous_gid = CURRENT_GID.with(|current| current.replace(Some(gid)));
+        let previous_state = CURRENT_STATE.with(|state| state.replace(TaskState::IDLE));
+        let previous_budget = CHANNEL_POLLS_LEFT.with(|budget| budget.replace(CHANNEL_POLL_BUDGET));
+        for value in 0..CHANNEL_POLL_BUDGET {
+            assert!(matches!(
+                poll_chan_send(channel, i64::from(value)),
+                ChannelPoll::Ready
+            ));
+        }
+        assert!(matches!(poll_chan_send(channel, 99), ChannelPoll::Pending));
+        {
+            let g = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
+            let chan = &g.chans[&channel];
+            assert_eq!(chan.buf.len(), CHANNEL_POLL_BUDGET as usize);
+            assert!(chan.senders.is_empty());
+            assert!(!g.ready.contains(&gid));
+        }
+
+        CURRENT_STATE.with(|state| state.set(TaskState::IDLE));
+        CHANNEL_POLLS_LEFT.with(|budget| budget.set(CHANNEL_POLL_BUDGET));
+        for value in 0..CHANNEL_POLL_BUDGET {
+            assert!(matches!(poll_chan_recv(channel), ChannelPoll::Ready));
+            assert!(recv_ok());
+            assert_eq!(recv_result(), i64::from(value));
+        }
+        assert!(matches!(poll_chan_recv(channel), ChannelPoll::Pending));
+        {
+            let g = core::GLOBAL.lock().unwrap_or_else(|p| p.into_inner());
+            assert!(g.chans[&channel].receivers.is_empty());
+            assert!(!g.ready.contains(&gid));
+        }
+        CHANNEL_POLLS_LEFT.with(|budget| budget.set(1));
+        chan_close(channel);
+        assert!(matches!(poll_chan_recv(channel), ChannelPoll::Ready));
+        assert!(!recv_ok());
+        assert_eq!(recv_result(), NULL);
+
+        CURRENT_GID.with(|current| current.set(previous_gid));
+        CURRENT_STATE.with(|state| state.set(previous_state));
+        CHANNEL_POLLS_LEFT.with(|budget| budget.set(previous_budget));
+        core::drop_goroutine(gid);
+        core::drop_chan(channel);
+        assert_eq!(
+            crate::ntask_chan_send_poll(NULL, NULL),
+            ChannelPoll::Invalid as i8
+        );
+        assert_eq!(
+            crate::ntask_chan_recv_poll(NULL),
+            ChannelPoll::Invalid as i8
+        );
+        assert_eq!(crate::ntask_chan_send(NULL, NULL), 1);
+        assert_eq!(crate::ntask_chan_recv(NULL), 1);
+    }
+
+    #[test]
+    fn wakeups_count_workers_not_reserved_queue_slots() {
+        let four_running = 4 << UNPARKED_SHIFT;
+        assert!(!needs_idle_worker_wakeup(four_running, 4));
+        assert!(needs_idle_worker_wakeup(four_running, 5));
+        assert!(needs_idle_worker_wakeup(3 << UNPARKED_SHIFT, 4));
+        assert!(!needs_idle_worker_wakeup((3 << UNPARKED_SHIFT) | 1, 4));
+        assert!(!needs_idle_worker_wakeup(0, 0));
+    }
+
+    #[test]
+    fn completion_only_reclaims_successful_detached_tasks() {
+        extern "C" fn completed(_: i64) -> i8 {
+            1
+        }
+
+        let detached = core::register_goroutine(new_goroutine(completed, NULL, None, NULL));
+        drive(detached);
+        assert!(!core::TASKS.contains(detached));
+
+        let handle = crate::registry::reserve_id();
+        let joinable = core::register_goroutine(new_goroutine(completed, NULL, None, handle));
+        crate::registry::insert_reserved(
+            handle,
+            crate::registry::Handle::Goroutine { core: joinable },
+        );
+        drive(joinable);
+        assert!(
+            core::TASKS
+                .with(joinable, |goroutine| goroutine.done)
+                .unwrap_or(false)
+        );
+        assert_eq!(join_blocking(joinable), NULL);
+        crate::registry::goroutine_drop(handle);
+
+        let failed = core::register_goroutine(new_goroutine(completed, NULL, None, NULL));
+        let exception = crate::registry::put_string("detached failure".to_string());
+        crate::rearm_pending_exception(exception);
+        drive(failed);
+        assert!(
+            core::TASKS
+                .with(failed, |goroutine| goroutine.done
+                    && goroutine.pending_exception == exception)
+                .unwrap_or(false)
+        );
+        assert_eq!(join_blocking(failed), NULL);
+        assert_eq!(crate::take_pending_exception_message(), exception);
+        core::drop_goroutine(failed);
+        assert!(crate::registry::get_string(exception).is_some());
+        assert!(crate::registry::remove(exception).is_some());
+        assert!(crate::registry::get_string(exception).is_none());
+    }
+
+    #[test]
+    fn blocking_joiners_do_not_depend_on_worker_idle_notifications() {
+        extern "C" fn completed(_: i64) -> i8 {
+            1
+        }
+
+        let handle = crate::registry::reserve_id();
+        let gid = core::register_goroutine(new_goroutine(completed, NULL, None, handle));
+        crate::registry::insert_reserved(handle, crate::registry::Handle::Goroutine { core: gid });
+
+        // Completion must reach blocking joiners even while worker signals
+        // cannot be delivered, including multiple simultaneous joiners.
+        let worker_signal = SIGNAL.0.lock().unwrap_or_else(|p| p.into_inner());
+        let (started_send, started_recv) = mpsc::channel();
+        let (finished_send, finished_recv) = mpsc::channel();
+        let joiners: Vec<_> = (0..8)
+            .map(|_| {
+                let started = started_send.clone();
+                let finished = finished_send.clone();
+                std::thread::spawn(move || {
+                    started.send(()).unwrap();
+                    finished.send(join_blocking(gid)).unwrap();
+                })
+            })
+            .collect();
+        for _ in &joiners {
+            started_recv
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        }
+        let driver = std::thread::spawn(move || drive(gid));
+        for _ in &joiners {
+            assert_eq!(
+                finished_recv
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap(),
+                NULL
+            );
+        }
+        drop(worker_signal);
+        driver.join().unwrap();
+        for joiner in joiners {
+            joiner.join().unwrap();
+        }
+        crate::registry::goroutine_drop(handle);
+    }
 
     #[test]
     fn block_guard_is_a_noop_off_scheduler_workers() {

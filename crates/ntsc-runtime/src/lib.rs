@@ -42,6 +42,7 @@ mod registry;
 
 use std::io::{self, Write};
 
+use crate::ntask::task_stack::TaskStack;
 use crate::registry::NULL;
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -819,7 +820,7 @@ mod exception_slot {
 }
 
 /// Replace the current async task stack with a scheduler-owned stack.
-pub(crate) fn install_async_tasks(tasks: Vec<(AsyncPollFn, i64)>) {
+pub(crate) fn install_async_tasks(tasks: TaskStack) {
     ASYNC_TASKS.with(|current| *current.borrow_mut() = tasks);
 }
 
@@ -840,7 +841,7 @@ pub(crate) fn poll_async_tasks_once() {
     });
 }
 
-pub(crate) fn take_async_tasks() -> Vec<(AsyncPollFn, i64)> {
+pub(crate) fn take_async_tasks() -> TaskStack {
     ASYNC_TASKS.with(|tasks| std::mem::take(&mut *tasks.borrow_mut()))
 }
 
@@ -971,7 +972,7 @@ pub type AsyncCleanupFn = extern "C" fn(i64);
 thread_local! {
     /// Per-context cooperative task stack: each entry is the poll function
     /// and future handle of an in-progress async function.
-    static ASYNC_TASKS: RefCell<Vec<(AsyncPollFn, i64)>> = const { RefCell::new(Vec::new()) };
+    static ASYNC_TASKS: RefCell<TaskStack> = const { RefCell::new(TaskStack::new()) };
 
     /// Stack of async contexts for `wait_any`/`wait_all`. Each entry is a
     /// saved `(ASYNC_TASKS, result)` pair. The active context is always in
@@ -980,7 +981,7 @@ thread_local! {
 }
 
 /// A saved async context: the task list and result of the enclosing scope.
-type AsyncStackEntry = (Vec<(AsyncPollFn, i64)>, i64);
+type AsyncStackEntry = (TaskStack, i64);
 
 /// Register a new `async.sleep(ms)` future and return its handle.
 #[unsafe(no_mangle)]
@@ -1130,6 +1131,24 @@ pub extern "C" fn ntask_chan_recv(channel: i64) -> i8 {
     0
 }
 
+/// Poll a send: 0 suspends, 1 completes immediately, 2 is an invalid handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntask_chan_send_poll(channel: i64, value: i64) -> i8 {
+    let Some(core) = registry::task_core(channel) else {
+        return ntask::scheduler::ChannelPoll::Invalid as i8;
+    };
+    ntask::scheduler::poll_chan_send(core, value) as i8
+}
+
+/// Poll a receive using the same status codes as `ntask_chan_send_poll`.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntask_chan_recv_poll(channel: i64) -> i8 {
+    let Some(core) = registry::task_core(channel) else {
+        return ntask::scheduler::ChannelPoll::Invalid as i8;
+    };
+    ntask::scheduler::poll_chan_recv(core) as i8
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn ntask_chan_recv_result() -> i64 {
     ntask::scheduler::recv_result()
@@ -1210,17 +1229,16 @@ pub extern "C" fn ntask_io_drop(registration: i64) {
 /// Save the current async context and start a fresh one.
 ///
 /// Pushes the current `(ASYNC_TASKS, result)` onto `ASYNC_STACKS` and
-/// replaces `ASYNC_TASKS` with an empty vec so `ntsc_async_push` and
+/// replaces `ASYNC_TASKS` with an empty stack so `ntsc_async_push` and
 /// `ntsc_async_run` operate on a local context. Returns the previous
 /// result handle (NULL if this is the first nesting level).
 fn save_async_context() -> i64 {
     ASYNC_STACKS.with(|stacks| {
         ASYNC_TASKS.with(|tasks| {
-            let prev_tasks = tasks.borrow().clone();
+            let prev_tasks = std::mem::take(&mut *tasks.borrow_mut());
             let prev_result =
                 ASYNC_STACKS.with(|s| s.borrow().last().map(|(_, r)| *r).unwrap_or(NULL));
             stacks.borrow_mut().push((prev_tasks, prev_result));
-            tasks.borrow_mut().clear();
             prev_result
         })
     })
@@ -1333,7 +1351,9 @@ pub extern "C" fn ntsc_async_wait_any(
         tasks.borrow_mut().push((poll_a, future_a));
     });
     ASYNC_STACKS.with(|stacks| {
-        stacks.borrow_mut().push((vec![(poll_b, future_b)], NULL));
+        stacks
+            .borrow_mut()
+            .push((TaskStack::single(poll_b, future_b), NULL));
     });
     let result = loop {
         let (poll, fut, len_a) = ASYNC_TASKS.with(|tasks| {
@@ -1418,7 +1438,9 @@ pub extern "C" fn ntsc_async_wait_all(
     }
     if future_b != NULL {
         ASYNC_STACKS.with(|stacks| {
-            stacks.borrow_mut().push((vec![(poll_b, future_b)], NULL));
+            stacks
+                .borrow_mut()
+                .push((TaskStack::single(poll_b, future_b), NULL));
         });
     }
     let mut done_a = future_a == NULL;
