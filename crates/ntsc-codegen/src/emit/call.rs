@@ -1861,6 +1861,12 @@ pub(crate) fn emit_call<'ctx>(
                 .unwrap_or_else(|| module_name.to_string());
 
             if dispatch_module == "arrays" {
+                if let Some(result) =
+                    super::scalar_array::emit_metadata_query(fn_ctx, callee, &arguments)?
+                {
+                    fn_ctx.emit_pending_exception_check()?;
+                    return Ok(result);
+                }
                 let mut arg_values = emit_call_arguments(fn_ctx, &arguments)?;
 
                 if let Some(first) = arg_values.first().cloned()

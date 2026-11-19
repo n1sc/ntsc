@@ -13,6 +13,49 @@ fn is_variable(expression: &Expr, name: &str) -> bool {
     matches!(expression, Expr::Variable { name: variable } if variable.lexeme() == name)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArrayMetadata {
+    Length,
+    IsEmpty,
+}
+
+fn is_arrays_namespace(expression: &Expr) -> bool {
+    let Expr::Variable { name } = expression else {
+        return false;
+    };
+    let name = name.lexeme();
+    if name.starts_with('@')
+        || super::RUST_CRATE_NAMESPACES.with(|names| names.borrow().contains_key(name))
+    {
+        return false;
+    }
+    super::STDLIB_ALIASES.with(|aliases| {
+        let aliases = aliases.borrow();
+        aliases.get(name).map(String::as_str).unwrap_or(name) == "arrays"
+    })
+}
+
+fn array_metadata_query<'a>(
+    callee: &'a Expr,
+    arguments: &'a [Expr],
+) -> Option<(ArrayMetadata, &'a Expr)> {
+    let Expr::Member { object, property } = callee else {
+        return None;
+    };
+    if !is_arrays_namespace(object) {
+        return None;
+    }
+    let [array] = arguments else {
+        return None;
+    };
+    let query = match property.lexeme() {
+        "length" => ArrayMetadata::Length,
+        "is_empty" | "isEmpty" => ArrayMetadata::IsEmpty,
+        _ => return None,
+    };
+    Some((query, array))
+}
+
 fn element_uses_only(expression: &Expr, name: &str) -> bool {
     if !expr_mentions_var(expression, name) {
         return true;
@@ -43,6 +86,11 @@ fn element_uses_only(expression: &Expr, name: &str) -> bool {
         Expr::Call {
             callee, arguments, ..
         } => {
+            if array_metadata_query(callee, arguments)
+                .is_some_and(|(_, array)| is_variable(array, name))
+            {
+                return true;
+            }
             element_uses_only(callee, name)
                 && arguments
                     .iter()
@@ -161,7 +209,7 @@ fn fresh_array(expression: &Expr) -> bool {
         Expr::ArrayLiteral { .. } => true,
         Expr::Call { callee, .. } => {
             matches!(callee.as_ref(), Expr::Member { object, property }
-                if is_variable(object, "arrays") && property.lexeme() == "fill")
+                if is_arrays_namespace(object) && property.lexeme() == "fill")
         }
         _ => false,
     }
@@ -174,14 +222,14 @@ fn fresh_array(expression: &Expr) -> bool {
 /// histogram), which the runtime's opaque `ntsc_array_len` prevents.
 fn literal_length(expression: &Expr) -> Option<u64> {
     match expression {
-        Expr::ArrayLiteral { elements, .. } => u64::try_from(elements.len()).ok(),
+        Expr::ArrayLiteral { elements, .. } => literal_element_count(elements),
         Expr::Call {
             callee, arguments, ..
         } => {
             let Expr::Member { object, property } = callee.as_ref() else {
                 return None;
             };
-            if !is_variable(object, "arrays") || property.lexeme() != "fill" {
+            if !is_arrays_namespace(object) || property.lexeme() != "fill" {
                 return None;
             }
             let [_, count] = arguments.as_slice() else {
@@ -191,6 +239,21 @@ fn literal_length(expression: &Expr) -> Option<u64> {
         }
         _ => None,
     }
+}
+
+fn literal_element_count(elements: &[Expr]) -> Option<u64> {
+    elements.iter().try_fold(0u64, |count, element| {
+        let added = match element {
+            Expr::Spread { value, .. } => {
+                let Expr::ArrayLiteral { elements, .. } = value.as_ref() else {
+                    return None;
+                };
+                literal_element_count(elements)?
+            }
+            _ => 1,
+        };
+        count.checked_add(added)
+    })
 }
 
 fn int_literal_value(expression: &Expr) -> Option<u64> {
@@ -327,6 +390,48 @@ fn buffer_for<'ctx>(
         return None;
     };
     fn_ctx.scalar_array_buffers.get(name.lexeme()).cloned()
+}
+
+fn cached_array_length<'ctx>(
+    fn_ctx: &FunctionContext<'ctx, '_>,
+    array: &Expr,
+) -> Option<inkwell::values::IntValue<'ctx>> {
+    let Expr::Variable { name } = array else {
+        return None;
+    };
+    fn_ctx
+        .scalar_array_buffers
+        .get(name.lexeme())
+        .map(|buffer| buffer.length)
+}
+
+pub(crate) fn emit_metadata_query<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    callee: &Expr,
+    arguments: &[Expr],
+) -> Result<Option<TypedValue<'ctx>>, crate::CodegenError> {
+    let Some((query, array)) = array_metadata_query(callee, arguments) else {
+        return Ok(None);
+    };
+    let Some(length) = cached_array_length(fn_ctx, array) else {
+        return Ok(None);
+    };
+    let value = match query {
+        ArrayMetadata::Length => TypedValue::new(length.into(), Ty::Int),
+        ArrayMetadata::IsEmpty => TypedValue::new(
+            fn_ctx
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    length,
+                    fn_ctx.context.i64_type().const_zero(),
+                    "scalar_array_empty",
+                )?
+                .into(),
+            Ty::Bool,
+        ),
+    };
+    Ok(Some(value))
 }
 
 /// The name a candidate-array access reads or writes. Callers only reach
@@ -1571,6 +1676,14 @@ fn is_invariant_int_expression(
         Expr::Grouping { expression, .. } => {
             is_invariant_int_expression(fn_ctx, expression, forbidden)
         }
+        Expr::Call {
+            callee, arguments, ..
+        } => {
+            matches!(array_metadata_query(callee, arguments),
+                Some((ArrayMetadata::Length, array @ Expr::Variable { name }))
+                    if !forbidden.contains(name.lexeme())
+                        && cached_array_length(fn_ctx, array).is_some())
+        }
         Expr::Unary { op, right } if op.kind == TokenKind::Minus => {
             is_invariant_int_expression(fn_ctx, right, forbidden)
         }
@@ -1748,6 +1861,65 @@ mod tests {
         function.print_to_string().to_string()
     }
 
+    #[test]
+    fn shape_stable_metadata_reads_keep_direct_access_and_loop_guards() {
+        let ir = emit_ir(
+            r#"fun compute(int n) -> int {
+                var array[int] a = arrays.fill(0, n);
+                if (arrays.is_empty(a)) { return 0; }
+                var int i = 0;
+                while (i < arrays.length(a)) {
+                    a[i] = i;
+                    i = i + 1;
+                }
+                var int sum = 0;
+                i = 0;
+                while (i < arrays.length(a)) {
+                    sum = sum + a[i];
+                    i = i + 1;
+                }
+                return sum;
+            }"#,
+        );
+        assert!(ir.contains("scalar_array_data"), "{ir}");
+        assert!(!ir.contains("call i64 @ntsc_array_get"), "{ir}");
+        assert!(!ir.contains("call i64 @ntsc_array_set"), "{ir}");
+        assert_eq!(ir.matches("call i64 @ntsc_array_len").count(), 1, "{ir}");
+        assert_eq!(versioned_fast_blocks(&ir), 2, "{ir}");
+        assert!(ir.contains("while.versioned.slow"), "{ir}");
+        assert!(ir.contains("scalar_array_out_of_bounds"), "{ir}");
+    }
+
+    #[test]
+    fn metadata_reads_do_not_make_resizing_or_escaping_arrays_safe() {
+        for operation in [
+            "arrays.push(a, 1);",
+            "var array[int] b = a;",
+            "view var borrowed = a;",
+            "a = arrays.fill(2, n);",
+            "other.length(a);",
+            "arrays.length(a, 1);",
+        ] {
+            let source = format!(
+                "fun compute(int n) -> int {{
+                    var array[int] a = arrays.fill(0, n);
+                    var int size = arrays.length(a);
+                    {operation}
+                    return size + a[0];
+                }}"
+            );
+            assert!(candidates(&source).is_empty(), "{operation}");
+        }
+        let ir = emit_ir(
+            r#"fun compute(int n) -> int {
+                var array[string] a = arrays.fill("value", n);
+                return arrays.length(a);
+            }"#,
+        );
+        assert!(!ir.contains("scalar_array_data"), "{ir}");
+        assert!(ir.contains("call i64 @ntsc_array_len"), "{ir}");
+    }
+
     /// Count emitted fast-body blocks (a label line, not a branch target).
     fn versioned_fast_blocks(ir: &str) -> usize {
         ir.lines()
@@ -1773,12 +1945,16 @@ mod tests {
                 var array[int] literal = [1, 2, 3];
                 var array[int] filled = arrays.fill(0, 256);
                 var array[int] sized = arrays.fill(0, (2 * 3));
-                return literal[0] + filled[0] + sized[0];
+                var array[int] spread = [1, ...[2, 3], 4, ...[...[5, 6]]];
+                var array[int] spread_empty = [...[]];
+                return literal[0] + filled[0] + sized[0] + spread[5];
             }"#,
         );
         assert_eq!(found.get("literal"), Some(&Some(3)));
         assert_eq!(found.get("filled"), Some(&Some(256)));
         assert_eq!(found.get("sized"), Some(&None));
+        assert_eq!(found.get("spread"), Some(&Some(6)));
+        assert_eq!(found.get("spread_empty"), Some(&Some(0)));
     }
 
     #[test]

@@ -68,6 +68,86 @@ fn run_with_optimization(
 }
 
 #[test]
+fn metadata_queries_preserve_scalar_types_bounds_and_resizing() {
+    let source = r#"use arrays as buffers
+
+fun main() {
+    var array[int] values = buffers.fill(0, 513)
+    var int i = 0
+    while (i < buffers.length(values)) {
+        values[i] = i
+        i = i + 1
+    }
+    var int total = 0
+    i = 0
+    while (i < buffers.length(values)) {
+        total = total + values[i]
+        i = i + 1
+    }
+    say("sum: " + total)
+
+    var array[float] decimals = buffers.fill(0.0, 3)
+    decimals[0] = 1.25
+    decimals[1] = 2.5
+    decimals[2] = 4.0
+    var float combined = 0.0
+    i = 0
+    while (i < buffers.length(decimals)) {
+        combined = combined + decimals[i]
+        i = i + 1
+    }
+    say("float: " + combined)
+
+    var array[bool] flags = buffers.fill(false, 3)
+    flags[2] = true
+    say("bool: " + flags[buffers.length(flags) - 1])
+    var array[int] empty = buffers.fill(0, 0)
+    say("empty: " + buffers.is_empty(empty))
+    say("nonempty: " + buffers.is_empty(values))
+
+    var array[int] spread = [0, ...[1, 2], 3]
+    say("spread length: " + buffers.length(spread))
+    say("spread last: " + spread[buffers.length(spread) - 1])
+    var array[int] spread_empty = [...[]]
+    say("spread empty: " + buffers.is_empty(spread_empty))
+    try {
+        say("invalid spread: " + spread_empty[0])
+    } catch (err) {
+        say("spread bound: " + err)
+    }
+
+    try {
+        values[buffers.length(values)] = 99
+    } catch (err) {
+        say("upper: " + err)
+    }
+    try {
+        say("invalid: " + flags[-1])
+    } catch (err) {
+        say("negative: " + err)
+    }
+
+    var array[int] growing = buffers.fill(1, 1)
+    i = 0
+    while (i < buffers.length(growing)) {
+        if (buffers.length(growing) < 4) {
+            buffers.push(growing, 1)
+        }
+        i = i + 1
+    }
+    say("grown: " + i)
+}
+"#;
+    let expected = "sum: 131328\nfloat: 7.75\nbool: true\nempty: true\nnonempty: false\nspread length: 4\nspread last: 3\nspread empty: true\nspread bound: array index out of bounds\nupper: array index out of bounds\nnegative: array index out of bounds\ngrown: 4";
+    for (name, optimization) in [
+        ("metadata_debug", inkwell::OptimizationLevel::None),
+        ("metadata_release", inkwell::OptimizationLevel::Aggressive),
+    ] {
+        assert_eq!(run_with_optimization(name, source, optimization), expected);
+    }
+}
+
+#[test]
 fn nonescaping_scalar_arrays_keep_bounds_and_value_semantics() {
     let source = r#"use arrays
 fun main() {
