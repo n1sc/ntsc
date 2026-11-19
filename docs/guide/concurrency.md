@@ -190,11 +190,11 @@ blocking.
 
 ### Scaling benchmarks
 
-`benchmarks/run_concurrency.py` measures the worker pool directly: 10k–100k
-goroutines on a fixed pool, CPU fan-out across cores, blocked-on-`sleep`
+`benchmarks/run.py --suite concurrency` measures the worker pool directly:
+goroutine fan-out on a fixed pool, CPU fan-out across cores, blocked-on-`sleep`
 goroutines freeing workers, and concurrent HTTP fan-out — each side by side
 with the equivalent Go goroutine program. Results land in
-`benchmarks/results_concurrency.md`.
+`target/benchmarks/latest/results.json` and the PDF scorecard.
 
 ### Threading rules
 

@@ -79,6 +79,8 @@ sum of squares: 30
 
 Single-machine, single-threaded measurements—not a universal language ranking. [Run the suite](benchmarks/README.md).
 
+[PDF scorecard](benchmarks/neutron-benchmarks.pdf) · native kernels, concurrency, and startup fixtures.
+
 ## Documentation
 
 Browse the hosted documentation at [ntsc.yasakei.dev/docs](https://ntsc.yasakei.dev/docs).

@@ -10,10 +10,17 @@ use http
 use sys
 use strings
 use fmt
+use json
 
 async fun fetch(int id, int port, chan[int] done) {
     var string url = "http://127.0.0.1:" + port + "/item?id=" + id
-    var string body = await http.get_async(url)
+    var string response = await http.get_async(url)
+    if (http.status_code(response) != 200) {
+        throw "unexpected HTTP status"
+    }
+    var string encoded_body = json.get(response, "body")
+    // The fixture body is unescaped ASCII; json.get preserves its outer quotes.
+    var string body = strings.substring(encoded_body, 1, strings.length(encoded_body) - 1)
     strings.length(body) |> done
 }
 
@@ -45,5 +52,6 @@ async fun main() -> int {
             close(done)
         }
     }
-    return total
+    say(fmt.i64_to_str(total))
+    return 0
 }

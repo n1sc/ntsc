@@ -183,23 +183,27 @@ task proj {
     done("smoke test passed")
 }
 
+task benchmark {
+    step("all benchmark suites + PDF scorecard (BENCH_FLAGS forwards options)")
+    run "set -e; python=python3; if [ -x .venv/bin/python ]; then python=.venv/bin/python; fi; $python -B benchmarks/run.py $BENCH_FLAGS"
+    done("benchmark run complete (output paths printed above)")
+}
+
 task benchmark_hard {
-    step("build current Neutron CLI, then run the five-toolchain hard suite")
-    run "cargo build -p ntsc-cli"
-    run "python3 -B benchmarks/run_hard.py"
+    step("native suite + README SVG")
+    run "python3 -B benchmarks/run.py --suite native --no-pdf --svg benchmarks/results.svg"
     done("table: benchmarks/results.svg")
 }
 
 task benchmark_smoke {
     step("verify all hard-suite kernels at smoke sizes")
-    run "cargo build -p ntsc-cli"
-    run "python3 -B benchmarks/run_hard.py --quick --samples 3 --warmup 1 --output target/bench-hard/smoke-report"
-    done("smoke table: target/bench-hard/smoke-report/results.svg")
+    run "python3 -B benchmarks/run.py --suite native --no-pdf --quick --samples 3 --warmup 1 --output target/bench-hard/smoke-report"
+    done("smoke table: target/bench-hard/smoke-report/native/results.svg")
 }
 
 task test_benchmarks {
-    step("native benchmark harness unit tests")
-    run "python3 -B -m unittest discover -s benchmarks -p test_hard.py"
+    step("benchmark runner + report unit tests")
+    run "set -e; python=python3; if [ -x .venv/bin/python ]; then python=.venv/bin/python; fi; $python -B -m unittest discover -s benchmarks/tests -p 'test_*.py'"
     done("benchmark harness tests passed")
 }
 

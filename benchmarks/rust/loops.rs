@@ -43,5 +43,5 @@ fn main() {
     let s1 = sum_with_for_loop(100_000);
     let s2 = sum_with_while_loop(100_000);
     let n = nested_loops(10, 50);
-    println!("{s1} {s2} {n}");
+    println!("{}", s1 + s2 + n);
 }

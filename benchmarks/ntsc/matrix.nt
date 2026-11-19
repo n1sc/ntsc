@@ -1,4 +1,6 @@
 // Matrix multiplication benchmark in NTSC
+use fmt
+
 fun main() -> int {
     var int size = 20;
     var int total = 0;
@@ -15,5 +17,6 @@ fun main() -> int {
         }
         i = i + 1;
     }
-    return total;
+    say(fmt.i64_to_str(total));
+    return 0;
 }

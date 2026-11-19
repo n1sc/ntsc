@@ -1,4 +1,6 @@
 // Fibonacci benchmark in NTSC
+use fmt
+
 fun main() -> int {
     var int n = 35;
     var int a = 0;
@@ -10,5 +12,6 @@ fun main() -> int {
         b = temp;
         i = i + 1;
     }
-    return b;
+    say(fmt.i64_to_str(b));
+    return 0;
 }

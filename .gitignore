@@ -46,10 +46,12 @@ TODO.md
 # Agents
 .claude/
 .codex/
+.agents/
 
 # Python benchmark harness
 **/__pycache__/
 *.pyc
+/.venv/
 
 # Generated Rust-crate adaptors and export manifests
 /.ntsc

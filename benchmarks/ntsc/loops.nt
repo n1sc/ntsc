@@ -1,4 +1,6 @@
 // Loop operations benchmark in NTSC - all in main()
+use fmt
+
 fun main() -> int {
     var int s1 = 0;
     var int i1 = 0;
@@ -19,6 +21,6 @@ fun main() -> int {
         }
         di = di + 1;
     }
-    say("loops");
-    return s1 + s2 + count;
+    say(fmt.i64_to_str(s1 + s2 + count));
+    return 0;
 }

@@ -16,7 +16,7 @@ async fun worker(chan[int] done) {
         acc = acc + i
         i = i + 1
     }
-    1 |> done
+    acc |> done
 }
 
 async fun main() -> int {
@@ -34,11 +34,14 @@ async fun main() -> int {
     }
 
     var int received = 0
+    var int total = 0
     for count in done {
-        received = received + count
+        total = total + count
+        received = received + 1
         if (received == n) {
             close(done)
         }
     }
-    return received
+    say(fmt.i64_to_str(total))
+    return 0
 }

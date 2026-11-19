@@ -16,8 +16,12 @@ func fetch(port int, id int64, ch chan int) {
 		ch <- 0
 		return
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if err != nil || closeErr != nil || resp.StatusCode != http.StatusOK {
+		ch <- 0
+		return
+	}
 	ch <- len(body)
 }
 
