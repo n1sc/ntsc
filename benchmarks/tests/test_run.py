@@ -125,6 +125,19 @@ class CombinedRunnerTests(unittest.TestCase):
             self.assertEqual(run.find_prebuilt_binary(compiler, "Rust"), rust_bin)
             self.assertIsNone(run.find_prebuilt_binary(compiler, "Go"))
 
+    def test_host_target_triple(self):
+        triple = run.host_target_triple()
+        self.assertIsInstance(triple, str)
+        self.assertTrue(len(triple.split("-")) >= 3)
+        with mock.patch("run.command_output", side_effect=FileNotFoundError):
+            with mock.patch("platform.machine", return_value="aarch64"):
+                with mock.patch("sys.platform", "linux"):
+                    self.assertEqual(run.host_target_triple(), "aarch64-unknown-linux-gnu")
+                with mock.patch("sys.platform", "darwin"):
+                    self.assertEqual(run.host_target_triple(), "aarch64-apple-darwin")
+                with mock.patch("sys.platform", "win32"):
+                    self.assertEqual(run.host_target_triple(), "aarch64-pc-windows-gnu")
+
 
 class ScorecardTests(unittest.TestCase):
     def test_default_pdf_is_published_inside_benchmarks(self):

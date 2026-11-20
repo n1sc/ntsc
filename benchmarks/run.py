@@ -49,6 +49,19 @@ def command_output(command, **kwargs):
     return result.stdout.strip()
 
 
+def host_target_triple():
+    try:
+        return command_output(["rustc", "-vV"]).split("host: ", 1)[1].splitlines()[0]
+    except (subprocess.SubprocessError, FileNotFoundError):
+        arch = platform.machine().lower()
+        is_arm = arch in ("arm64", "aarch64")
+        if sys.platform == "win32":
+            return "aarch64-pc-windows-gnu" if is_arm else "x86_64-pc-windows-gnu"
+        if sys.platform == "darwin":
+            return "aarch64-apple-darwin" if is_arm else "x86_64-apple-darwin"
+        return "aarch64-unknown-linux-gnu" if is_arm else "x86_64-unknown-linux-gnu"
+
+
 def find_prebuilt_binary(compiler, name):
     exe = ".exe" if sys.platform == "win32" else ""
     filename_map = {
@@ -61,10 +74,16 @@ def find_prebuilt_binary(compiler, name):
     if not base:
         return None
     comp = compiler.resolve() if isinstance(compiler, Path) else Path(compiler).resolve()
+    arch = platform.machine().lower()
+    norm_arch = "arm64" if arch in ("arm64", "aarch64") else "x86_64" if arch in ("amd64", "x86_64") else arch
     candidates = [
+        ROOT / "benchmarks/prebuilt" / norm_arch / f"{base}{exe}",
         ROOT / "benchmarks/prebuilt" / f"{base}{exe}",
+        ROOT / "prebuilt" / norm_arch / f"{base}{exe}",
         ROOT / "prebuilt" / f"{base}{exe}",
+        comp.parent / "prebuilt" / norm_arch / f"{base}{exe}",
         comp.parent / "prebuilt" / f"{base}{exe}",
+        comp.parent.parent / "prebuilt" / norm_arch / f"{base}{exe}",
         comp.parent.parent / "prebuilt" / f"{base}{exe}",
     ]
     for candidate in candidates:
@@ -89,10 +108,7 @@ def build_binaries(compiler, languages=None):
     project = NATIVE_BUILD / "neutron"
     (project / "src").mkdir(parents=True, exist_ok=True)
     shutil.copyfile(NATIVE_SOURCES / "kernels.nt", project / "src/main.nt")
-    try:
-        triple = command_output(["rustc", "-vV"]).split("host: ", 1)[1].splitlines()[0]
-    except (subprocess.SubprocessError, FileNotFoundError):
-        triple = "x86_64-pc-windows-gnu" if sys.platform == "win32" else "x86_64-unknown-linux-gnu"
+    triple = host_target_triple()
     ffi_config = '\n[ffi]\nlibraries = ["synchronization", "gcc_eh", "gcc_s"]\n' if sys.platform == "win32" else ""
     (project / "neutron.toml").write_text(
         f'[package]\ntarget = "{triple}"\nentry = "src/main.nt"\noutput = "kernels"\n{ffi_config}'
@@ -645,10 +661,7 @@ def compile_fixture(language, name, compiler, environment):
         cwd = directory / name
         (cwd / "src").mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, cwd / "src/main.nt")
-        try:
-            triple = command_output(["rustc", "-vV"]).split("host: ", 1)[1].splitlines()[0]
-        except (subprocess.SubprocessError, FileNotFoundError):
-            triple = "x86_64-pc-windows-gnu" if sys.platform == "win32" else "x86_64-unknown-linux-gnu"
+        triple = host_target_triple()
         ffi_config = '\n[ffi]\nlibraries = ["synchronization", "gcc_eh", "gcc_s"]\n' if sys.platform == "win32" else ""
         (cwd / "neutron.toml").write_text(
             f'[package]\ntarget = "{triple}"\nentry = "src/main.nt"\noutput = "{name}"\n{ffi_config}'
