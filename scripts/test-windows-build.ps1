@@ -103,7 +103,7 @@ try {
   $env:OS = "Windows_NT"
   $env:LLVM_SYS_231_PREFIX = ""
   $setup = Join-Path $scripts "setup-windows-llvm.ps1"
-  $cachedPrefix = Join-Path $directory "target/llvm-$version-windows-x86_64"
+  $cachedPrefix = Join-Path $directory ".llvm/llvm-$version-windows-x86_64"
 
   $global:failDownload = $true
   Assert-Throws { & $setup } "*fixture download failure*"

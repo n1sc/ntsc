@@ -12,7 +12,9 @@ if ($env:OS -ne "Windows_NT") {
 $root = Split-Path -Parent $PSScriptRoot
 $prefix = $env:LLVM_SYS_231_PREFIX
 if (-not $prefix) {
-  $prefix = Join-Path $root "target\llvm-$Version-windows-x86_64"
+  # Outside target/: cargo clean empties it, and CI cache restores pre-clean
+  # anything in it that is not a Cargo artifact.
+  $prefix = Join-Path $root ".llvm\llvm-$Version-windows-x86_64"
   if (-not (Test-Path $prefix)) {
     $staging = Join-Path $root "target\llvm-download-$([Guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Path $staging -Force | Out-Null
@@ -37,6 +39,7 @@ if (-not $prefix) {
       New-Item -ItemType Directory -Path $extracted | Out-Null
       & tar -xf $archive -C $extracted --strip-components 1 @selected
       if ($LASTEXITCODE -ne 0) { throw "Could not extract the LLVM libraries." }
+      New-Item -ItemType Directory -Path (Split-Path -Parent $prefix) -Force | Out-Null
       Move-Item -Path $extracted -Destination $prefix
     } finally {
       Remove-Item -LiteralPath $staging -Recurse -Force

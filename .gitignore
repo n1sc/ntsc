@@ -2,6 +2,9 @@
 /target
 **/target
 
+# Windows LLVM download cache
+/.llvm
+
 # Packaging output (installers and portable tarballs)
 /dist
 .github/packaging/.build
