@@ -16,6 +16,8 @@ the [guide](../guide/getting-started.md) and the [CLI reference](cli.md).
   Cargo selects `force-dynamic` on Unix. On MSVC, `ntsc-codegen`'s build
   script links the archive's `LLVM-C.lib` / `LLVM-C.dll` directly, avoiding
   llvm-sys's unsupported shared-linking path and nonportable static metadata.
+  The C target wrappers are disabled on MSVC: no LLVM headers, `llvm-config`,
+  CMake, vcpkg, or LLVM static component libraries are required.
   `LLVM_SYS_231_PREFIX` must point at an LLVM 23 prefix
   (e.g. `LLVM_SYS_231_PREFIX=/usr/lib/llvm-23` when it is not the default
   `llvm-config` on `PATH`). This must be *LLVM 23 exactly*: a different system LLVM silently
@@ -26,6 +28,30 @@ the [guide](../guide/getting-started.md) and the [CLI reference](cli.md).
   Unix, `ld.lld`/`link.exe`/`gcc` on Windows.
 
 ## Building
+
+On x64 Windows, install stable Rust and Visual Studio C++ Build Tools with the
+Windows SDK, then open **x64 Developer PowerShell** and run:
+
+```powershell
+.\scripts\build-windows.ps1
+# For a development build:
+.\scripts\build-windows.ps1 -Configuration Debug
+```
+
+The script downloads the pinned LLVM archive once, caches only its runtime
+DLLs, C API import library, and linker, and builds the workspace. It copies
+the LLVM DLLs beside `target\x86_64-pc-windows-msvc\release\ntsc.exe`
+(`debug` for a development build), so that binary does not need LLVM on
+`PATH`. The initial archive download is still large; LLVM is not built from
+source. An existing `LLVM_SYS_231_PREFIX` is reused instead of downloading.
+
+For direct Cargo builds with an existing LLVM installation:
+
+```powershell
+$env:LLVM_SYS_231_PREFIX = "C:\path\to\llvm-23"
+$env:Path = "$env:LLVM_SYS_231_PREFIX\bin;$env:Path"
+cargo build
+```
 
 The compiler lives in the workspace root:
 
@@ -64,6 +90,10 @@ The e2e tests build the runtime automatically when needed. Individual
 crates can be tested with `cargo test -p ntsc-<crate>`.
 Run `arq test_llvm_linkage` after changing LLVM dependencies to verify
 the Cargo features selected for Linux, macOS, and Windows.
+`arq test_llvm_targets` checks object emission with the C wrappers disabled.
+`pwsh -File scripts/test-windows-build.ps1` tests Windows setup and packaging
+selection offline, including failures, cache reuse, and size-conscious DLL/CRT
+staging.
 
 ## Repository layout
 

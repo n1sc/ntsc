@@ -32,7 +32,9 @@ pub fn init_llvm() {
              {EXPECTED_LLVM_MAJOR} and point LLVM_SYS_231_PREFIX at it (see \
              docs/reference/contributing.md)."
         );
-        Target::initialize_all(&InitializationConfig::default());
+        let configuration = InitializationConfig::default();
+        Target::initialize_x86(&configuration);
+        Target::initialize_aarch64(&configuration);
     });
 }
 
@@ -155,6 +157,33 @@ pub fn run_optimization_passes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supported_targets_emit_objects_without_c_initialization_wrappers() {
+        init_llvm();
+        let _guard = CodegenLockGuard::acquire();
+        let context = inkwell::context::Context::create();
+        for triple in [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-pc-windows-msvc",
+        ] {
+            let target_machine = create_target_machine(triple, OptimizationLevel::None).unwrap();
+            let module = context.create_module("target_initialization");
+            module.set_triple(&TargetTriple::create(triple));
+            module.set_data_layout(&target_machine.get_target_data().get_data_layout());
+            let function =
+                module.add_function("entry", context.void_type().fn_type(&[], false), None);
+            let builder = context.create_builder();
+            builder.position_at_end(context.append_basic_block(function, "entry"));
+            builder.build_return(None).unwrap();
+            module.verify().unwrap();
+            let object = target_machine
+                .write_to_memory_buffer(&module, FileType::Object)
+                .unwrap();
+            assert!(!object.as_slice().is_empty(), "{triple}");
+        }
+    }
 
     fn count_allocas(function: inkwell::values::FunctionValue) -> usize {
         function

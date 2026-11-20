@@ -14,7 +14,8 @@ fn main() -> io::Result<()> {
     let prefix = env::var_os("LLVM_SYS_231_PREFIX").ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "LLVM_SYS_231_PREFIX must point to the LLVM development archive on MSVC",
+            "LLVM_SYS_231_PREFIX must contain lib/LLVM-C.lib and bin/LLVM-C.dll on MSVC; \
+             run scripts/build-windows.ps1 to download them and build automatically",
         )
     })?;
     let prefix = PathBuf::from(prefix);

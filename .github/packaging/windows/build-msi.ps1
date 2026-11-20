@@ -38,9 +38,9 @@ param(
   [string]$LanguageServer = "target\release\ntsc-lsp.exe",
 
   # Where the MinGW import libraries live. Defaults to the rustc toolchain's
-  # x86_64-pc-windows-gnu lib dir (created by `rustup target add
-  # x86_64-pc-windows-gnu`). A bundled subset is used first by the linker and
-  # the full set is installed alongside.
+  # x86_64-pc-windows-gnu lib dir. It must contain the rust-mingw component,
+  # not just the startup objects from `rustup target add`. Release CI supplies
+  # the matching component explicitly; only the linker-used subset is shipped.
   [string]$MingwLibDir = ""
 )
 
@@ -82,65 +82,19 @@ $rtf = "{\rtf1\ansi\deff0{\fonttbl{\f0\fnil Courier New;}}\f0\fs18 " + $escaped 
 [System.IO.File]::WriteAllText((Join-Path $Dist "license.rtf"), $rtf)
 
 # ── DLL closure ─────────────────────────────────────────────────────────────
-$system = @(
-  "KERNEL32.dll", "USER32.dll", "ADVAPI32.dll", "SHELL32.dll", "WS2_32.dll",
-  "NTDLL.dll", "GDI32.dll", "OLE32.dll", "RPCRT4.dll", "SHLWAPI.dll",
-  "COMDLG32.dll", "OLEAUT32.dll", "IMM32.dll", "MSVCRT.dll", "VERSION.dll",
-  "WINMM.dll", "bcrypt.dll", "bcryptprimitives.dll", "CRYPT32.dll", "WTSAPI32.dll", "SETUPAPI.dll",
-  "HID.DLL", "uxtheme.dll", "DWMAPI.dll", "NETAPI32.dll", "UCRTBASE.dll"
-) | ForEach-Object { $_.ToLower() }
-
 $deps = [System.Collections.Generic.SortedDictionary[string, string]]::new(
   [System.StringComparer]::OrdinalIgnoreCase
 )
-
-function Resolve-Dll([string]$Name, [string]$BinaryPath) {
-  foreach ($directory in @((Split-Path -Parent $BinaryPath), $LlvmBin)) {
-    $candidate = Join-Path $directory $Name
-    if (Test-Path $candidate -PathType Leaf) {
-      return (Get-Item $candidate).FullName
-    }
-  }
-  if ($env:VCToolsRedistDir) {
-    $redist = Join-Path $env:VCToolsRedistDir "x64"
-    if (Test-Path $redist -PathType Container) {
-      $directories = Get-ChildItem $redist -Directory |
-        Where-Object { $_.Name -like "Microsoft.VC*.CRT" } |
-        Sort-Object Name
-      foreach ($directory in $directories) {
-        $candidate = Join-Path $directory.FullName $Name
-        if (Test-Path $candidate -PathType Leaf) {
-          return (Get-Item $candidate).FullName
-        }
-      }
-    }
-  }
-  throw "required DLL $Name for $BinaryPath was not found beside the binary, in $LlvmBin, or in the x64 MSVC redistributables"
-}
-
-function Get-Deps([string]$Path) {
-  $output = & dumpbin /DEPENDENTS $Path 2>$null
-  if ($LASTEXITCODE -ne 0) {
-    throw "dumpbin failed for $Path with exit code $LASTEXITCODE"
-  }
-  foreach ($line in $output) {
-    $name = $line.Trim()
-    if ($name -notmatch "^[A-Za-z0-9_.-]+\.dll$" -or $deps.ContainsKey($name)) { continue }
-    if ($system -contains $name.ToLower() -or $name -match "^(api-ms-|ext-ms-)") { continue }
-    $full = Resolve-Dll $name $Path
-    $deps.Add($name, $full)
-    Get-Deps $full
-  }
-}
 
 $lld = Join-Path $LlvmBin "ld.lld.exe"
 if (-not (Test-Path $lld -PathType Leaf)) {
   throw "ld.lld.exe not found in $LlvmBin"
 }
-Get-Deps (Join-Path $SourceDir "ntsc.exe")
-Get-Deps $PackageManager
-Get-Deps $LanguageServer
-Get-Deps $lld
+$binaries = @((Join-Path $SourceDir "ntsc.exe"), $PackageManager, $LanguageServer, $lld)
+$collector = Join-Path $ScriptDir "../../../scripts/windows-dll-dependencies.ps1"
+foreach ($dependency in (& $collector -Binaries $binaries -LlvmBin $LlvmBin)) {
+  $deps.Add($dependency.Name, $dependency.FullName)
+}
 
 Write-Host "Bundling $($deps.Count) DLL(s):"
 $deps.Keys | ForEach-Object { Write-Host "  $_" }
@@ -164,16 +118,15 @@ Copy-Item $GnuRuntimeLib $Dist
 
 if (-not $MingwLibDir) {
   $sysroot = (& rustc --print sysroot) -replace "`r?`n", ""
+  if ($LASTEXITCODE -ne 0) { throw "Could not locate the Rust toolchain." }
   $MingwLibDir = Join-Path $sysroot "lib\rustlib\x86_64-pc-windows-gnu\lib"
 }
 if (-not (Test-Path $MingwLibDir)) {
-  throw "MinGW import libraries not found at $MingwLibDir - run: rustup target add x86_64-pc-windows-gnu"
+  throw "MinGW import libraries not found at $MingwLibDir - pass -MingwLibDir with the matching Rust MinGW component and CRT startup object"
 }
 $MingwStage = Join-Path $Dist "mingw"
 New-Item -ItemType Directory -Path $MingwStage | Out-Null
-$mingwFiles = Get-ChildItem $MingwLibDir -File |
-  Where-Object { $_.Extension -in ".a", ".o" }
-$mingwFiles | Copy-Item -Destination $MingwStage
+$mingwFiles = @(& (Join-Path $ScriptDir "stage-mingw.ps1") -LibraryDirectory $MingwLibDir -Destination $MingwStage)
 Write-Host "Bundling $($mingwFiles.Count) MinGW import library file(s)"
 
 # ── Generate dlls.wxs ────────────────────────────────────────────────────────

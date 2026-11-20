@@ -16,5 +16,10 @@ for target in x86_64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-ms
     printf 'error: %s must select %s, found: %s\n' "$target" "$expected" "$preferences" >&2
     exit 1
   fi
+  if [[ "$target" == *-msvc ]] &&
+    ! printf '%s\n' "$tree" | grep '^llvm-sys feature "disable-alltargets-init"$' >/dev/null; then
+    printf 'error: %s must disable C target wrappers (no LLVM headers or llvm-config)\n' "$target" >&2
+    exit 1
+  fi
   printf '%s: %s\n' "$target" "$expected"
 done

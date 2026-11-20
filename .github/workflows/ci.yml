@@ -41,7 +41,7 @@ jobs:
 
       # ── LLVM 23 ──────────────────────────────────────────────────────────
       # The codegen crate links against LLVM 23 via llvm-sys 231. Each host
-      # needs an LLVM 23 with bin/llvm-config available at LLVM_SYS_231_PREFIX.
+      # needs an LLVM 23 installation; only Unix requires llvm-config.
       - name: Install LLVM 23 (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -69,26 +69,24 @@ jobs:
           echo "LLVM_SYS_231_PREFIX=$(brew --prefix llvm@23)" >> "$GITHUB_ENV"
           echo "$(brew --prefix llvm@23)/bin" >> "$GITHUB_PATH"
 
-      # The win64 .exe installer is an NSIS stub whose child process can
-      # outlive Start-Process -Wait, and it ships neither llvm-config.exe nor
-      # the development libraries. Use the clang+llvm archive instead, which
-      # is the package for projects that link against LLVM and contains
-      # include/, lib/, bin/llvm-config.exe, and the DLLs.
+      # Use the same minimal installation as local source builds. Deliberately
+      # omit headers, llvm-config, and static LLVM component libraries so the
+      # gate catches any reintroduced development-library dependency.
       - name: Install LLVM 23 (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-${{ env.LLVM_VERSION }}/clang+llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc.tar.xz" -OutFile llvm.tar.xz
-          tar -xf llvm.tar.xz
-          Remove-Item llvm.tar.xz
-          $llvm = Join-Path $pwd "clang+llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc"
-          foreach ($library in @("$llvm\lib\LLVM-C.lib", "$llvm\bin\LLVM-C.dll")) {
-            if (-not (Test-Path $library -PathType Leaf)) {
-              throw "LLVM C API library missing: $library"
-            }
+          $llvm = & ./scripts/setup-windows-llvm.ps1 -Version $env:LLVM_VERSION
+          if ((Test-Path "$llvm\include") -or (Test-Path "$llvm\bin\llvm-config.exe")) {
+            throw "Windows CI must build without LLVM headers or llvm-config."
           }
           "LLVM_SYS_231_PREFIX=$llvm" >> $env:GITHUB_ENV
           "$llvm\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Test Windows build scripts offline
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-windows-build.ps1
 
       # The MSVC toolchain provides link.exe for the e2e runtime linking.
       - name: Set up MSVC environment (Windows)
@@ -101,6 +99,17 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Verify Windows source build script
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          ./scripts/build-windows.ps1 -Configuration Debug
+          if ($LASTEXITCODE -ne 0) { throw "Windows source build failed." }
+          $env:Path = ($env:Path -split ';' | Where-Object { $_ -ne "$env:LLVM_SYS_231_PREFIX\bin" }) -join ';'
+          & ./target/x86_64-pc-windows-msvc/debug/ntsc.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "Compiler must run using its adjacent LLVM DLLs." }
 
       # ── Gate ─────────────────────────────────────────────────────────────
       - name: Verify LLVM linkage features

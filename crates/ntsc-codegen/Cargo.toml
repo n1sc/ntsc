@@ -6,10 +6,7 @@ license.workspace = true
 description = "LLVM code generation for the NTSC compiler"
 
 [dependencies]
-# inkwell's default features enable *all* LLVM targets, but the official
-# LLVM Windows binaries only ship a subset, so linking fails with unresolved
-# LLVMInitialize*Target symbols for the rest. Enable only the targets this
-# compiler actually emits for (x86_64 / aarch64), like ntsc-cli does.
+# Initialize only the backends we emit for, using their exported C APIs.
 inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["target-x86", "target-aarch64"] }
 ntsc-ast = { path = "../ntsc-ast" }
 ntsc-parser = { path = "../ntsc-parser" }
@@ -24,10 +21,11 @@ serde_json = "1.0"
 
 # llvm-sys rejects MSVC shared linking and misparses build-machine paths in
 # the archive's static system libraries. build.rs links the shipped C API
-# import library instead; Unix retains llvm-sys's automatic shared linking.
+# import library instead. Disabling the C target wrappers also removes the
+# need for LLVM headers and llvm-config; Unix retains automatic shared linking.
 [target.'cfg(target_env = "msvc")'.dependencies]
 inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["llvm23-1-no-llvm-linking"] }
-llvm-sys = { version = "231", default-features = false, features = ["no-llvm-linking"] }
+llvm-sys = { version = "231", default-features = false, features = ["no-llvm-linking", "disable-alltargets-init"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["llvm23-1-force-dynamic"] }

@@ -1514,6 +1514,16 @@ fn find_runtime_lib(
             "regex".to_string(),
         ]
     };
+    // The bundled GNU linker needs its shipped GNU runtime, not a runtime
+    // rebuilt for an unrelated Rust host toolchain found on a user's PATH.
+    #[cfg(target_os = "windows")]
+    if matches!(
+        ntsc_codegen::windows_linker(),
+        Some(ntsc_codegen::WindowsLinker::BundledLld)
+    ) && let Some(runtime) = find_installed_runtime()
+    {
+        return Ok(runtime);
+    }
     if is_full_needed && let Some(runtime) = find_installed_runtime() {
         return Ok(runtime);
     }

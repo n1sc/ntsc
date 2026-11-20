@@ -483,10 +483,9 @@ fn link_with_lld(
 ) -> Result<(), CodegenError> {
     // `ld.lld`'s MinGW emulation does not add the CRT startup object or
     // default libraries on its own (unlike `gcc`), so they are passed
-    // explicitly, mirroring what clang's MinGW driver emits. Import
-    // libraries are looked up in the bundle first, then in the ntsc
-    // executable's Rust toolchain sysroot (so a MinGW compiler or rustup
-    // toolchain still works), then filtered to files that actually exist.
+    // explicitly, mirroring what clang's MinGW driver emits.
+    // The installer supplies the CRT and import libraries; this path must
+    // not invoke rustc or depend on a developer toolchain.
     let bin_dir = bundled_lld().ok_or_else(|| {
         CodegenError::LinkError("bundled ld.lld was not found next to the executable".to_string())
     })?;
@@ -496,6 +495,8 @@ fn link_with_lld(
         .arg("-m")
         .arg("i386pep")
         .arg("-Bstatic")
+        .arg("--gc-sections")
+        .arg("--strip-all")
         .arg("-o")
         .arg(output_path)
         .arg(bin_dir.join("mingw").join("crt2.o"))
@@ -512,17 +513,7 @@ fn link_with_lld(
         .arg(bin_dir.join("mingw"))
         .arg("--start-group");
 
-    let sysroot_mingw = sysroot_mingw_lib_dir();
-    if sysroot_mingw.is_dir() {
-        command.arg("-L").arg(&sysroot_mingw);
-    }
-
-    const LIBS: &[&str] = &[
-        "mingw32", "gcc", "moldname", "mingwex", "msvcrt", "advapi32", "shell32", "user32",
-        "kernel32", "imagehlp", "comctl32", "comdlg32", "winspool", "winmm", "ole32", "oleaut32",
-        "uuid", "rpcrt4", "ws2_32", "bcrypt", "ntdll", "userenv", "crypt32", "shlwapi", "version",
-    ];
-    for lib in LIBS {
+    for lib in include_str!("../windows-link-libraries.txt").lines() {
         if bin_dir.join("mingw").join(format!("lib{lib}.a")).is_file() {
             command.arg(format!("-l{lib}"));
         }
@@ -533,7 +524,7 @@ fn link_with_lld(
 }
 
 #[cfg(target_os = "windows")]
-fn windows_linker() -> Option<WindowsLinker> {
+pub fn windows_linker() -> Option<WindowsLinker> {
     if bundled_lld().is_some() {
         return Some(WindowsLinker::BundledLld);
     }
@@ -552,22 +543,6 @@ fn bundled_lld() -> Option<PathBuf> {
     let dir = exe.parent()?;
     let bundled = dir.join("ld.lld.exe").is_file() && dir.join("mingw").is_dir();
     bundled.then(|| dir.to_path_buf())
-}
-
-#[cfg(target_os = "windows")]
-fn sysroot_mingw_lib_dir() -> PathBuf {
-    let sysroot = std::process::Command::new("rustc")
-        .arg("--print")
-        .arg("sysroot")
-        .output()
-        .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .unwrap_or_default();
-    PathBuf::from(sysroot.trim())
-        .join("lib")
-        .join("rustlib")
-        .join("x86_64-pc-windows-gnu")
-        .join("lib")
 }
 
 #[cfg(target_os = "windows")]

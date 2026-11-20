@@ -116,8 +116,8 @@ The [`examples/`](examples/) directory has small, browsable programs for every f
 To build the compiler from source you need:
 
 * **Rust** (stable) — [rustup.rs](https://rustup.rs)
-* **LLVM 23** — with `llvm-config` on `PATH`; set `LLVM_SYS_231_PREFIX` if it lives elsewhere
-* **A C linker** — `cc`/`clang` on Linux and macOS, MSVC `link.exe` or MinGW `gcc` on Windows
+* **LLVM 23** — Unix needs `llvm-config`; the Windows build script fetches the required DLLs and import library automatically
+* **A C toolchain** — `cc`/`clang` on Linux and macOS; Visual Studio C++ Build Tools with the Windows SDK for Windows/MSVC source builds
 
 ### Installation
 
@@ -134,13 +134,36 @@ Install a prebuilt binary from the [Releases](https://github.com/n1sc/ntsc/relea
 | Windows | Scoop | `scoop bucket add n1sc https://github.com/n1sc/scoop-ntsc`, then `scoop install ntsc` |
 | Windows | `.msi` | Run the installer; adds `ntsc` to `PATH` |
 
+**Windows users do not need Rust, Visual Studio, or a separate LLVM install
+to compile Neutron programs with these packages.** The linker, runtime, and
+required DLLs are bundled. Rust adaptors and native C dependencies still need
+their own toolchains.
+
 The Homebrew tap, the Scoop bucket and the AUR packages are updated by the
 release workflow on every tag, so `brew upgrade`, `scoop update` and
 `yay -Syu` keep `ntsc` current without reinstalling by hand.
 
 The compiler links LLVM 23 dynamically: Linux packages depend on the system LLVM runtime (`libllvm23` / `llvm-libs`), and macOS and Windows installers bundle it. Windows/MSVC builds use the packaged LLVM C API library. See [`.github/packaging/`](.github/packaging/README.md) for the full recipe documentation.
 
-Or build from source:
+To build from source on x64 Windows, install stable Rust and Visual Studio
+C++ Build Tools (including the Windows SDK), open **x64 Developer PowerShell**,
+and run from the repository root:
+
+```powershell
+.\scripts\build-windows.ps1
+```
+
+This builds the compiler, language server, and runtime in
+`target\x86_64-pc-windows-msvc\release`. LLVM is downloaded once and cached;
+only its C API import library, runtime DLLs, and linker are retained. No LLVM
+headers, `llvm-config`, CMake, vcpkg, or separately installed LLVM dependency
+libraries are needed. The LLVM DLLs are copied beside the compiler so it also
+runs from a fresh terminal. Use `-Configuration Debug` for a development build.
+The initial download is still the upstream LLVM archive, not a small custom
+distribution. To use an existing LLVM 23 installation instead, set
+`LLVM_SYS_231_PREFIX` before running the script.
+
+On Linux or macOS, build and install from source with:
 
 ```console
 $ arq install

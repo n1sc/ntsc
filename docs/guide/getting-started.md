@@ -5,17 +5,22 @@ By the end of this chapter, you will have a Neutron project that prints
 
 If `ntsc --version` already works on your machine, jump to
 [Your first project](#your-first-project). Otherwise, follow the setup steps
-below. The project is currently pre-release; these instructions build the
-compiler from source.
+below.
 
 ## Requirements
 
-NTSC requires:
+For the simplest Windows setup, use the `.msi` installer or Scoop package
+from the [Releases](https://github.com/n1sc/ntsc/releases) page. They bundle LLVM,
+the runtime, and the linker: using `ntsc build` does not require Rust, an LLVM
+development installation, or Visual Studio. Rust adaptors and native C
+dependencies may still need their respective toolchains.
+
+Building the compiler from source requires:
 
 - Linux, macOS, or Windows.
-- The LLVM 23 toolchain (specifically the libraries used by the `llvm-sys`
-  crate). On Linux and Windows the LLVM shared libraries must be discoverable;
-  on macOS they are linked into the binary at compile time.
+- LLVM 23. Unix builds use `llvm-config` and the shared library. Windows/MSVC
+  builds need only `lib/LLVM-C.lib` and the runtime DLLs under `bin/`;
+  the script below downloads these automatically.
 - A C toolchain and linker (gcc or clang on Linux, clang and the Xcode command
   line tools on macOS, or the MSVC toolchain on Windows).
 - A current stable Rust toolchain (edition 2024 support), if building from
@@ -30,9 +35,10 @@ variable, which must point at an LLVM 23 installation. For example:
 export LLVM_SYS_231_PREFIX=/usr/local/opt/llvm@23
 ```
 
-Without this variable, the build looks in the usual system locations. On
-Windows, either set `LLVM_SYS_231_PREFIX` to the LLVM install directory or add
-`llvm-config` to the `PATH`.
+Without this variable, Unix builds look in the usual system locations. On
+Windows, use the build script below, or set `LLVM_SYS_231_PREFIX` to a directory
+containing `lib\LLVM-C.lib` and `bin\LLVM-C.dll`, and add its `bin` directory
+to `PATH`. LLVM headers and `llvm-config` are not needed on Windows/MSVC.
 
 ## Building from source
 
@@ -49,6 +55,20 @@ built as part of the workspace and linked into every generated binary, so no
 separate runtime build step is needed. Keep the runtime archive alongside the
 compiler when installing or moving the build.
 
+On x64 Windows, install Visual Studio C++ Build Tools with the Windows SDK
+and stable Rust, open **x64 Developer PowerShell**, and replace the Cargo
+command above with:
+
+```powershell
+.\scripts\build-windows.ps1
+```
+
+The script caches the needed LLVM files and copies the DLLs alongside the
+compiler. It does not need LLVM headers, CMake, vcpkg, or `llvm-config`.
+The first run downloads the full upstream LLVM archive, but keeps only the
+C API import library, runtime DLLs, and linker. The compiler and runtime are
+written to `target\x86_64-pc-windows-msvc\release\`.
+
 For this terminal session on Linux or macOS, add the build directory to your
 command search path while still in the repository root:
 
@@ -59,7 +79,7 @@ export PATH="$PWD/target/release:$PATH"
 In Windows PowerShell, the equivalent is:
 
 ```powershell
-$env:Path = "$PWD\target\release;$env:Path"
+$env:Path = "$PWD\target\x86_64-pc-windows-msvc\release;$env:Path"
 ```
 
 This lets you call `ntsc` from a project directory. A new terminal session

@@ -76,6 +76,12 @@ task test_codegen {
     done("codegen unit tests passed")
 }
 
+task test_llvm_targets {
+    step("target initialization without llvm-sys C wrappers")
+    run "cargo test -p ntsc-codegen --lib --features llvm-sys/disable-alltargets-init context::tests"
+    done("wrapper-free target initialization passed")
+}
+
 task test_lsp {
     step("language-server unit and regression tests")
     run "cargo test -p ntsc-lsp"

@@ -52,6 +52,7 @@ packaging/
     ├── ntsc.wxs             main WiX v4 source (binary + PATH feature)
     ├── build-msi.ps1        computes DLL closure, bundles ld.lld + runtime,
     │                        generates dlls.wxs and tools.wxs, builds MSI
+    ├── stage-mingw.ps1      selects CRT/import files, including self-contained/
     ├── make-tarball.ps1     self-contained .tar.gz (reuses build-msi staging)
     ├── dlls.wxs             generated at build time, not committed
     └── tools.wxs            generated at build time, not committed
@@ -141,10 +142,21 @@ installed:
   `cargo build -p ntsc-runtime --target x86_64-pc-windows-gnu --release`) is
   bundled, because `ld.lld` in MinGW mode cannot consume the MSVC-flavoured
   archive;
-- the MinGW import libraries (from the rustc toolchain's
-  `x86_64-pc-windows-gnu` lib dir, created by
-  `rustup target add x86_64-pc-windows-gnu`) are installed into a `mingw`
+- only the linker-used MinGW import libraries and CRT startup object (from the rustc toolchain's
+  `rust-mingw` component plus `crt2.o` from the Windows GNU standard library)
+  are installed into a `mingw`
   subdirectory.
+
+`rustup target add x86_64-pc-windows-gnu` alone does **not** supply the MinGW
+import libraries on an MSVC host. Release CI fetches the small official
+`rust-mingw` component matching `rustc --version`, verifies its checksum, and
+combines it with the installed target's startup object. This is release-builder
+input only: no Rust or MinGW toolchain is installed on users' machines.
+
+Rust's `lib/self-contained` directory is searched before `lib`; missing core
+CRT files stop packaging. A shared allowlist drives both staging and linking,
+so unrelated archives and duplicate CRT files do not inflate the installer.
+DLL staging likewise follows the exact dependency closure, not every LLVM DLL.
 
 Windows system and API-set DLLs are not bundled. Other dependencies are resolved
 beside their importing binary, in the LLVM directory, or in the x64 CRT
@@ -156,6 +168,12 @@ stop packaging instead of producing an incomplete installer.
 MSVC or MinGW installation is no longer required for linking. The GNU-flavoured
 runtime is only built for the installer; developer machines with `link.exe`
 still use the MSVC-flavoured `ntsc_runtime.lib`.
+
+The bundled linker removes unreachable sections and strips symbols from
+generated executables. The release job compiles and runs both a hello-world
+and a standard-library/concurrency fixture with only Windows system tools on
+`PATH`, and reports their binary sizes and the installed bundle size. This
+tests actual normal-user builds rather than only checking `--version`.
 
 `wix build` then produces an installer that installs to
 `%ProgramFiles%\ntsc\bin` and supports upgrades via the `UpgradeCode`.

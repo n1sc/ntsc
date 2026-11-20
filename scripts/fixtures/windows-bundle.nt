@@ -1,0 +1,28 @@
+use archive
+use crypto
+use http
+use regex
+
+async fun worker(chan[int] output) {
+    42 |> output
+}
+
+async fun main() -> int {
+    var chan[int] results = chan.new(1)
+    go worker(results)
+    value <| results
+    say("bundle-worker: " + value)
+    say(crypto.sha256("hello"))
+    say(regex.find("hello", "ell"))
+    try {
+        archive.list_tar("missing-bundle-fixture.tar")
+    } catch (error) {
+        say("bundle-archive-ok: " + error)
+    }
+    try {
+        http.get("http://127.0.0.1:1/")
+    } catch (error) {
+        say("bundle-http-ok: " + error)
+    }
+    return 0
+}
