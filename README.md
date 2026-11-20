@@ -184,6 +184,7 @@ $ cat neutron.toml
 [package]
 entry = "src/main.nt"
 output = "hello"
+compiler = ">=0.1.0"
 $ ntsc run               # debug build
 $ ntsc run --release     # optimized build
 $ ntsc test              # run the test blocks

@@ -50,6 +50,7 @@ Or edit the manifest yourself and run `ntsc pkg install` with no arguments:
 [package]
 entry = "src/main.nt"
 output = "hello"
+compiler = ">=0.1.0"
 
 [dependencies]
 slug = "^1.2.0"
@@ -57,6 +58,11 @@ slug = "^1.2.0"
 
 The dependency table sits beside `[package]`; comments and unrelated tables
 are preserved when `ntsc pkg` edits the file.
+
+`compiler` declares which compiler versions can build the project. Installed
+packages declare it too: `ntsc pkg install` refuses a resolved package whose
+requirement the running compiler does not satisfy, so a newer package cannot
+silently be vendored into an older toolchain.
 
 ## Importing a package
 
@@ -186,7 +192,8 @@ a tag — there is no second list to keep in sync. Tag with semantic versions
 (`v1.0.0`, `v1.1.0`, …) and make sure the repository:
 
 - is publicly reachable over `https://`, `http://`, `ssh://` or `git@`,
-- has `neutron.toml` at the root with a `[package]` table,
+- has `neutron.toml` at the root with a `[package]` table that declares
+  `compiler`,
 - exports its API from `lib.nt` or `src/lib.nt` at that root.
 
 Once the pull request merges, CI rebuilds the index and

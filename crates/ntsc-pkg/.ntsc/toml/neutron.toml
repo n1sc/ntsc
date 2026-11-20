@@ -2,3 +2,4 @@
 name = "toml"
 entry = "lib.nt"
 output = "toml"
+compiler = ">=0.1.0"

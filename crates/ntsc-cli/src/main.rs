@@ -816,8 +816,10 @@ fn cmd_init(project_name: Option<&str>) -> Result<(), CliError> {
     let neutron_toml = format!(
         "[package]\n\
          entry = \"src/main.nt\"\n\
-         output = \"{}\"\n",
+         output = \"{}\"\n\
+         compiler = \">={}\"\n",
         ntsc_codegen::with_executable_extension(&name),
+        NTSC_VERSION,
     );
     fs::write(&manifest_path, &neutron_toml)?;
 
@@ -843,18 +845,29 @@ fn cmd_build(release: bool, test_mode: bool, json: bool) -> Result<PathBuf, CliE
     // Resolve and parse the module closure (in parallel).
     let load_start = Instant::now();
     let loaded = ntsc_build::modules::load_program(&entry_path).map_err(load_error)?;
+    ntsc_build::modules::check_vendored_compilers(&loaded.graph, NTSC_VERSION)
+        .map_err(load_error)?;
     let load_time = load_start.elapsed();
 
     // Experimental Rust-crate imports are opt-in: without the toggle the
     // build stops before resolution, adaptor generation, or codegen run.
-    if !config.experimental_rust_modules && ntsc_build::uses_rust_crates(&loaded.program) {
+    let uses_rust_modules = ntsc_build::uses_rust_crates(&loaded.program);
+    if !config.experimental_rust_modules && uses_rust_modules {
         return Err(CliError::Plain(
             "Rust crate imports (`use @crate`) are an experimental feature and are disabled \
              by default. Opt in with:\n\n\
              [experimental]\n\
-             rust_modules = true"
+             rust_modules = true\n\n\
+             External Rust modules also require `rustc` and `cargo`: https://rustup.rs."
                 .to_string(),
         ));
+    }
+
+    let manifest = ntsc_cargo::manifest::Manifest::read(&cwd.join("neutron.toml"))
+        .map_err(|error| CliError::Plain(error.to_string()))?;
+    if uses_rust_modules || !manifest.rust_deps.is_empty() {
+        ntsc_cargo::toolchain::check_rust_toolchain()
+            .map_err(|error| CliError::Plain(error.to_string()))?;
     }
 
     // Run name resolution up front so undefined-name errors get the
@@ -892,8 +905,6 @@ fn cmd_build(release: bool, test_mode: bool, json: bool) -> Result<PathBuf, CliE
     // to type Rust-call returns and enable method syntax on object
     // handles. The archives are built after codegen (only linking needs
     // them), through the same cached call.
-    let manifest = ntsc_cargo::manifest::Manifest::read(&cwd.join("neutron.toml"))
-        .map_err(|e| CliError::Plain(e.to_string()))?;
     if !manifest.rust_deps.is_empty() {
         let cache = ntsc_cargo::cache::CacheRoot::from_env();
         let resolution = ntsc_cargo::resolve::resolve_cached(&cache, &cwd, &manifest)
@@ -1410,7 +1421,10 @@ fn cmd_pkg(args: &[String]) -> Result<(), CliError> {
         )));
     }
 
-    let status = std::process::Command::new(&pkg).args(args).status()?;
+    let status = std::process::Command::new(&pkg)
+        .args(args)
+        .env("NTSC_COMPILER_VERSION", NTSC_VERSION)
+        .status()?;
     if status.success() {
         Ok(())
     } else {
@@ -1448,6 +1462,8 @@ fn load_project() -> Result<(PathBuf, ntsc_build::BuildConfig), CliError> {
         let msgs: Vec<_> = errors.iter().map(|e| e.to_string()).collect();
         CliError::Plain(format!("neutron.toml errors:\n  {}", msgs.join("\n  ")))
     })?;
+    ntsc_build::check_compiler_requirement(&config.compiler, NTSC_VERSION)
+        .map_err(CliError::Plain)?;
 
     Ok((cwd, config))
 }

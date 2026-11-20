@@ -46,6 +46,10 @@ pub enum ModuleLoadError {
     /// An imported file could not be resolved against the parsed closure.
     Internal(String),
 
+    /// A vendored package declares a compiler requirement this compiler
+    /// cannot satisfy, or declares none at all.
+    CompilerRequirement { path: PathBuf, message: String },
+
     /// One or more `private` declarations were referenced from another file.
     /// Each diagnostic is already attributed to its source file and carries a
     /// file-local span.
@@ -84,6 +88,9 @@ impl ModuleLoadError {
                 .with_code(codes::BUILD),
             ],
             Self::Internal(msg) => vec![Diagnostic::error(msg).with_code(codes::BUILD)],
+            Self::CompilerRequirement { path, message } => vec![
+                Diagnostic::error(format!("{}: {message}", path.display())).with_code(codes::BUILD),
+            ],
             Self::Visibility(errors) => errors,
         }
     }
@@ -115,6 +122,9 @@ impl std::fmt::Display for ModuleLoadError {
                 path.display()
             ),
             Self::Internal(msg) => write!(f, "{msg}"),
+            Self::CompilerRequirement { path, message } => {
+                write!(f, "{}: {message}", path.display())
+            }
             Self::Visibility(errors) => write!(f, "{} visibility error(s)", errors.len()),
         }
     }
@@ -486,6 +496,67 @@ pub fn vendored_import(root: &Path, import: &str) -> Option<PathBuf> {
         if found.is_some() {
             return found;
         }
+    }
+    None
+}
+
+/// Verify that every vendored package in `graph` accepts `compiler_version`.
+///
+/// A package that declares no `[package].compiler` requirement is rejected
+/// too: the field is required so a module can never be silently built by a
+/// compiler it was not published for.
+pub fn check_vendored_compilers(
+    graph: &ModuleGraph,
+    compiler_version: &str,
+) -> Result<(), ModuleLoadError> {
+    let root = graph
+        .entry
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| graph.entry.clone());
+    let mut checked = HashSet::new();
+    for file in &graph.files {
+        let Some(package) = vendored_package(&root, file) else {
+            continue;
+        };
+        if !checked.insert(package.clone()) {
+            continue;
+        }
+        let manifest = package.join("neutron.toml");
+        let name = package
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let source = fs::read_to_string(&manifest).map_err(|source| ModuleLoadError::Io {
+            path: manifest.clone(),
+            source,
+        })?;
+        let requirement = crate::module_compiler_requirement(&source).map_err(|error| {
+            ModuleLoadError::CompilerRequirement {
+                path: manifest.clone(),
+                message: format!("package `{name}`: {error}"),
+            }
+        })?;
+        if !crate::version::compiler_satisfies(&requirement, compiler_version) {
+            return Err(ModuleLoadError::CompilerRequirement {
+                path: manifest,
+                message: format!(
+                    "package `{name}` requires ntsc {requirement}, but ntsc {compiler_version} is running"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The vendored package directory containing `file`, if any.
+fn vendored_package(root: &Path, file: &Path) -> Option<PathBuf> {
+    for vendor in vendor_roots(root) {
+        let Ok(relative) = file.strip_prefix(&vendor) else {
+            continue;
+        };
+        let name = relative.components().next()?;
+        return Some(vendor.join(name));
     }
     None
 }
@@ -1325,6 +1396,51 @@ mod tests {
             .canonicalize()
             .unwrap();
         assert!(result.graph.files.contains(&vendored));
+    }
+
+    #[test]
+    fn rejects_vendored_packages_whose_compiler_requirement_is_unsatisfied() {
+        let project = TestProject::new();
+        let entry = project.write("src/main.nt", "use json\n\nfun main() {\n    say(1)\n}\n");
+        fs::create_dir_all(project.dir.join("src/.ntsc/json")).unwrap();
+        project.write(
+            "src/.ntsc/json/lib.nt",
+            "fun encode() -> int {\n    return 1;\n}\n",
+        );
+        project.write(
+            "src/.ntsc/json/neutron.toml",
+            "[package]\ncompiler = \">=0.2.0\"\n",
+        );
+
+        let graph = discover(&entry).expect("graph should load");
+        let message = check_vendored_compilers(&graph, "0.1.0")
+            .expect_err("an older compiler must refuse the package")
+            .to_string();
+        assert!(message.contains("requires ntsc >=0.2.0"), "{message}");
+        assert!(message.contains("ntsc 0.1.0 is running"), "{message}");
+
+        check_vendored_compilers(&graph, "0.2.0").expect("a satisfying compiler is accepted");
+    }
+
+    #[test]
+    fn rejects_vendored_packages_without_a_compiler_requirement() {
+        let project = TestProject::new();
+        let entry = project.write("src/main.nt", "use json\n\nfun main() {\n    say(1)\n}\n");
+        fs::create_dir_all(project.dir.join("src/.ntsc/json")).unwrap();
+        project.write(
+            "src/.ntsc/json/lib.nt",
+            "fun encode() -> int {\n    return 1;\n}\n",
+        );
+        project.write("src/.ntsc/json/neutron.toml", "[package]\n");
+
+        let graph = discover(&entry).expect("graph should load");
+        let message = check_vendored_compilers(&graph, "0.1.0")
+            .expect_err("the requirement is mandatory")
+            .to_string();
+        assert!(
+            message.contains("missing required key `compiler`"),
+            "{message}"
+        );
     }
 
     #[test]

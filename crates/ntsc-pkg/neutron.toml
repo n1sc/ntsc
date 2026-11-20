@@ -1,6 +1,7 @@
 [package]
 entry = "src/main.nt"
 output = "ntsc-pkg"
+compiler = ">=0.1.0"
 
 # ntsc-pkg consumes its own registry: the vendored tree in `.ntsc/` is
 # committed because the manager cannot fetch this dependency before it is

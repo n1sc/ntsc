@@ -27,7 +27,7 @@ exports.run = async function() {
         await configuration.update("serverPath", path.join(root, "target/debug/ntsc-lsp"), vscode.ConfigurationTarget.Global);
         await configuration.update("serverArgs", [], vscode.ConfigurationTarget.Global);
         await vscode.workspace.getConfiguration("editor").update("wordBasedSuggestions", "off", vscode.ConfigurationTarget.Global);
-        await fs.writeFile(path.join(directory, "neutron.toml"), '[package]\nentry = "main.nt"\noutput = "test"\n');
+        await fs.writeFile(path.join(directory, "neutron.toml"), '[package]\nentry = "main.nt"\noutput = "test"\ncompiler = ">=0.1.0"\n');
         const source = "class Item { var int count; fun ping() {} } class Other { fun unrelated() {} } fun make() -> Item { return Item(); } fun main() { var item = make(); item. }";
         const file = path.join(directory, "main.nt");
         await fs.writeFile(file, source);

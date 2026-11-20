@@ -5,7 +5,7 @@ vim.cmd("syntax on")
 
 local directory = vim.fn.tempname() .. " neutron editor"
 vim.fn.mkdir(directory .. "/src", "p")
-vim.fn.writefile({ '[package]', 'entry = "src/main.nt"', 'output = "editor-test"' }, directory .. "/neutron.toml")
+vim.fn.writefile({ '[package]', 'entry = "src/main.nt"', 'output = "editor-test"', 'compiler = ">=0.1.0"' }, directory .. "/neutron.toml")
 local file = directory .. "/src/main.nt"
 local source = "class Item { var int count; fun ping() -> int { return 1; } } class Other { fun unrelated() {} } fun make() -> Item { return Item(); } fun main() { var item = make(); item. }"
 vim.fn.writefile({ source }, file)

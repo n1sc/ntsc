@@ -17,6 +17,24 @@ with a "disabled by default" error before any compilation happens. See the
 rust_modules = true
 ```
 
+## Rust toolchain requirement
+
+External Rust modules need a working **Rust compiler and Cargo** on `PATH`,
+even when Neutron itself was installed from a prebuilt package. Install stable
+Rust from [rustup.rs](https://rustup.rs), reopen your terminal, and verify:
+
+```console
+rustc --version
+cargo --version
+```
+
+If rustup is installed but has no default toolchain, run `rustup default stable`.
+Neutron checks these tools before resolving or generating Rust adaptors and
+shows these setup instructions when a tool is missing or unusable.
+Rust crates with native dependencies may also need their own build tools.
+Ordinary Neutron programs using only the bundled standard library do **not**
+need Rust installed.
+
 `ntsc cargo install` / `ntsc build` generate thin *adaptors* that the compiler
 links into your binary, and each supported bridge becomes an ordinary call
 in Neutron source. The goal is to use Rust crates directly, without writing

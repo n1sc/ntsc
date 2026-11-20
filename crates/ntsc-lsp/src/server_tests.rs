@@ -16,7 +16,7 @@ impl Project {
         fs::create_dir_all(&directory).unwrap();
         fs::write(
             directory.join("neutron.toml"),
-            "[package]\nentry = \"main.nt\"\noutput = \"test\"\n",
+            "[package]\nentry = \"main.nt\"\noutput = \"test\"\ncompiler = \">=0.1.0\"\n",
         )
         .unwrap();
         Self { directory }

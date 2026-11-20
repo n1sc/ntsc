@@ -147,7 +147,7 @@ this `hello` directory, not in the compiler's source repository.
 
 ```
 project/
-  neutron.toml      Manifest: target triple, entry point, output name
+  neutron.toml      Manifest: target triple, entry point, output name, compiler range
   src/            Source files (.nt)
   build/          Generated output; debug/ and release/ subdirectories
 ```

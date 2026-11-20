@@ -30,7 +30,15 @@ if [[ "$PKG" != "$BESIDE" ]]; then
     cp "$PKG" "$BESIDE"
 fi
 
+ORIGINAL_HOME="$HOME"
 WORK="$(mktemp -d)"
+# Package checkouts are cached under $HOME/.ntsc/packages and reused across
+# runs; isolate them so a stale clone of an earlier fixture cannot mask a
+# change to a package's manifest. The Rust toolchain stays in the real home.
+export HOME="$WORK/home"
+mkdir -p "$HOME"
+export RUSTUP_HOME="${RUSTUP_HOME:-$ORIGINAL_HOME/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-$ORIGINAL_HOME/.cargo}"
 SERVER_PID=""
 cleanup() {
     if [[ -n "$SERVER_PID" ]]; then
@@ -66,6 +74,7 @@ cat > "$REG/fixture/neutron.toml" <<'EOF'
 name = "fixture"
 entry = "lib.nt"
 output = "fixture"
+compiler = ">=0.1.0"
 EOF
 cat > "$REG/fixture/lib.nt" <<'EOF'
 fun greeting() -> string {
@@ -80,6 +89,7 @@ cat > "$REG/outer/neutron.toml" <<'EOF'
 name = "outer"
 entry = "lib.nt"
 output = "outer"
+compiler = ">=0.1.0"
 
 [dependencies]
 fixture = "^1.0.0"
@@ -145,6 +155,7 @@ cat > "$PROJ/neutron.toml" <<'EOF'
 name = "consumer"
 entry = "src/main.nt"
 output = "consumer"
+compiler = ">=0.1.0"
 
 [dependencies]
 outer = "^1.0.0"
@@ -162,7 +173,10 @@ cd "$PROJ"
 export NTSC_REGISTRY="$URL"
 
 echo "== install"
-INSTALL_OUTPUT="$($NTSC pkg install 2>&1)"
+INSTALL_OUTPUT="$($NTSC pkg install 2>&1)" || {
+    echo "$INSTALL_OUTPUT"
+    fail "install failed"
+}
 echo "$INSTALL_OUTPUT"
 grep -q 'neutron modules' <<<"$INSTALL_OUTPUT" || fail "install output has no module header"
 grep -q 'ok outer v1.0.0' <<<"$INSTALL_OUTPUT" || fail "install output has no outer package status"
@@ -174,7 +188,10 @@ grep -q '^fixture = "1.0.0"$' neutron.lock || fail "fixture missing from the loc
 grep -q '^outer = "1.0.0"$' neutron.lock || fail "outer missing from the lockfile"
 
 echo "== build"
-OUTPUT="$("$NTSC" build --release 2>&1)"
+OUTPUT="$("$NTSC" build --release 2>&1)" || {
+    echo "$OUTPUT"
+    fail "build failed"
+}
 echo "$OUTPUT"
 "$PROJ/build/release/consumer" | tee "$WORK/run.txt"
 grep -q 'outer wraps hello from fixture 1.0.0' "$WORK/run.txt" ||
@@ -210,6 +227,32 @@ fi
 if grep -q '^outer = ' neutron.toml; then
     fail "remove left the dependency in the manifest"
 fi
+
+echo "== compiler requirement"
+cat > "$PROJ/neutron.toml" <<'EOF'
+[package]
+name = "consumer"
+entry = "src/main.nt"
+output = "consumer"
+compiler = ">=0.1.0"
+
+[dependencies]
+fixture = "^1.0.0"
+EOF
+cat > "$REG/fixture/neutron.toml" <<'EOF'
+[package]
+name = "fixture"
+entry = "lib.nt"
+output = "fixture"
+compiler = ">=999.0.0"
+EOF
+make_repo "$REG/fixture" "1.2.0"
+write_index '"1.0.0", "1.1.0", "1.2.0"'
+if "$NTSC" pkg update >"$WORK/err.txt" 2>&1; then
+    fail "a package requiring a newer compiler was installed"
+fi
+grep -q 'requires ntsc >=999.0.0' "$WORK/err.txt" ||
+    fail "the compiler requirement error does not name the requirement"
 
 echo "== errors"
 if "$NTSC" pkg install missing-package >/dev/null 2>&1; then

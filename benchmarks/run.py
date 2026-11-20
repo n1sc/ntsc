@@ -64,7 +64,7 @@ def build_binaries(compiler):
     shutil.copyfile(NATIVE_SOURCES / "kernels.nt", project / "src/main.nt")
     triple = command_output(["rustc", "-vV"]).split("host: ", 1)[1].splitlines()[0]
     (project / "neutron.toml").write_text(
-        f'[package]\ntarget = "{triple}"\nentry = "src/main.nt"\noutput = "kernels"\n'
+        f'[package]\ntarget = "{triple}"\nentry = "src/main.nt"\noutput = "kernels"\ncompiler = ">=0.1.0"\n'
     )
     builds["Neutron"] = [str(compiler), "build", "--release"]
     paths = {name: NATIVE_BUILD / filename for name, filename in [
@@ -583,7 +583,7 @@ def compile_fixture(language, name, compiler, environment):
         shutil.copyfile(source, cwd / "src/main.nt")
         triple = command_output(["rustc", "-vV"]).split("host: ", 1)[1].splitlines()[0]
         (cwd / "neutron.toml").write_text(
-            f'[package]\ntarget = "{triple}"\nentry = "src/main.nt"\noutput = "{name}"\n'
+            f'[package]\ntarget = "{triple}"\nentry = "src/main.nt"\noutput = "{name}"\ncompiler = ">=0.1.0"\n'
         )
         command = [str(compiler), "build", "--release"]
         binary = cwd / "build/release" / name

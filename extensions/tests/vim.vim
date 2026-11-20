@@ -5,8 +5,8 @@ syntax on
 runtime plugin/neutron.vim
 let directory = tempname() . " neutron editor"
 call mkdir(directory . "/nested/src", "p")
-call writefile(["[package]", 'entry = "main.nt"', 'output = "test"'], directory . "/neutron.toml")
-call writefile(["[package]", 'entry = "src/main.nt"', 'output = "test"'], directory . "/nested/neutron.toml")
+call writefile(["[package]", 'entry = "main.nt"', 'output = "test"', 'compiler = ">=0.1.0"'], directory . "/neutron.toml")
+call writefile(["[package]", 'entry = "src/main.nt"', 'output = "test"', 'compiler = ">=0.1.0"'], directory . "/nested/neutron.toml")
 execute "edit " . fnameescape(directory . "/nested/src/main.nt")
 call assert_equal("neutron", &filetype)
 call assert_equal("# %s", &commentstring)

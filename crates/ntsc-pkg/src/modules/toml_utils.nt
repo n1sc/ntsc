@@ -57,6 +57,19 @@ fun get_entry(view string toml_json) -> result[string, string] {
     return Ok(entry)
 }
 
+/// The `[package].compiler` requirement, or "" when the manifest omits it.
+fun get_compiler(view string toml_json) -> string {
+    var pkg = json.get(toml_json, "package")
+    if (pkg == "null") {
+        return ""
+    }
+    var requirement = unquote(json.get(pkg, "compiler"))
+    if (requirement == "null") {
+        return ""
+    }
+    return requirement
+}
+
 /// The `[dependencies]` table as JSON text, or `{}` when there is none.
 fun get_dependencies(view string toml_json) -> string {
     var deps = json.get(toml_json, "dependencies")

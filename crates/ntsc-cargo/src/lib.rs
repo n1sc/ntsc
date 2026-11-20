@@ -25,6 +25,7 @@ pub mod fetch;
 pub mod manifest;
 pub mod metadata;
 pub mod resolve;
+pub mod toolchain;
 
 use std::path::Path;
 
@@ -44,6 +45,12 @@ impl std::error::Error for CargoError {}
 
 impl From<std::io::Error> for CargoError {
     fn from(error: std::io::Error) -> Self {
+        Self(error.to_string())
+    }
+}
+
+impl From<toolchain::RustToolchainError> for CargoError {
+    fn from(error: toolchain::RustToolchainError) -> Self {
         Self(error.to_string())
     }
 }
@@ -160,6 +167,9 @@ fn update(name: Option<&str>, project_dir: &Path) -> CargoResult<()> {
     {
         return Err(CargoError(format!("crate `{name}` is not in [rust-deps]")));
     }
+    if !manifest.rust_deps.is_empty() {
+        toolchain::check_rust_toolchain()?;
+    }
     resolve::resolve_and_fetch(
         &cache::CacheRoot::from_env(),
         project_dir,
@@ -187,6 +197,7 @@ fn edit_feature(name: &str, action: &str, feature: &str, project_dir: &Path) -> 
 fn install(cache: &cache::CacheRoot, name: &str, project_dir: &Path) -> CargoResult<()> {
     let manifest_path = project_dir.join("neutron.toml");
     let mut manifest = manifest::Manifest::read(&manifest_path)?;
+    toolchain::check_rust_toolchain()?;
 
     if manifest.has_rust_dep(name) {
         println!("`{name}` is already in [rust-deps]");

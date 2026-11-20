@@ -533,7 +533,7 @@ invalid input.
 | Function | Returns | Behavior |
 | --- | --- | --- |
 | `random.seed(seed)` | `bool` | Seeds the generator. |
-| `random.int(min, max)` | `int` | Integer in `[min, max)`; throws on inverted bounds. |
+| `random.int(min, max)` | `int` | Integer in `[min, max]` (both ends included); throws on inverted bounds. |
 | `random.float()` | `float` | Float in `[0.0, 1.0)`. |
 | `random.bool()` | `bool` | Random boolean. |
 | `random.shuffle(a)` | `array[T]` | New array, elements shuffled. |

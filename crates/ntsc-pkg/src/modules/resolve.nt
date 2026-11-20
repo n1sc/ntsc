@@ -6,6 +6,7 @@ use "toml_utils" as toml_utils
 
 use arrays
 use collections
+use os
 use paths
 use strings
 
@@ -59,6 +60,7 @@ fun resolve(view string manifest_json, view string lock_json) -> result[array[st
         }
         var repo = registry.get_repo(name)?
         var checkout = source.checkout(name, version, repo)?
+        check_compiler(name, version, checkout)?
 
         arrays.push(plan, copy(name) + "\t" + copy(version) + "\t" + copy(repo) + "\t" + copy(checkout))
         collections.set_add(chosen, name)
@@ -87,6 +89,36 @@ fun sub_dependencies(view string checkout) -> string {
         case Ok(json) => return toml_utils.get_dependencies(json)
         case Err(_) => return "{}"
     }
+}
+
+/// The compiler requirement a package declares, or "" when it declares none.
+fun compiler_requirement(view string checkout) -> string {
+    var manifest = paths.join(checkout, "neutron.toml")
+    var result[string, string] parsed = toml_utils.read_toml(manifest)
+    match (parsed) {
+        case Ok(json) => return toml_utils.get_compiler(json)
+        case Err(_) => return ""
+    }
+}
+
+/// Refuse a package the running compiler cannot build.
+///
+/// `NTSC_COMPILER_VERSION` is set by `ntsc pkg`; a direct `ntsc-pkg` run has
+/// no compiler to compare against, so only the declared-requirement check
+/// applies there.
+fun check_compiler(view string name, view string version, view string checkout) -> result[bool, string] {
+    var requirement = compiler_requirement(checkout)
+    if (strings.is_empty(requirement)) {
+        return Err("package '" + copy(name) + "' " + copy(version) + " does not declare [package].compiler")
+    }
+    var compiler = strings.trim(os.getenv("NTSC_COMPILER_VERSION"))
+    if (strings.is_empty(compiler)) {
+        return Ok(true)
+    }
+    if (!semver.satisfies(semver.core_of(compiler), requirement)) {
+        return Err("package '" + copy(name) + "' " + copy(version) + " requires ntsc " + copy(requirement) + ", but ntsc " + copy(compiler) + " is running")
+    }
+    return Ok(true)
 }
 
 fun planned_version(view array[string] plan, view string name) -> string {

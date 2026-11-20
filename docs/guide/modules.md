@@ -215,15 +215,17 @@ The project manifest `neutron.toml` has a `[package]` section:
 [package]
 entry = "src/main.nt"
 output = "my-project"
+compiler = ">=0.1.0"
 ```
 
 - `entry`: the entry source file, relative to the project root.
 - `output`: the name of the produced binary.
+- `compiler`: the range of compiler versions that can build the project.
 - `target` (optional): an LLVM target triple; when omitted, it defaults to
   the host platform.
 
-`entry` and `output` are required. `ntsc init` generates a correct manifest
-automatically. See the
+`entry`, `output` and `compiler` are required. `ntsc init` generates a correct
+manifest automatically. See the
 [CLI reference](../reference/cli.md).
 
 Use the generated manifest for these examples; you do not need to choose a

@@ -39,7 +39,7 @@ project):
 
 ```
 name/
-  neutron.toml    entry/output; target defaults to the host platform
+  neutron.toml    entry/output/compiler; target defaults to the host platform
   src/main.nt     fun main() { say("Hello, World!") }
 ```
 
@@ -116,20 +116,26 @@ before.
 
 ## The build manifest
 
-`neutron.toml` is a TOML file with a `[package]` section. `entry` and `output`
-are required; `target` is optional and defaults to the host platform:
+`neutron.toml` is a TOML file with a `[package]` section. `entry`, `output`
+and `compiler` are required; `target` is optional and defaults to the host
+platform:
 
 ```toml
 [package]
 target = "x86_64-unknown-linux-gnu"
 entry = "src/main.nt"
 output = "hello"
+compiler = ">=0.1.0"
 ```
 
 - `target`, when present, is an LLVM target triple.
 - `entry` is the entry source file, relative to the project root.
 - `output` is the output binary name (without extension; the platform
   extension is added automatically).
+- `compiler` is the range of compiler versions that can build the project,
+  using the same [requirement syntax](../guide/packages.md) as dependencies.
+  `ntsc build`, `run`, `watch` and `test` refuse to run when the running
+  compiler does not satisfy it.
 
 Missing or duplicate keys are reported as `neutron.toml errors`.
 

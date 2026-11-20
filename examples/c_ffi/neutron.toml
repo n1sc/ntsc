@@ -2,6 +2,7 @@
 target = "x86_64-unknown-linux-gnu"
 entry = "src/main.nt"
 output = "c_ffi"
+compiler = ">=0.1.0"
 
 [ffi]
 search_paths = ["native"]
