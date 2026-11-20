@@ -4,7 +4,8 @@ $directory = Join-Path ([IO.Path]::GetTempPath()) "ntsc-windows-build-$([Guid]::
 $originalPath = $env:Path
 $originalPrefix = $env:LLVM_SYS_231_PREFIX
 $originalOS = $env:OS
-$tarExecutable = (Get-Command tar -CommandType Application).Source
+# Windows runners expose two tar.exe (System32 and Git); .Source on both is an array.
+$tarExecutable = (Get-Command tar -CommandType Application | Select-Object -First 1).Source
 $version = "23.1.3"
 $archiveRoot = "clang+llvm-$version-x86_64-pc-windows-msvc"
 $global:downloadCount = 0
