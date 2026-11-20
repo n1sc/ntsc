@@ -173,3 +173,7 @@ try {
   $env:OS = $originalOS
   Remove-Item -LiteralPath $directory -Recurse -Force
 }
+
+# The failure-path assertions leave $LASTEXITCODE set; pwsh -Command would
+# otherwise report that as this script's exit code.
+exit 0
