@@ -22,7 +22,8 @@ serde_json = "1.0"
 # llvm-sys rejects MSVC shared linking and misparses build-machine paths in
 # the archive's static system libraries. build.rs links the shipped C API
 # import library instead. Disabling the C target wrappers also removes the
-# need for LLVM headers and llvm-config; Unix retains automatic shared linking.
+# need for LLVM headers and llvm-config; msvc_target_init defines the
+# equivalents inkwell still references. Unix retains automatic shared linking.
 [target.'cfg(target_env = "msvc")'.dependencies]
 inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "3cf0506a4167f149b8fb56fb9714571f927a2306", default-features = false, features = ["llvm23-1-no-llvm-linking"] }
 llvm-sys = { version = "231", default-features = false, features = ["no-llvm-linking", "disable-alltargets-init"] }

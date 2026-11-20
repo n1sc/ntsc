@@ -5,6 +5,9 @@
 pub mod context;
 pub mod emit;
 
+#[cfg(target_env = "msvc")]
+mod msvc_target_init;
+
 use std::path::{Path, PathBuf};
 
 use inkwell::OptimizationLevel;
