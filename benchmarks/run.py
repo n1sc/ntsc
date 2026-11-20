@@ -49,36 +49,95 @@ def command_output(command, **kwargs):
     return result.stdout.strip()
 
 
-def build_binaries(compiler):
+def find_prebuilt_binary(compiler, name):
+    exe = ".exe" if sys.platform == "win32" else ""
+    filename_map = {
+        "C · GCC": "gcc",
+        "C · Clang": "clang",
+        "Go": "go",
+        "Rust": "rust",
+    }
+    base = filename_map.get(name)
+    if not base:
+        return None
+    comp = compiler.resolve() if isinstance(compiler, Path) else Path(compiler).resolve()
+    candidates = [
+        ROOT / "benchmarks/prebuilt" / f"{base}{exe}",
+        ROOT / "prebuilt" / f"{base}{exe}",
+        comp.parent / "prebuilt" / f"{base}{exe}",
+        comp.parent.parent / "prebuilt" / f"{base}{exe}",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def build_binaries(compiler, languages=None):
+    if languages is None:
+        languages = LANGUAGES
     NATIVE_BUILD.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     environment.update(GOCACHE=str(NATIVE_BUILD / "go-cache"), GO111MODULE="off")
+    exe = ".exe" if sys.platform == "win32" else ""
     builds = {
-        "C · GCC": ["gcc", "-O3", "-std=c11", "-ffp-contract=off", str(NATIVE_SOURCES / "kernels.c"), "-lm", "-o", str(NATIVE_BUILD / "gcc")],
-        "C · Clang": ["clang", "-O3", "-std=c11", "-ffp-contract=off", str(NATIVE_SOURCES / "kernels.c"), "-lm", "-o", str(NATIVE_BUILD / "clang")],
-        "Go": ["go", "build", "-trimpath", "-o", str(NATIVE_BUILD / "go"), str(NATIVE_SOURCES / "kernels.go")],
-        "Rust": ["rustc", "--edition=2024", "-C", "opt-level=3", "-C", "codegen-units=1", "-C", "panic=abort", str(NATIVE_SOURCES / "kernels.rs"), "-o", str(NATIVE_BUILD / "rust")],
+        "C · GCC": ["gcc", "-O3", "-std=c11", "-ffp-contract=off", str(NATIVE_SOURCES / "kernels.c"), "-lm", "-o", str(NATIVE_BUILD / f"gcc{exe}")],
+        "C · Clang": ["clang", "-O3", "-std=c11", "-ffp-contract=off", str(NATIVE_SOURCES / "kernels.c"), "-lm", "-o", str(NATIVE_BUILD / f"clang{exe}")],
+        "Go": ["go", "build", "-trimpath", "-o", str(NATIVE_BUILD / f"go{exe}"), str(NATIVE_SOURCES / "kernels.go")],
+        "Rust": ["rustc", "--edition=2024", "-C", "opt-level=3", "-C", "codegen-units=1", "-C", "panic=abort", str(NATIVE_SOURCES / "kernels.rs"), "-o", str(NATIVE_BUILD / f"rust{exe}")],
     }
     project = NATIVE_BUILD / "neutron"
     (project / "src").mkdir(parents=True, exist_ok=True)
     shutil.copyfile(NATIVE_SOURCES / "kernels.nt", project / "src/main.nt")
-    triple = command_output(["rustc", "-vV"]).split("host: ", 1)[1].splitlines()[0]
+    try:
+        triple = command_output(["rustc", "-vV"]).split("host: ", 1)[1].splitlines()[0]
+    except (subprocess.SubprocessError, FileNotFoundError):
+        triple = "x86_64-pc-windows-gnu" if sys.platform == "win32" else "x86_64-unknown-linux-gnu"
+    ffi_config = '\n[ffi]\nlibraries = ["synchronization", "gcc_eh", "gcc_s"]\n' if sys.platform == "win32" else ""
     (project / "neutron.toml").write_text(
-        f'[package]\ntarget = "{triple}"\nentry = "src/main.nt"\noutput = "kernels"\n'
+        f'[package]\ntarget = "{triple}"\nentry = "src/main.nt"\noutput = "kernels"\n{ffi_config}'
     )
     builds["Neutron"] = [str(compiler), "build", "--release"]
-    paths = {name: NATIVE_BUILD / filename for name, filename in [
+    paths = {name: NATIVE_BUILD / f"{filename}{exe}" for name, filename in [
         ("C · GCC", "gcc"), ("C · Clang", "clang"), ("Go", "go"), ("Rust", "rust"),
     ]}
-    paths["Neutron"] = project / "build/release/kernels"
+    paths["Neutron"] = project / f"build/release/kernels{exe}"
     records = {}
-    for name in LANGUAGES:
+    tool_map = {"C · GCC": "gcc", "C · Clang": "clang", "Go": "go", "Rust": "rustc"}
+    for name in languages:
+        prebuilt = find_prebuilt_binary(compiler, name) if name != "Neutron" else None
+        tool = tool_map.get(name)
+        if name != "Neutron" and prebuilt and (not tool or not shutil.which(tool)):
+            print(f"Using prebuilt {name} binary ({prebuilt.name})...", flush=True)
+            shutil.copyfile(prebuilt, paths[name])
+            records[name] = {
+                "command": ["prebuilt", str(prebuilt)],
+                "build_seconds": 0.0,
+                "binary_bytes": paths[name].stat().st_size,
+            }
+            continue
+
         print(f"Building {name}...", flush=True)
         started = time.perf_counter()
-        result = subprocess.run(
-            builds[name], cwd=project if name == "Neutron" else ROOT,
-            env=environment, capture_output=True, text=True, timeout=600,
-        )
+        cargo_toml = ROOT / "Cargo.toml"
+        renamed_cargo = False
+        if name == "Neutron" and cargo_toml.is_file() and shutil.which("cargo") is None:
+            try:
+                cargo_toml.rename(ROOT / "Cargo.toml.tmp")
+                renamed_cargo = True
+            except OSError:
+                pass
+        try:
+            result = subprocess.run(
+                builds[name], cwd=project if name == "Neutron" else ROOT,
+                env=environment, capture_output=True, text=True, timeout=600,
+            )
+        finally:
+            if renamed_cargo:
+                try:
+                    (ROOT / "Cargo.toml.tmp").rename(cargo_toml)
+                except OSError:
+                    pass
         (NATIVE_BUILD / f"{paths[name].name}-build.log").write_text(result.stdout + result.stderr)
         if result.returncode:
             raise RuntimeError(f"{name} compilation failed:\n{result.stdout}\n{result.stderr}")
@@ -181,7 +240,8 @@ def render_table(report, output):
     workloads = report["workloads"]
     if report["status"] != "complete" or not workloads or len(workloads) != report["total_workloads"]:
         raise ValueError("only complete benchmark runs can be published")
-    medians = [[workload["results"][language]["median_seconds"] for language in LANGUAGES]
+    languages = report.get("languages", LANGUAGES)
+    medians = [[workload["results"][language]["median_seconds"] for language in languages]
                for workload in workloads]
     if any(not math.isfinite(value) or value <= 0 for row in medians for value in row):
         raise ValueError("table timings must be finite and positive")
@@ -214,8 +274,10 @@ def render_table(report, output):
     text(24, 29, title, "heading")
     text(24, 49, "Small correctness inputs · not publishable timings" if smoke
          else "Median milliseconds · lower is better · green = fastest", "muted")
-    labels = ["Neutron", "C / GCC", "C / Clang", "Go", "Rust"]
-    centers = [266 + 104 * index for index in range(len(LANGUAGES))]
+    aliases = {"C · GCC": "C / GCC", "C · Clang": "C / Clang"}
+    labels = [aliases.get(l, l) for l in languages]
+    col_width = min(104, 480 // max(len(languages), 1))
+    centers = [266 + col_width * index for index in range(len(languages))]
     text(24, 79, "Workload / size", "header")
     for center, label in zip(centers, labels):
         text(center, 79, label, "header", "middle")
@@ -234,15 +296,16 @@ def render_table(report, output):
                  "number best" if value == fastest else "number", "middle")
     slowdowns = [
         math.exp(statistics.mean(math.log(row[column] / min(row)) for row in medians))
-        for column in range(len(LANGUAGES))
+        for column in range(len(languages))
     ]
     y = 108 + 30 * len(workloads)
     text(24, y, "Overall slowdown", "header")
     text(24, y + 17, "Fastest per workload = 1×", "muted")
     for index, (center, slowdown) in enumerate(zip(centers, slowdowns)):
         text(center, y, f"{slowdown:.2f}×", "number", "middle")
-        ElementTree.SubElement(svg, "rect", x=str(center - 42), y=str(y + 9),
-                               width=f"{84 * slowdown / max(slowdowns):.2f}", height="6", rx="3",
+        bar_w = min(col_width - 20, 84)
+        ElementTree.SubElement(svg, "rect", x=str(center - bar_w / 2), y=str(y + 9),
+                               width=f"{bar_w * slowdown / max(slowdowns):.2f}", height="6", rx="3",
                                fill="#2563eb" if index == 0 else "#94a3b8")
     cpu = report["system"]["cpu"].replace("(R)", "").replace("(TM)", "")
     cpu = cpu.split(" CPU", 1)[0]
@@ -575,18 +638,23 @@ def compile_fixture(language, name, compiler, environment):
         "Neutron": ("ntsc", "nt"), "Go": ("go", "go"), "Rust": ("rust", "rs"),
     }[language]
     source = ROOT / "benchmarks" / source_directory / f"{name}.{extension}"
-    binary = directory / f"{language.lower()}_{name}"
+    exe = ".exe" if sys.platform == "win32" else ""
+    binary = directory / f"{language.lower()}_{name}{exe}"
     cwd = ROOT
     if language == "Neutron":
         cwd = directory / name
         (cwd / "src").mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, cwd / "src/main.nt")
-        triple = command_output(["rustc", "-vV"]).split("host: ", 1)[1].splitlines()[0]
+        try:
+            triple = command_output(["rustc", "-vV"]).split("host: ", 1)[1].splitlines()[0]
+        except (subprocess.SubprocessError, FileNotFoundError):
+            triple = "x86_64-pc-windows-gnu" if sys.platform == "win32" else "x86_64-unknown-linux-gnu"
+        ffi_config = '\n[ffi]\nlibraries = ["synchronization", "gcc_eh", "gcc_s"]\n' if sys.platform == "win32" else ""
         (cwd / "neutron.toml").write_text(
-            f'[package]\ntarget = "{triple}"\nentry = "src/main.nt"\noutput = "{name}"\n'
+            f'[package]\ntarget = "{triple}"\nentry = "src/main.nt"\noutput = "{name}"\n{ffi_config}'
         )
         command = [str(compiler), "build", "--release"]
-        binary = cwd / "build/release" / name
+        binary = cwd / f"build/release/{name}{exe}"
     elif language == "Go":
         command = ["go", "build", "-trimpath", "-o", str(binary), str(source)]
     else:
@@ -774,25 +842,53 @@ def measure_fixtures(identifier, compiler, args, environment, cpus, output):
     return suite
 
 
-def measure_native(compiler, args, output, cpu):
-    binaries, builds, environment = build_binaries(compiler)
+def measure_native(compiler, args, output, cpu, languages=None):
+    if languages is None:
+        languages = LANGUAGES
+    binaries, builds, environment = build_binaries(compiler, languages)
     environment["GOMAXPROCS"] = "1"
     cpu_info = Path("/proc/cpuinfo").read_text() if Path("/proc/cpuinfo").is_file() else ""
     model = next((line.split(":", 1)[1].strip() for line in cpu_info.splitlines()
-                  if line.startswith("model name")), platform.processor())
+                  if line.startswith("model name")), platform.processor() or "Unknown CPU")
+    versions = {"Neutron": command_output([str(compiler), "--version"])}
+    prebuilt_versions = {}
+    comp = compiler.resolve() if isinstance(compiler, Path) else Path(compiler).resolve()
+    for cand in (ROOT / "benchmarks/prebuilt/versions.json", ROOT / "prebuilt/versions.json", comp.parent / "prebuilt/versions.json", comp.parent.parent / "prebuilt/versions.json"):
+        if cand.is_file():
+            try:
+                prebuilt_versions = json.loads(cand.read_text())
+                break
+            except Exception:
+                pass
+
+    if "C · GCC" in languages:
+        if shutil.which("gcc"):
+            versions["C · GCC"] = command_output(["gcc", "--version"]).splitlines()[0]
+        else:
+            versions["C · GCC"] = prebuilt_versions.get("C · GCC", "prebuilt release binary")
+    if "C · Clang" in languages:
+        if shutil.which("clang"):
+            versions["C · Clang"] = command_output(["clang", "--version"]).splitlines()[0]
+        else:
+            versions["C · Clang"] = prebuilt_versions.get("C · Clang", "prebuilt release binary")
+    if "Go" in languages:
+        if shutil.which("go"):
+            versions["Go"] = command_output(["go", "version"])
+        else:
+            versions["Go"] = prebuilt_versions.get("Go", "prebuilt release binary")
+    if "Rust" in languages:
+        if shutil.which("rustc"):
+            versions["Rust"] = command_output(["rustc", "--version"])
+        else:
+            versions["Rust"] = prebuilt_versions.get("Rust", "prebuilt release binary")
     suite = {
         "id": "native", "schema_version": 1, "status": "running",
-        "total_workloads": len(WORKLOADS), "languages": LANGUAGES,
+        "total_workloads": len(WORKLOADS), "languages": languages,
         "measured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "profile": "smoke / not for publication" if args.quick else "hard",
         "samples": args.samples, "warmup": args.warmup, "random_seed": 20261105,
         "system": {"cpu": model, "pinned_cpu": cpu, "os": platform.platform()},
-        "versions": {
-            "Neutron": command_output([str(compiler), "--version"]),
-            "C · GCC": command_output(["gcc", "--version"]).splitlines()[0],
-            "C · Clang": command_output(["clang", "--version"]).splitlines()[0],
-            "Go": command_output(["go", "version"]), "Rust": command_output(["rustc", "--version"]),
-        },
+        "versions": versions,
         "source_sha256": {
             path.name: hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(NATIVE_SOURCES.glob("kernels.*"))
@@ -813,14 +909,14 @@ def measure_native(compiler, args, output, cpu):
         for workload, title, category, description, hard_size, smoke_size in WORKLOADS:
             print(f"Validating {title} against independent oracle...", flush=True)
             smoke_expected = reference_result(workload, smoke_size)
-            for language in LANGUAGES:
+            for language in languages:
                 _, actual = run_binary(binaries[language], workload, smoke_size, environment, args.timeout)
                 check_result(actual, smoke_expected, workload)
             size = smoke_size if args.quick else hard_size
             expected = smoke_expected if args.quick else reference_result(workload, size)
-            samples = {language: [] for language in LANGUAGES}
+            samples = {language: [] for language in languages}
             for round_number in range(args.warmup + args.samples):
-                order = LANGUAGES.copy()
+                order = languages.copy()
                 generator.shuffle(order)
                 for language in order:
                     elapsed, actual = run_binary(binaries[language], workload, size, environment, args.timeout)
@@ -867,6 +963,7 @@ def main():
     parser.add_argument("--output", type=Path, help="raw report directory")
     parser.add_argument("--pdf", type=Path, help="PDF scorecard path")
     parser.add_argument("--no-pdf", action="store_true", help="measure without the optional PDF dependency")
+    parser.add_argument("--allow-missing", action="store_true", help="benchmark available toolchains without aborting on missing ones")
     parser.add_argument("--svg", type=Path, help="native-kernel SVG path")
     parser.add_argument("--render-only", type=Path, help="render an existing combined JSON report")
     args = parser.parse_args()
@@ -901,14 +998,24 @@ def main():
     if not args.no_pdf:
         if importlib.util.find_spec("reportlab") is None:
             parser.error("install PDF dependencies: python3 -m pip install -r benchmarks/requirements.txt")
+    exe = ".exe" if sys.platform == "win32" else ""
+    compiler = args.compiler.resolve() if args.compiler else ROOT / f"target/debug/ntsc{exe}"
+    if not args.compiler:
+        subprocess.run(["cargo", "build", "-p", "ntsc-cli"], cwd=ROOT, check=True)
+    if not compiler.is_file():
+        parser.error(f"compiler not found: {compiler}")
     tools = {"rustc"}
     if "native" in suites:
         tools.update(("gcc", "clang", "go"))
     if "concurrency" in suites:
         tools.add("go")
-    for tool in sorted(tools):
-        if not shutil.which(tool):
-            parser.error(f"required compiler not found: {tool}")
+    if not args.allow_missing:
+        for tool in sorted(tools):
+            if not shutil.which(tool):
+                lang_name = {"gcc": "C · GCC", "clang": "C · Clang", "go": "Go", "rustc": "Rust"}.get(tool)
+                if lang_name and find_prebuilt_binary(compiler, lang_name):
+                    continue
+                parser.error(f"required compiler not found: {tool}")
     allowed = sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else list(range(os.cpu_count() or 1))
     first = allowed[0] if args.cpu is None else args.cpu
     if first not in allowed:
@@ -918,16 +1025,21 @@ def main():
     if args.workers > len(cpus):
         parser.error("workers exceeds the available CPU affinity")
     cpus = cpus[:args.workers]
-    compiler = args.compiler.resolve() if args.compiler else ROOT / "target/debug/ntsc"
-    if not args.compiler:
-        subprocess.run(["cargo", "build", "-p", "ntsc-cli"], cwd=ROOT, check=True)
-    if not compiler.is_file():
-        parser.error(f"compiler not found: {compiler}")
     environment = {key: value for key, value in os.environ.items() if not key.startswith("NTS_BENCH_")}
     environment.update(GOCACHE=str(BUILD / "go-cache"), GO111MODULE="off")
     cpu_info = Path("/proc/cpuinfo").read_text() if Path("/proc/cpuinfo").is_file() else ""
     model = next((line.split(":", 1)[1].strip() for line in cpu_info.splitlines()
                   if line.startswith("model name")), platform.processor() or "Unknown CPU")
+    tool_map = {"C · GCC": "gcc", "C · Clang": "clang", "Go": "go", "Rust": "rustc"}
+    def has_tool_or_prebuilt(lang, tool):
+        if not args.allow_missing:
+            return True
+        if shutil.which(tool):
+            return True
+        return find_prebuilt_binary(compiler, lang) is not None
+
+    native_languages = ["Neutron"] + [lang for lang, tool in tool_map.items() if has_tool_or_prebuilt(lang, tool)]
+    rust_version = command_output(["rustc", "--version"]) if shutil.which("rustc") else "not installed"
     report = {
         "schema_version": 1, "status": "running", "selected_suites": suites,
         "measured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -938,7 +1050,7 @@ def main():
         "random_seed": 20261118,
         "system": {"cpu": model, "cpus": cpus, "os": platform.platform()},
         "versions": {"Neutron": command_output([str(compiler), "--version"]),
-                     "Rust": command_output(["rustc", "--version"])},
+                     "Rust": rust_version},
         "methodology": [
             "Release builds; sequential randomized interleaved samples; median end-to-end wall time.",
             "Zero exit status and independent full checksum validation on every run, including warmups.",
@@ -948,13 +1060,13 @@ def main():
         ],
         "suites": [],
     }
-    if "go" in tools:
+    if "go" in tools and shutil.which("go"):
         report["versions"]["Go"] = command_output(["go", "version"])
     write_json(report, output)
     for identifier in suites:
         suite_output = output / identifier
         if identifier == "native":
-            suite = measure_native(compiler, args, suite_output, first)
+            suite = measure_native(compiler, args, suite_output, first, languages=native_languages)
         else:
             suite = measure_fixtures(identifier, compiler, args, environment,
                                      cpus if identifier == "concurrency" else [first], suite_output)

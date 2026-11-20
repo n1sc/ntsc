@@ -14,6 +14,22 @@ BENCH_FLAGS="--quick --samples 3" arq benchmark
 arq test_benchmarks
 ```
 
+### Windows Fast-Track (Zero MSVC / LLVM Build Dependencies)
+
+On Windows, compiling the compiler CLI from source requires ~15–20 GB of Visual Studio Build Tools and LLVM development archives. To run the benchmark in minutes without downloading large dependencies:
+
+1. Download and extract the precompiled Windows bundle `ntsc-windows-x86_64.zip` (available from GitHub Releases or workflow artifacts) into a `bin/` folder. The bundle contains `ntsc.exe`, runtime libraries, MinGW CRT objects, and precompiled comparison binaries.
+2. Set up the Python PDF dependencies:
+   ```powershell
+   python -m venv .venv
+   .venv\Scripts\pip install -r benchmarks/requirements.txt
+   ```
+3. Run the benchmark:
+   ```powershell
+   .venv\Scripts\python -B benchmarks/run.py --compiler bin/ntsc.exe --suite native --allow-missing --samples 3
+   ```
+This generates `benchmarks/neutron-benchmarks.pdf` comparing Neutron against available compilers. The benchmark runner automatically utilizes the precompiled kernels (`clang.exe`, `gcc.exe`, `go.exe`, `rust.exe`) bundled with the release when local toolchains are not installed on PATH.
+
 Output: `benchmarks/neutron-benchmarks.pdf`. Raw samples, checksums, source hashes,
 compiler details, and separate concurrency RSS/thread diagnostics:
 `target/benchmarks/latest/results.json`. Smoke output stays in

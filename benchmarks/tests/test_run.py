@@ -108,8 +108,22 @@ class CombinedRunnerTests(unittest.TestCase):
             [sys.executable, "-B", str(run.ROOT / "benchmarks/run.py"), "--help"],
             text=True, capture_output=True, check=True,
         )
-        for option in ["--suite", "--iterations", "--render-only", "--pdf"]:
+        for option in ["--suite", "--iterations", "--render-only", "--pdf", "--allow-missing"]:
             self.assertIn(option, result.stdout)
+
+    def test_find_prebuilt_binary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temp_dir = Path(temporary)
+            compiler = temp_dir / "bin/ntsc.exe"
+            compiler.parent.mkdir(parents=True)
+            compiler.touch()
+            prebuilt_dir = temp_dir / "bin/prebuilt"
+            prebuilt_dir.mkdir()
+            exe = ".exe" if sys.platform == "win32" else ""
+            rust_bin = prebuilt_dir / f"rust{exe}"
+            rust_bin.touch()
+            self.assertEqual(run.find_prebuilt_binary(compiler, "Rust"), rust_bin)
+            self.assertIsNone(run.find_prebuilt_binary(compiler, "Go"))
 
 
 class ScorecardTests(unittest.TestCase):
