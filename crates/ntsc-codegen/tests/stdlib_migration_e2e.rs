@@ -82,6 +82,105 @@ fn workspace_root() -> std::path::PathBuf {
     manifest.parent().unwrap().parent().unwrap().to_path_buf()
 }
 
+#[test]
+fn arrays_remove_absent_and_clear_return_independent_owned_handles() {
+    let source = r#"use arrays
+fun main() {
+    var texts = ["keep", "alive"];
+    var unchanged = arrays.remove(texts, "absent");
+    say(texts[0] + unchanged[1]);
+    texts = arrays.remove(texts, "absent");
+    say(texts[0]);
+    texts = arrays.remove(texts, "keep");
+    say(texts[0]);
+    arrays.clear(texts);
+    say("" + arrays.length(texts));
+    arrays.push(texts, "again");
+    texts = arrays.clear(texts);
+    arrays.push(texts, "usable");
+    say(texts[0]);
+    var nested = [[1, 2], [3, 4]];
+    var other = [9, 10];
+    var clone = arrays.remove(nested, other);
+    say("" + (nested[0][0] + clone[1][1]));
+    arrays.clear(nested);
+    say("" + arrays.length(nested));
+}
+"#;
+    ntsc_typeck::check_program(&ntsc_parser::parse(&ntsc_lexer::tokenize(source)).unwrap())
+        .expect("array return types should check");
+    let (ok, out, err) = compile_run(&workspace_root(), "array_owned_returns", source);
+    assert!(ok, "{err}");
+    assert_eq!(out.trim(), "keepalive\nkeep\nalive\n0\nusable\n5\n0");
+    assert!(err.is_empty(), "{err}");
+}
+
+#[test]
+fn array_getters_and_random_shuffle_own_their_results() {
+    let source = r#"use arrays as a
+use random
+fun main() {
+    var nested = [["nested", "value"]];
+    var first = a.get(nested, 0);
+    var second = a.at(nested, 0);
+    var shuffled = random.shuffle(nested);
+    a.clear(nested);
+    say(first[0] + second[1] + shuffled[0][0]);
+    var from_temporary = a.get(a.fill(["temporary"], 1), 0);
+    say(from_temporary[0]);
+    var string text = a.get(["text"], 0);
+    say(text);
+    var floats = [1.5, 2.5];
+    var last = a.pop(floats);
+    say("" + (last + 1.0));
+    var flags = [true, false];
+    var flag = a.pop(flags);
+    if (!flag) { say("false"); }
+}
+"#;
+    ntsc_typeck::check_program(&ntsc_parser::parse(&ntsc_lexer::tokenize(source)).unwrap())
+        .expect("array getter contracts should check");
+    let (ok, out, err) = compile_run(&workspace_root(), "array_borrowed_getters", source);
+    assert!(ok, "{err}");
+    assert_eq!(out.trim(), "nestedvaluenested\ntemporary\ntext\n3.5\nfalse");
+    assert!(err.is_empty(), "{err}");
+}
+
+#[test]
+fn native_return_types_and_shadowed_aliases_lower_safely() {
+    let source = r#"use fmt
+use strings as s
+use json
+class Local {
+    fun split() -> int { return 7; }
+}
+fun main() {
+    var string hex = fmt.to_hex(255);
+    var string oct = fmt.to_oct(8);
+    say(hex + "," + oct);
+    var string parsed = json.parse("{\"key\":1}");
+    say(json.get(parsed, "key"));
+    say(json.keys(parsed));
+    var int code = s.char_code("a", 0);
+    var int last = s.last_index_of("aba", "a");
+    say("" + (code + last));
+    shared string shared_text = "borrowed";
+    say(s.upper(shared_text));
+    {
+        var Local s = Local();
+        say(s.split());
+    }
+    say(s.split("a-b", "-"));
+}
+"#;
+    ntsc_typeck::check_program(&ntsc_parser::parse(&ntsc_lexer::tokenize(source)).unwrap())
+        .expect("native contracts should check");
+    let (ok, out, err) = compile_run(&workspace_root(), "native_contracts", source);
+    assert!(ok, "{err}");
+    assert_eq!(out.trim(), "ff,10\n1\nkey\n99\nBORROWED\n7\na\nb");
+    assert!(err.is_empty(), "{err}");
+}
+
 /// `arrays.push` mutates in place and returns void; no reassignment is needed
 /// and the array is never moved.
 #[test]

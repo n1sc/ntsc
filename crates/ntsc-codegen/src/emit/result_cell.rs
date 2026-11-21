@@ -456,13 +456,24 @@ pub(crate) fn emit_result_combinator<'ctx>(
 
         // Argument preparation emits copies/moves into the current block, so
         // it must happen before the tag branch terminates it.
+        let effective_ok = if prop_name == "unwrap_or" && matches!(ok.as_ref(), Ty::Any) {
+            let inferred = arg_values[0].ntsc_type.clone();
+            if matches!(inferred, Ty::Any) {
+                ok.as_ref().clone()
+            } else {
+                inferred
+            }
+        } else {
+            ok.as_ref().clone()
+        };
+
         let default = if prop_name == "unwrap_or" {
-            let param_tys = [ok.as_ref().clone()];
+            let param_tys = [effective_ok.clone()];
             // The default becomes an owned value (moved or copied per its
             // source) that exactly one branch consumes; the Ok branch drops
             // it unused.
             let prepared = prepare_call_args(fn_ctx, arguments, arg_values, &param_tys)?;
-            Some(coerce_value(fn_ctx, prepared[0].clone(), ok)?)
+            Some(coerce_value(fn_ctx, prepared[0].clone(), &effective_ok)?)
         } else {
             None
         };
@@ -491,6 +502,7 @@ pub(crate) fn emit_result_combinator<'ctx>(
                 };
                 fn_ctx.builder.position_at_end(ok_bb);
                 let payload = take_result_payload(fn_ctx, cell, true, ok, fresh_source)?;
+                let payload = coerce_value(fn_ctx, payload, &effective_ok)?;
                 emit_drop_value(fn_ctx, &default)?;
                 // The payload work may split this branch into several
                 // blocks; record the actual predecessor for the PHI.
@@ -507,9 +519,9 @@ pub(crate) fn emit_result_combinator<'ctx>(
                 fn_ctx.builder.position_at_end(done_bb);
                 let phi = fn_ctx
                     .builder
-                    .build_phi(ty_to_llvm(ok, fn_ctx.context), "unwrap_or")?;
+                    .build_phi(ty_to_llvm(&effective_ok, fn_ctx.context), "unwrap_or")?;
                 phi.add_incoming(&[(&payload.value, ok_pred), (&default.value, err_pred)]);
-                return Ok(Some(TypedValue::new(phi.as_basic_value(), (**ok).clone())));
+                return Ok(Some(TypedValue::new(phi.as_basic_value(), effective_ok)));
             }
 
             "map" => {

@@ -3,8 +3,7 @@
 use super::*;
 
 /// Emit a call to an `arrays.*` operation backed by the RC dynamic-array
-/// functions. Every operation routes here so heap arrays work uniformly;
-/// the legacy `ntsc_arrays_*` functions use a newline-delimited string ABI.
+/// functions. Routing here preserves element types across array operations.
 pub(crate) fn emit_rc_array_op<'ctx>(
     fn_ctx: &mut FunctionContext<'ctx, '_>,
     prop_name: &str,
@@ -166,7 +165,12 @@ pub(crate) fn emit_rc_array_op<'ctx>(
                 crate::CodegenError::LLVMError("arrays.at requires an index argument".into())
             })?;
             let tv = emit_array_element(fn_ctx, handle, index.value.into_int_value(), &elem_ty)?;
-            Ok(tv)
+            // The result must survive cleanup of a temporary input array.
+            if ty_is_owned_handle(&tv.ntsc_type) {
+                copy_owned_value(fn_ctx, &tv)
+            } else {
+                Ok(tv)
+            }
         }
         "pop" => {
             let pop_fn = fn_ctx
@@ -185,7 +189,8 @@ pub(crate) fn emit_rc_array_op<'ctx>(
             } else {
                 elem_ty.clone()
             };
-            Ok(TypedValue::new(val, pop_ty))
+            let decoded = decode_array_scalar(fn_ctx, val, &pop_ty)?;
+            Ok(TypedValue::new(decoded, pop_ty))
         }
         "contains" => {
             let search = arg_values.get(1).ok_or_else(|| {
@@ -256,14 +261,28 @@ pub(crate) fn emit_rc_array_op<'ctx>(
                 "arr_remove",
             )?;
             let new_val = call_result_to_value(fn_ctx, &result);
+            emit_copy_in_owned_elements(fn_ctx, new_val.into_int_value(), &elem_ty)?;
+            let do_pred = fn_ctx.builder.get_insert_block().ok_or_else(|| {
+                crate::CodegenError::LLVMError("missing array removal block".into())
+            })?;
             fn_ctx.builder.build_unconditional_branch(merge_bb)?;
             fn_ctx.builder.position_at_end(skip_bb);
+            let clone = emit_unary_array_op_with_fixup(
+                fn_ctx,
+                "ntsc_array_clone",
+                handle,
+                array_result_ty.clone(),
+                &elem_ty,
+            )?;
+            let skip_pred = fn_ctx.builder.get_insert_block().ok_or_else(|| {
+                crate::CodegenError::LLVMError("missing array clone block".into())
+            })?;
             fn_ctx.builder.build_unconditional_branch(merge_bb)?;
             fn_ctx.builder.position_at_end(merge_bb);
             let phi = fn_ctx.builder.build_phi(i64_ty, "remove_handle")?;
             phi.add_incoming(&[
-                (&new_val, do_bb),
-                (&array_arg.value.into_int_value(), skip_bb),
+                (&new_val, do_pred),
+                (&clone.value.into_int_value(), skip_pred),
             ]);
             Ok(TypedValue::new(phi.as_basic_value(), array_result_ty))
         }
@@ -300,11 +319,10 @@ pub(crate) fn emit_rc_array_op<'ctx>(
             array_result_ty,
             &elem_ty,
         ),
-        // `clear` empties the array in place and returns its handle;
-        // typing the result as a fresh array (like the functional ops
-        // below) would make statement-level cleanup free the caller's own
-        // array out from under it. Like `push`, this is `Void`.
+        // Clear in place, then return an independently owned empty array:
+        // both statement calls and legacy reassignment calls stay safe.
         "clear" => {
+            super::drop::emit_drop_array_elements(fn_ctx, handle, &elem_ty)?;
             let clear_fn = fn_ctx
                 .module
                 .get_function("ntsc_array_clear")
@@ -314,10 +332,13 @@ pub(crate) fn emit_rc_array_op<'ctx>(
             fn_ctx
                 .builder
                 .build_call(clear_fn, &[array_arg.value.into()], "arr_clear")?;
-            Ok(TypedValue::new(
-                fn_ctx.context.i64_type().const_zero().into(),
-                Ty::Void,
-            ))
+            emit_unary_array_op_with_fixup(
+                fn_ctx,
+                "ntsc_array_clone",
+                handle,
+                array_result_ty,
+                &elem_ty,
+            )
         }
         "shuffle" => emit_unary_array_op_with_fixup(
             fn_ctx,
@@ -866,7 +887,7 @@ pub(crate) fn emit_random_op<'ctx>(
 
     match prop_name {
         "shuffle" => {
-            let array_ty = Ty::Array(Box::new(elem_ty));
+            let array_ty = Ty::Array(Box::new(elem_ty.clone()));
             let fn_val = fn_ctx
                 .module
                 .get_function("ntsc_random_shuffle")
@@ -879,6 +900,7 @@ pub(crate) fn emit_random_op<'ctx>(
                 "rand_shuffle",
             )?;
             let val = call_result_to_value(fn_ctx, &result);
+            emit_copy_in_owned_elements(fn_ctx, val.into_int_value(), &elem_ty)?;
             Ok(TypedValue::new(val, array_ty))
         }
         "weighted" => {
@@ -1058,7 +1080,7 @@ fn emit_unary_array_op_with_fixup<'ctx>(
     result_ty: Ty,
     elem_ty: &Ty,
 ) -> Result<TypedValue<'ctx>, crate::CodegenError> {
-    let result = emit_unary_array_op(fn_ctx, runtime_fn, handle, result_ty.clone())?;
+    let result = emit_unary_array_op(fn_ctx, runtime_fn, handle, result_ty)?;
     emit_copy_in_owned_elements(fn_ctx, result.value.into_int_value(), elem_ty)?;
     Ok(result)
 }

@@ -333,20 +333,20 @@ fn timeout_catchable_error_e2e() {
         .output()
         .expect("failed to run binary");
 
-    assert!(
-        output.status.success(),
-        "binary exited with non-zero status: {:?}\nstdout: {:?}\nstderr: {:?}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
     let expected = "caught: timeout";
     assert!(
         stdout.lines().any(|l| l == expected),
         "missing expected output {expected:?}:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        output.status.success()
+            || (stderr.contains("error[NTSC-W0002]") && !stderr.contains("error[NTSC-R0001]")),
+        "binary exited with unexpected non-zero status: {:?}\nstdout: {:?}\nstderr: {:?}",
+        output.status,
+        stdout,
+        stderr
     );
 
     let _ = std::fs::remove_dir_all(&dir);

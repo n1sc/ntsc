@@ -28,7 +28,11 @@ pub(crate) fn emit_say_call<'ctx>(
     }
     // A converted scalar (`say(some_bool)`) produced a fresh string that
     // nothing else owns.
-    if arg_val.ntsc_type != Ty::String {
+    let needs_drop = matches!(
+        peel_view(arg_val.clone()).ntsc_type,
+        Ty::Int | Ty::Float | Ty::Bool
+    );
+    if needs_drop {
         emit_drop_value(fn_ctx, &string_val)?;
     }
 

@@ -78,10 +78,10 @@ array[T]` argument is borrowed for the operation.
 | `arrays.pop(a)` | `T` | Removes and returns the last element. |
 | `arrays.remove_at(a, i)` | `array[T]` | New array without the element at `i`; `a` is unchanged, so assign the result (`a = arrays.remove_at(a, i)`). |
 | `arrays.remove(a, v)` | `array[T]` | New array without the first element equal to `v`; `a` is unchanged, so assign the result. |
-| `arrays.clear(a)` | `void` | Removes all elements. |
+| `arrays.clear(a)` | `array[T]` | Removes all elements in place and returns an independently owned empty array; the result may be discarded or reassigned. |
 | `arrays.reverse(a)` | `array[T]` | New array with elements reversed; `a` is unchanged, so assign the result. |
-| `arrays.sort(a, dir)` | `array[T]` | New array sorted in direction `dir`; `a` is unchanged, so assign the result. |
-| `arrays.shuffle(a)` | `void` | Randomizes in place. |
+| `arrays.sort(a)` / `arrays.sort(a, mode)` | `array[T]` | New array sorted in ascending order; `a` is unchanged, so assign the result. The optional legacy integer mode is accepted, but the element type determines the comparison. |
+| `arrays.shuffle(a)` | `array[T]` | New array in randomized order; `a` is unchanged, so assign the result. |
 | `arrays.contains(a, v)` | `bool` | Whether `v` is present. |
 | `arrays.index_of(a, v)` | `int` | First index of `v`, or `-1`. |
 | `arrays.slice(a, start, end)` | `array[T]` | New array of elements `start..end`. |

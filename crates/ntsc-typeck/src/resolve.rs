@@ -1519,6 +1519,7 @@ impl TypeChecker {
             Stmt::Use {
                 library,
                 is_file_path: false,
+                is_rust,
                 alias,
                 imported_symbols,
                 ..
@@ -1530,7 +1531,19 @@ impl TypeChecker {
                     .as_ref()
                     .map_or_else(|| library.lexeme(), |a| a.lexeme());
                 if self.symbols.lookup(name).is_none() {
-                    self.symbols.define(name, Ty::Object).ok();
+                    let result = if !is_rust && is_stdlib_module(library.lexeme()) {
+                        self.symbols.define_stdlib_module(name, library.lexeme())
+                    } else {
+                        self.symbols.define(name, Ty::Object)
+                    };
+                    if let Err(message) = result {
+                        self.errors.push(TypeError {
+                            code: None,
+                            help: None,
+                            message,
+                            span: library.span,
+                        });
+                    }
                 }
             }
             // `use "file.nt" as arm` binds `arm` as an object-like namespace
@@ -3762,6 +3775,95 @@ impl TypeChecker {
         }
     }
 
+    fn check_stdlib_module_call(
+        &mut self,
+        module: &str,
+        property: &Token,
+        arguments: &[Expr],
+        span: Span,
+    ) -> Option<Ty> {
+        let method = property.lexeme();
+        let argument_types: Vec<_> = arguments
+            .iter()
+            .map(|argument| self.check_expression(argument))
+            .collect();
+        let signature = if module == "arrays" {
+            array_signature(method, &argument_types)
+        } else {
+            crate::stdlib::signature(module, method).map(|signature| {
+                (
+                    signature.parameters.iter().map(|ty| ty.ty()).collect(),
+                    signature.return_type.ty(),
+                )
+            })
+        };
+        let Some((parameters, return_type)) = signature else {
+            if module == "arrays" || crate::stdlib::has_signatures(module) {
+                self.errors.push(TypeError {
+                    code: None,
+                    help: None,
+                    message: format!("unknown stdlib function `{module}.{method}`"),
+                    span,
+                });
+            }
+            return Some(Ty::Any);
+        };
+        let has_spread = arguments
+            .iter()
+            .any(|argument| matches!(argument, Expr::Spread { .. }));
+        // Legacy sort calls may supply a mode; codegen derives the safe mode
+        // from the array's element type instead of trusting that value.
+        let optional_sort_mode = module == "arrays" && method == "sort";
+        let arity_matches =
+            arguments.len() == parameters.len() || (optional_sort_mode && arguments.len() == 2);
+        if !arity_matches && !has_spread {
+            let expected = if optional_sort_mode {
+                "1 or 2 arguments".to_string()
+            } else {
+                format!(
+                    "{} argument{}",
+                    parameters.len(),
+                    if parameters.len() == 1 { "" } else { "s" }
+                )
+            };
+            self.errors.push(TypeError {
+                code: None,
+                help: None,
+                message: format!(
+                    "`{module}.{method}` expects {expected}, got {}",
+                    arguments.len()
+                ),
+                span,
+            });
+        }
+        for (index, (argument, actual)) in arguments.iter().zip(&argument_types).enumerate() {
+            if matches!(argument, Expr::Spread { .. }) {
+                continue;
+            }
+            let parameter = parameters
+                .get(index)
+                .or_else(|| (optional_sort_mode && index == 1).then_some(&Ty::Int));
+            if let (Some(parameter), Some(actual)) = (parameter, actual) {
+                let actual = if module != "arrays" || (index == 0 && method != "fill") {
+                    borrowed_stdlib_type(actual)
+                } else {
+                    stdlib_view_type(actual)
+                };
+                if !self.assignable(parameter, actual) {
+                    self.errors.push(TypeError {
+                        code: None,
+                        help: None,
+                        message: format!(
+                            "argument type mismatch: expected `{parameter}`, got `{actual}`"
+                        ),
+                        span: argument.span(),
+                    });
+                }
+            }
+        }
+        Some(return_type)
+    }
+
     fn check_call(&mut self, callee: &Expr, arguments: &[Expr]) -> Option<Ty> {
         if let Some(value_ty) = self.check_enum_construction(callee, arguments) {
             return Some(value_ty);
@@ -4093,6 +4195,19 @@ impl TypeChecker {
             }
         }
 
+        // Stdlib module calls: `strings.split(...)`, `arrays.push(...)`, etc.
+        if let Expr::Member { object, property } = callee
+            && let Expr::Variable { name } = object.as_ref()
+        {
+            let module_name = self
+                .symbols
+                .lookup_stdlib_module(name.lexeme())
+                .map(str::to_string);
+            if let Some(module) = module_name {
+                return self.check_stdlib_module_call(&module, property, arguments, callee.span());
+            }
+        }
+
         let callee_ty = self.check_expression(callee);
         match callee_ty {
             Some(Ty::Function {
@@ -4331,6 +4446,87 @@ fn is_logical(kind: &TokenKind) -> bool {
         kind,
         TokenKind::And | TokenKind::Or | TokenKind::AndSym | TokenKind::OrSym
     )
+}
+
+fn borrowed_stdlib_type(ty: &Ty) -> &Ty {
+    match ty {
+        Ty::View(inner, _) | Ty::Shared(inner) => borrowed_stdlib_type(inner),
+        _ => ty,
+    }
+}
+
+fn stdlib_view_type(ty: &Ty) -> &Ty {
+    match ty {
+        Ty::View(inner, _) => stdlib_view_type(inner),
+        _ => ty,
+    }
+}
+
+fn array_signature(method: &str, arguments: &[Option<Ty>]) -> Option<(Vec<Ty>, Ty)> {
+    let element = match arguments
+        .first()
+        .and_then(Option::as_ref)
+        .map(borrowed_stdlib_type)
+    {
+        Some(Ty::Array(element)) => element.as_ref().clone(),
+        _ => Ty::Any,
+    };
+    let array = Ty::Array(Box::new(element.clone()));
+    let signature = match method {
+        "new" => (vec![], Ty::Array(Box::new(Ty::Any))),
+        "range" => (vec![Ty::Int, Ty::Int], Ty::Array(Box::new(Ty::Int))),
+        "fill" => {
+            let value = arguments
+                .first()
+                .and_then(Option::as_ref)
+                .map(stdlib_view_type)
+                .cloned()
+                .unwrap_or(Ty::Any);
+            (vec![value.clone(), Ty::Int], Ty::Array(Box::new(value)))
+        }
+        "length" => (vec![array], Ty::Int),
+        "isEmpty" | "is_empty" => (vec![array], Ty::Bool),
+        "contains" => (vec![array, element], Ty::Bool),
+        "index_of" => (vec![array, element], Ty::Int),
+        "at" | "get" => (
+            vec![array, Ty::Int],
+            if element == Ty::Any {
+                Ty::String
+            } else {
+                element
+            },
+        ),
+        "pop" => (
+            vec![array],
+            if element == Ty::Any {
+                Ty::String
+            } else {
+                element
+            },
+        ),
+        "push" => (vec![array, element], Ty::Void),
+        "remove" => (vec![array.clone(), element], array),
+        "remove_at" => (vec![array.clone(), Ty::Int], array),
+        "slice" => (vec![array.clone(), Ty::Int, Ty::Int], array),
+        "reverse" | "sort" | "clone" | "flat" | "shuffle" | "clear" => (vec![array.clone()], array),
+        "join" => (vec![array, Ty::String], Ty::String),
+        "every" | "some" => (
+            vec![
+                array,
+                Ty::Function {
+                    params: vec![element],
+                    return_type: Box::new(Ty::Bool),
+                },
+            ],
+            Ty::Bool,
+        ),
+        _ => return None,
+    };
+    Some(signature)
+}
+
+fn is_stdlib_module(name: &str) -> bool {
+    crate::names::BUILTIN_MODULES.contains(&name)
 }
 
 fn op_lexeme(kind: &TokenKind) -> &'static str {

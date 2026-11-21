@@ -99,16 +99,19 @@ fun main() -> int {
         source,
         inkwell::OptimizationLevel::None,
     );
-    assert!(ok, "binary must exit 0");
+    assert!(
+        !ok,
+        "debug build must fail on leaked allocations, stderr was: {stderr:?}"
+    );
     assert_eq!(stdout.trim(), "aliased 2");
     assert!(
-        stderr.contains("warning[NTSC-W0002]: memory leak detected:"),
-        "debug build must warn about leaked allocations, stderr was: {stderr:?}"
+        stderr.contains("error[NTSC-W0002]: memory leak detected:"),
+        "debug build must error on leaked allocations, stderr was: {stderr:?}"
     );
     assert!(
         stderr.contains("--> <source>:6:22")
             && stderr.contains("array handle")
-            && stderr.contains("was allocated here"),
+            && stderr.contains("allocated here"),
         "leak warning must identify the surviving registry object, stderr was: {stderr:?}"
     );
 }

@@ -36,12 +36,12 @@ pub static MODULES: &[StdModule] = &[
             ("at", "arrays.at(a, i) -> T"),
             ("push", "arrays.push(a, v)"),
             ("pop", "arrays.pop(a) -> T"),
-            ("remove_at", "arrays.remove_at(a, i)"),
-            ("remove", "arrays.remove(a, v)"),
-            ("clear", "arrays.clear(a)"),
-            ("reverse", "arrays.reverse(a)"),
-            ("sort", "arrays.sort(a)"),
-            ("shuffle", "arrays.shuffle(a)"),
+            ("remove_at", "arrays.remove_at(a, i) -> array[T]"),
+            ("remove", "arrays.remove(a, v) -> array[T]"),
+            ("clear", "arrays.clear(a) -> array[T]"),
+            ("reverse", "arrays.reverse(a) -> array[T]"),
+            ("sort", "arrays.sort(a, mode?) -> array[T]"),
+            ("shuffle", "arrays.shuffle(a) -> array[T]"),
             ("contains", "arrays.contains(a, v) -> bool"),
             ("index_of", "arrays.index_of(a, v) -> int"),
             ("slice", "arrays.slice(a, start, end) -> array[T]"),
@@ -164,7 +164,7 @@ pub static MODULES: &[StdModule] = &[
         name: "json",
         description: "JSON encoding and decoding.",
         functions: fns!(
-            ("parse", "json.parse(s) -> any"),
+            ("parse", "json.parse(s) -> string"),
             ("stringify", "json.stringify(v) -> string"),
         ),
     },
@@ -212,10 +212,10 @@ pub static MODULES: &[StdModule] = &[
     },
     StdModule {
         name: "sys",
-        description: "System information.",
+        description: "Filesystem and process helpers.",
         functions: fns!(
-            ("arch", "sys.arch() -> string"),
-            ("os", "sys.os() -> string"),
+            ("cwd", "sys.cwd() -> string"),
+            ("env", "sys.env(name) -> string"),
             ("args", "sys.args() -> array[string]"),
         ),
     },
@@ -409,3 +409,41 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ("wait_all", "wait_all(tasks) — wait for all tasks"),
     ("chan", "chan — channel constructor namespace"),
 ];
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn audited_signatures_match_completion_details() {
+        for module in super::MODULES {
+            if !ntsc_typeck::stdlib::has_signatures(module.name) {
+                continue;
+            }
+            for function in module.functions {
+                let signature = ntsc_typeck::stdlib::signature(module.name, function.name)
+                    .expect("completion function needs a native contract");
+                let return_type = match signature.return_type {
+                    ntsc_typeck::stdlib::StdlibType::StringArray => " -> array[string]".to_string(),
+                    ty => format!(" -> {}", ty.ty()),
+                };
+                assert!(
+                    function.detail.ends_with(&return_type),
+                    "{}",
+                    function.detail
+                );
+                let parameters = function
+                    .detail
+                    .split_once('(')
+                    .unwrap()
+                    .1
+                    .split_once(')')
+                    .unwrap()
+                    .0;
+                let count = parameters
+                    .split(',')
+                    .filter(|s| !s.trim().is_empty())
+                    .count();
+                assert_eq!(count, signature.parameters.len(), "{}", function.detail);
+            }
+        }
+    }
+}

@@ -350,8 +350,17 @@ fn expression_class(expr: &Expr, classes: &HashMap<String, String>) -> Option<St
                 }
                 Expr::Variable { name } => function_declared_ret_ty(name.lexeme()),
                 Expr::Member { object, property } => {
-                    let class = expression_class(object, classes)?;
-                    class_method_ret_ty(&class, property.lexeme())
+                    if let Some(class) = expression_class(object, classes) {
+                        class_method_ret_ty(&class, property.lexeme())
+                    } else if let Expr::Variable { name: mod_name } = object.as_ref() {
+                        let namespaced = format!("{}::{}", mod_name.lexeme(), property.lexeme());
+                        if is_class_type(&namespaced) {
+                            return Some(namespaced);
+                        }
+                        function_declared_ret_ty(&namespaced)
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             };
@@ -871,6 +880,7 @@ pub(crate) fn analyze_return_escape_class_drops(
     candidates
         .into_iter()
         .filter(|var| !normal.contains(var) && !copy_aliased.contains(var))
+        .filter(|var| classes.contains_key(var))
         .filter(|var| {
             body.iter().all(|stmt| {
                 stmt_field_drop_safe_ignoring_return(stmt, var, EscapeKind::FieldDrop(&classes))
@@ -1043,6 +1053,26 @@ pub(crate) fn collect_class_drop_candidates(
                                         function_declared_ret_ty(callee_name.lexeme()),
                                         Some(Ty::Class(_))
                                     )
+                        )
+                )
+                || matches!(
+                    initializer,
+                    Some(Expr::Call { callee, .. })
+                        if matches!(
+                            callee.as_ref(),
+                            Expr::Member { object, property }
+                                if matches!(
+                                    object.as_ref(),
+                                    Expr::Variable { name: mod_name }
+                                        if {
+                                            let namespaced = format!("{}::{}", mod_name.lexeme(), property.lexeme());
+                                            module.get_struct_type(&namespaced).is_some()
+                                                || matches!(
+                                                    function_declared_ret_ty(&namespaced),
+                                                    Some(Ty::Class(_))
+                                                )
+                                        }
+                                )
                         )
                 );
             if eligible {

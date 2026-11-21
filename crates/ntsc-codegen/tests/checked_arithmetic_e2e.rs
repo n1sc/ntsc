@@ -146,10 +146,9 @@ fun main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A `float` reaching an `int` slot converts (saturating) instead of being
-/// emitted as a raw double. The type checker types a stdlib call like
-/// `time.now()` loosely enough that this reaches codegen, and passing the
-/// double straight through produced a module that failed to verify.
+/// A `float` reaching an `int` slot in unchecked input converts instead of
+/// producing invalid IR. Static checking rejects narrowing; the lowerer
+/// still needs this defense at untyped boundaries.
 #[test]
 fn a_float_argument_reaching_an_int_parameter_converts() {
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -178,8 +177,31 @@ fun main() {
     let obj_path = dir.join(format!("floatarg.{}", ntsc_codegen::object_extension()));
     let bin_path = dir.join("floatarg_ntsc_test");
 
-    ntsc_codegen::compile_source(source, ntsc_codegen::host_triple(), "floatarg", &dir)
-        .expect("compile_source failed");
+    let program = ntsc_parser::parse(&ntsc_lexer::tokenize(source)).expect("parse failed");
+    let errors = ntsc_typeck::check_program(&program).expect_err("narrowing should be rejected");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("expected `int`, got `float`")),
+        "{errors:?}"
+    );
+    ntsc_codegen::context::init_llvm();
+    let context = inkwell::context::Context::create();
+    let target_machine = ntsc_codegen::context::create_target_machine(
+        ntsc_codegen::host_triple(),
+        inkwell::OptimizationLevel::None,
+    )
+    .expect("create target machine");
+    ntsc_codegen::emit::emit_module(
+        &context,
+        &target_machine,
+        &program,
+        &obj_path,
+        false,
+        true,
+        false,
+    )
+    .expect("unchecked codegen failed");
     ntsc_codegen::link_binary(&obj_path, &runtime_lib, &bin_path).expect("link_binary failed");
     let output = std::process::Command::new(&bin_path)
         .output()

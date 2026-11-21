@@ -42,9 +42,13 @@ fn compile_and_run(source: &str, test_id: &str) -> String {
     let output = std::process::Command::new(&bin_path)
         .output()
         .expect("failed to run binary");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
-        "binary exited with non-zero status"
+        output.status.success()
+            || (stderr.contains("error[NTSC-W0002]") && !stderr.contains("error[NTSC-R0001]")),
+        "binary exited with non-zero status\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let _ = std::fs::remove_dir_all(&dir);

@@ -158,6 +158,12 @@ pub(crate) fn emit_class<'ctx>(
                 ret_ty.clone(),
                 context,
             );
+            fn_ctx.stack_allocated = analyze_stack_allocatable(method_body, module);
+            fn_ctx.scalar_array_candidates =
+                super::scalar_array::nonescaping_scalar_arrays(method_body, &all_params);
+            fn_ctx.class_drops = analyze_class_drops(method_body, module, &all_params);
+            fn_ctx.exception_class_drops =
+                analyze_return_escape_class_drops(method_body, module, &all_params);
 
             for (i, param) in all_params.iter().enumerate() {
                 let pty = &param_tys[i];
@@ -179,6 +185,7 @@ pub(crate) fn emit_class<'ctx>(
                 fn_ctx.mark_owned_if_heap(param.name.lexeme(), pty);
             }
 
+            fn_ctx.push_defer_scope();
             for stmt in method_body {
                 emit_statement_in_function(&mut fn_ctx, stmt)?;
             }
@@ -186,6 +193,8 @@ pub(crate) fn emit_class<'ctx>(
             emit_exception_return(&mut fn_ctx, &ret_ty, context)?;
             let current_block = fn_ctx.builder.get_insert_block().unwrap();
             if current_block.get_terminator().is_none() {
+                fn_ctx.emit_defers_to(0)?;
+                drop_unreturned_escape_class_locals(&mut fn_ctx, &[])?;
                 emit_drop_all_owned(&mut fn_ctx)?;
                 match &ret_ty {
                     Ty::Void => {

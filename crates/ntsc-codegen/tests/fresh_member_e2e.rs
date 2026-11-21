@@ -150,7 +150,7 @@ fun consume(array[string] items) {
 fun main() -> int {
     var items = make_bag().items
     say(items[0])
-    say(arrays.length(make_bag().items))
+    say("" + arrays.length(make_bag().items))
     consume(make_bag().items)
     say(make_bag().items[0])
     return 0
@@ -241,7 +241,7 @@ fun main() -> int {
     view var label = bag.label
     view var items = bag.items
     say(copy(label))
-    say(arrays.length(items))
+    say("" + arrays.length(items))
     inspect(bag)
     say(bag.label)
     say("" + bag.items[0])

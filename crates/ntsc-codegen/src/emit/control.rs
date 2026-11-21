@@ -464,7 +464,10 @@ pub(crate) fn emit_for_in<'ctx>(
     };
     let var_ptr = fn_ctx.alloca(variable.lexeme(), &elem_tv.ntsc_type)?;
     fn_ctx.builder.build_store(var_ptr, elem_tv.value)?;
-    fn_ctx.define_var(variable.lexeme(), var_ptr, elem_tv.ntsc_type);
+    fn_ctx.define_var(variable.lexeme(), var_ptr, elem_tv.ntsc_type.clone());
+    if class_iter.is_some() {
+        fn_ctx.mark_owned_if_heap(variable.lexeme(), &elem_tv.ntsc_type);
+    }
 
     emit_statement_in_function(fn_ctx, body)?;
     if fn_ctx

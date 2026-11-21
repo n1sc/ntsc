@@ -605,7 +605,6 @@ pub(crate) fn live_count() -> i64 {
 }
 
 /// Whether `id` currently has an entry in the registry.
-#[cfg(test)]
 pub(crate) fn is_registered(id: i64) -> bool {
     shard_lock(id).contains_key(&id)
 }
@@ -1222,13 +1221,10 @@ fn array_reverse_inner(id: i64) -> i64 {
     put_array(data)
 }
 
-/// A new empty array with the same element representation as the array
-/// behind `id`.
 /// Empty the array behind `id` in place, reclaiming any owned string
-/// elements, and return the same handle. `arrays.clear` is documented as an
-/// in-place `void` operation like `arrays.push`; returning a fresh array
-/// instead left the caller's array untouched, so `arrays.clear(a)` appeared
-/// to do nothing and everything after it kept the old elements.
+/// elements, and return the same borrowed handle. Codegen reclaims other
+/// owned elements before this call and clones the empty result for callers
+/// that reassign it.
 fn array_clear_inner(id: i64) -> i64 {
     if id == NULL {
         return NULL;

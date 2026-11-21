@@ -748,43 +748,20 @@ pub(super) fn walk_stmts(body: &[Stmt], visit: &mut dyn FnMut(&Stmt)) {
     }
 }
 
-/// Map a stdlib ABI function name to its return type. Most modules' C
-/// functions return a fixed type (all `ntsc_math_*` return `f64`, ...);
-/// everything else defaults to `Any` and stdlib call sites then re-derive
-/// the type from their own static table.
+/// Return types for native stdlib calls. Element-dependent array operations
+/// are emitted separately by the routed module handlers.
 pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
-    if name.starts_with("ntsc_math_") {
-        return Ty::Float;
+    if let Some((module, method)) = name
+        .strip_prefix("ntsc_")
+        .and_then(|name| name.split_once('_'))
+        && let Some(signature) = ntsc_typeck::stdlib::signature(module, method)
+    {
+        return signature.return_type.ty();
     }
     match name {
-        "ntsc_fmt_to_int" | "ntsc_fmt_to_hex" | "ntsc_fmt_to_oct" => Ty::Int,
-        "ntsc_fmt_to_float" => Ty::Float,
-        "ntsc_fmt_i64_to_str"
-        | "ntsc_fmt_f64_to_str"
-        | "ntsc_fmt_type_name"
-        | "ntsc_fmt_pad_left"
-        | "ntsc_fmt_pad_right" => Ty::String,
-        "ntsc_fmt_is_int" | "ntsc_fmt_is_float" => Ty::Bool,
-
         "ntsc_time_now" => Ty::Float,
         "ntsc_time_format" => Ty::String,
         "ntsc_time_sleep" => Ty::Void,
-
-        "ntsc_sys_read" | "ntsc_sys_listdir" | "ntsc_sys_cwd" | "ntsc_sys_env"
-        | "ntsc_sys_walk" | "ntsc_sys_readlink" => Ty::String,
-        "ntsc_sys_args" => Ty::Array(Box::new(Ty::String)),
-        "ntsc_sys_write"
-        | "ntsc_sys_append"
-        | "ntsc_sys_exists"
-        | "ntsc_sys_mkdir"
-        | "ntsc_sys_cp"
-        | "ntsc_sys_cp_all"
-        | "ntsc_sys_rm"
-        | "ntsc_sys_rm_all"
-        | "ntsc_sys_symlink"
-        | "ntsc_sys_is_symlink" => Ty::Bool,
-        "ntsc_sys_exit" | "ntsc_sys_sleep" => Ty::Void,
-        "ntsc_sys_exec" => Ty::Int,
 
         "ntsc_term_native_is_tty" | "ntsc_term_native_poll_key" | "ntsc_term_native_key_ctrl" => {
             Ty::Bool
@@ -793,46 +770,7 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
         "ntsc_term_native_restore" => Ty::Bool,
         "ntsc_term_native_key_code" | "ntsc_term_native_key_character" => Ty::String,
 
-        "ntsc_strings_contains"
-        | "ntsc_strings_starts_with"
-        | "ntsc_strings_ends_with"
-        | "ntsc_strings_is_empty"
-        | "ntsc_strings_is_alpha"
-        | "ntsc_strings_is_digit"
-        | "ntsc_strings_is_alnum" => Ty::Bool,
-        "ntsc_strings_length"
-        | "ntsc_strings_count"
-        | "ntsc_strings_index_of"
-        | "ntsc_strings_last_index_of"
-        | "ntsc_strings_char_code"
-        | "ntsc_json_length" => Ty::Int,
-        "ntsc_strings_split_array" => Ty::Array(Box::new(Ty::String)),
-        "ntsc_strings_split"
-        | "ntsc_strings_join"
-        | "ntsc_strings_join_all"
-        | "ntsc_strings_trim"
-        | "ntsc_strings_trim_left"
-        | "ntsc_strings_trim_right"
-        | "ntsc_strings_upper"
-        | "ntsc_strings_lower"
-        | "ntsc_strings_replace"
-        | "ntsc_strings_replace_first"
-        | "ntsc_strings_substring"
-        | "ntsc_strings_repeat"
-        | "ntsc_strings_reverse"
-        | "ntsc_strings_char_at"
-        | "ntsc_strings_from_char_code" => Ty::String,
-
-        "ntsc_csv_parse"
-        | "ntsc_csv_stringify"
-        | "ntsc_json_parse"
-        | "ntsc_json_stringify"
-        | "ntsc_json_get"
-        | "ntsc_json_at"
-        | "ntsc_json_escape_string"
-        | "ntsc_json_keys"
-        | "ntsc_json_stringify_pretty" => Ty::String,
-        "ntsc_json_is_valid" | "ntsc_json_has" => Ty::Bool,
+        "ntsc_csv_parse" | "ntsc_csv_stringify" => Ty::String,
 
         "ntsc_testing_bench" => Ty::Float,
 
@@ -904,25 +842,6 @@ pub(crate) fn stdlib_return_ty(name: &str) -> Ty {
 
         "ntsc_sort_binary_search" => Ty::Int,
         "ntsc_sort_stable_sort" => Ty::Array(Box::new(Ty::Any)),
-
-        "ntsc_arrays_length" | "ntsc_arrays_index_of" | "ntsc_arrays_range" => Ty::Int,
-        "ntsc_arrays_new"
-        | "ntsc_arrays_join"
-        | "ntsc_arrays_reverse"
-        | "ntsc_arrays_sort"
-        | "ntsc_arrays_remove"
-        | "ntsc_arrays_remove_at"
-        | "ntsc_arrays_slice"
-        | "ntsc_arrays_clone"
-        | "ntsc_arrays_fill"
-        | "ntsc_arrays_flat"
-        | "ntsc_arrays_shuffle" => Ty::String,
-        "ntsc_arrays_push" | "ntsc_arrays_clear" => Ty::Void,
-        "ntsc_arrays_pop"
-        | "ntsc_arrays_at"
-        | "ntsc_arrays_contains"
-        | "ntsc_arrays_every"
-        | "ntsc_arrays_some" => Ty::Bool,
 
         "ntsc_process_exec" | "ntsc_process_pid" | "ntsc_process_spawn_thread" => Ty::Int,
         "ntsc_process_exec_output" | "ntsc_process_spawn" => Ty::String,
@@ -1486,7 +1405,11 @@ pub(crate) fn emit_call<'ctx>(
             // `ntsc_say` borrows the string: when the argument needed a
             // conversion (`say(some_bool)`), the fresh converted string is
             // released after printing.
-            if arg_values[0].ntsc_type != Ty::String {
+            let needs_drop = matches!(
+                super::helper::peel_view(arg_values[0].clone()).ntsc_type,
+                Ty::Int | Ty::Float | Ty::Bool
+            );
+            if needs_drop {
                 emit_drop_value(fn_ctx, &converted)?;
             }
 
@@ -1721,7 +1644,9 @@ pub(crate) fn emit_call<'ctx>(
             return Ok(TypedValue::new(ret_val, ret_ty));
         }
 
-        if let Expr::Variable { name } = object.as_ref() {
+        if let Expr::Variable { name } = object.as_ref()
+            && fn_ctx.lookup_var(name.lexeme()).is_none()
+        {
             let module_name = name.lexeme();
             let stripped_module = module_name.trim_start_matches('@').to_string();
             if let Some(crate_name) =
@@ -1969,7 +1894,8 @@ pub(crate) fn emit_call<'ctx>(
                 }
                 let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
                 for (arg_val, param_ty) in arg_values.iter().zip(param_tys.iter()) {
-                    llvm_args.push(coerce_value_to_llvm(fn_ctx, arg_val.clone(), param_ty)?);
+                    let borrowed = deref_shared(fn_ctx, arg_val.clone())?;
+                    llvm_args.push(coerce_value_to_llvm(fn_ctx, borrowed, param_ty)?);
                 }
                 let result = fn_ctx.builder.build_call(fn_val, &llvm_args, "modcall")?;
                 let mut ret_val = call_result_to_value(fn_ctx, &result);

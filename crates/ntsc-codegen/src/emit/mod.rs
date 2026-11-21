@@ -1448,7 +1448,7 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
                 | Ty::Slice(_)
                 | Ty::Own(_)
                 | Ty::Dyn(_)
-        ) || (matches!(ty, Ty::Class(_)) && self.class_drops.contains(name));
+        ) || (matches!(ty, Ty::Class(class_name) if enum_cell::is_payload_enum(class_name) || self.class_drops.contains(name)));
         if heap_owned {
             self.owned_slots.insert(name.to_string());
         }
@@ -1466,7 +1466,7 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
     /// the caller, so the slot must not release it again.
     fn null_var_slot(&mut self, name: &str) {
         if let Some((ptr, ty)) = self.lookup_var(name)
-            && matches!(
+            && (matches!(
                 ty,
                 Ty::Array(_)
                     | Ty::String
@@ -1475,7 +1475,7 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
                     | Ty::Option(_)
                     | Ty::Dyn(_)
                     | Ty::Result { .. }
-            )
+            ) || matches!(ty, Ty::Class(class_name) if enum_cell::is_payload_enum(class_name)))
         {
             let _ = self
                 .builder

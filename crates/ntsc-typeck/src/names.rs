@@ -17,7 +17,6 @@ pub struct ResolveError {
 }
 
 /// Names of the builtin stdlib modules available via explicit `use`.
-#[allow(dead_code)]
 pub const BUILTIN_MODULES: &[&str] = &[
     "archive",
     "arrays",

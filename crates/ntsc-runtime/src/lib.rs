@@ -111,8 +111,12 @@ pub extern "C" fn ntsc_runtime_shutdown(report: i8) {
         let mut handle = stderr.lock();
         let _ = writeln!(
             handle,
-            "warning[NTSC-W0002]: memory leak detected: {} registry object(s) leaked",
+            "error[NTSC-W0002]: memory leak detected: {} owned object(s) not released",
             leaks
+        );
+        let _ = writeln!(
+            handle,
+            "  = note: debug builds fail hard on leaks to keep memory safety visible"
         );
         for entry in entries {
             let detail = entry
@@ -122,20 +126,28 @@ pub extern "C" fn ntsc_runtime_shutdown(report: i8) {
                 .unwrap_or_default();
             if let Some((line, column)) = entry.site {
                 let _ = writeln!(handle, "  --> <source>:{line}:{column}");
+                let _ = writeln!(handle, "   |");
                 let _ = writeln!(
                     handle,
-                    "   = note: {} handle {}{} was allocated here",
+                    "   = note: leaked {} handle {}{} allocated here",
                     entry.kind, entry.id, detail
                 );
             } else {
+                let _ = writeln!(handle, "   |");
                 let _ = writeln!(
                     handle,
-                    "   = note: leaked {} handle {}{} (runtime allocation)",
+                    "   = note: leaked {} handle {}{} (runtime allocation, no source site recorded)",
                     entry.kind, entry.id, detail
                 );
             }
         }
+        let _ = writeln!(
+            handle,
+            "  = help: drop owned values before exit, or return/store them in an owning location"
+        );
         let _ = handle.flush();
+        drop(handle);
+        std::process::exit(1);
     }
 }
 
@@ -228,7 +240,19 @@ pub extern "C" fn ntsc_string_equals(a: i64, b: i64) -> i8 {
 /// unconditionally.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_string_drop(id: i64) {
-    let _ = registry::take_string(id);
+    if id == NULL {
+        return;
+    }
+    if registry::take_string(id).is_none() && !registry::is_registered(id) {
+        eprintln!("error[NTSC-R0001]: invalid drop of `string` handle {id}");
+        eprintln!("  |");
+        eprintln!("  = note: handle is not live (double free or use-after-free)");
+        eprintln!(
+            "  = help: ensure each owned string is dropped exactly once; after move/copy, drop only the owner"
+        );
+        std::process::abort();
+    }
+    // A live but non-string handle is a no-op by API contract.
 }
 
 /// Upper bound for `ntsc_string_from_words` output, in bytes: keeps word
@@ -497,6 +521,18 @@ pub extern "C" fn ntsc_array_pop(id: i64) -> i64 {
 /// handle is a no-op, so moved-from slots can be dropped unconditionally.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_array_drop(id: i64) {
+    if id == NULL {
+        return;
+    }
+    if !registry::is_registered(id) {
+        eprintln!("error[NTSC-R0001]: invalid drop of `array` handle {id}");
+        eprintln!("  |");
+        eprintln!("  = note: handle is not live (double free or use-after-free)");
+        eprintln!(
+            "  = help: ensure each owned array is dropped exactly once; after move/copy, drop only the owner"
+        );
+        std::process::abort();
+    }
     registry::array_drop(id);
 }
 

@@ -298,106 +298,115 @@ pub(crate) fn emit_drop_value<'ctx>(
     if let Ty::Array(elem_ty) = &val.ntsc_type {
         let handle = val.value.into_int_value();
 
-        // Drop nested arrays, class instances, option/result cells, and
-        // shared boxes stored as elements before freeing the container.
-        // Every insertion path copies option/result cells and retains
-        // shared boxes (the array owns its own copies), so reclaiming them
-        // here is safe. String elements are freed by the runtime itself;
-        // scalars are non-owning.
-        if ty_is_owned_handle(elem_ty)
-            && !matches!(**elem_ty, Ty::String | Ty::Object)
-            && let (Some(len_fn), Some(get_fn)) = (
-                fn_ctx.module.get_function("ntsc_array_len"),
-                fn_ctx.module.get_function("ntsc_array_get"),
-            )
-        {
-            let current_fn = fn_ctx.function;
-            let i_ptr = fn_ctx.alloca("arr_drop_i", &Ty::Int)?;
-            let cond_bb = fn_ctx
-                .context
-                .append_basic_block(current_fn, "arr_drop.cond");
-            let body_bb = fn_ctx
-                .context
-                .append_basic_block(current_fn, "arr_drop.body");
-            let incr_bb = fn_ctx
-                .context
-                .append_basic_block(current_fn, "arr_drop.incr");
-            let done_bb = fn_ctx
-                .context
-                .append_basic_block(current_fn, "arr_drop.done");
-
-            let len = fn_ctx
-                .builder
-                .build_call(len_fn, &[handle.into()], "arr_drop_len")?
-                .try_as_basic_value()
-                .unwrap_basic()
-                .into_int_value();
-            fn_ctx
-                .builder
-                .build_store(i_ptr, fn_ctx.context.i64_type().const_zero())?;
-            fn_ctx.builder.build_unconditional_branch(cond_bb)?;
-
-            fn_ctx.builder.position_at_end(cond_bb);
-            let i = fn_ctx
-                .builder
-                .build_load(fn_ctx.context.i64_type(), i_ptr, "arr_drop_i")?
-                .into_int_value();
-            let cond = fn_ctx.builder.build_int_compare(
-                inkwell::IntPredicate::SLT,
-                i,
-                len,
-                "arr_drop_cond",
-            )?;
-            fn_ctx
-                .builder
-                .build_conditional_branch(cond, body_bb, done_bb)?;
-
-            fn_ctx.builder.position_at_end(body_bb);
-            let elem = fn_ctx
-                .builder
-                .build_call(get_fn, &[handle.into(), i.into()], "arr_drop_elem")?
-                .try_as_basic_value()
-                .unwrap_basic()
-                .into_int_value();
-            let is_null = fn_ctx.builder.build_int_compare(
-                inkwell::IntPredicate::EQ,
-                elem,
-                fn_ctx.context.i64_type().const_zero(),
-                "arr_drop_elem_null",
-            )?;
-            let drop_bb = fn_ctx
-                .context
-                .append_basic_block(current_fn, "arr_drop.elem");
-            let next_bb = fn_ctx
-                .context
-                .append_basic_block(current_fn, "arr_drop.next");
-            fn_ctx
-                .builder
-                .build_conditional_branch(is_null, next_bb, drop_bb)?;
-            fn_ctx.builder.position_at_end(drop_bb);
-            let decoded = decode_array_scalar(fn_ctx, elem.into(), elem_ty)?;
-            emit_drop_value(fn_ctx, &TypedValue::new(decoded, (**elem_ty).clone()))?;
-            fn_ctx.builder.build_unconditional_branch(next_bb)?;
-            fn_ctx.builder.position_at_end(next_bb);
-            fn_ctx.builder.build_unconditional_branch(incr_bb)?;
-
-            fn_ctx.builder.position_at_end(incr_bb);
-            let next = fn_ctx.builder.build_int_add(
-                i,
-                fn_ctx.context.i64_type().const_int(1, false),
-                "arr_drop_next",
-            )?;
-            fn_ctx.builder.build_store(i_ptr, next)?;
-            fn_ctx.builder.build_unconditional_branch(cond_bb)?;
-
-            fn_ctx.builder.position_at_end(done_bb);
-        }
+        emit_drop_array_elements(fn_ctx, handle, elem_ty)?;
 
         if let Some(drop_fn) = fn_ctx.module.get_function("ntsc_array_drop") {
             fn_ctx
                 .builder
                 .build_call(drop_fn, &[handle.into()], "array_drop")?;
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn emit_drop_array_elements<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    handle: inkwell::values::IntValue<'ctx>,
+    elem_ty: &Ty,
+) -> Result<(), crate::CodegenError> {
+    // Drop nested arrays, class instances, option/result cells, and
+    // shared boxes stored as elements before freeing the container.
+    // Every insertion path copies option/result cells and retains
+    // shared boxes (the array owns its own copies), so reclaiming them
+    // here is safe. String elements are freed by the runtime itself;
+    // scalars are non-owning.
+    if ty_is_owned_handle(elem_ty)
+        && !matches!(*elem_ty, Ty::String | Ty::Object)
+        && let (Some(len_fn), Some(get_fn)) = (
+            fn_ctx.module.get_function("ntsc_array_len"),
+            fn_ctx.module.get_function("ntsc_array_get"),
+        )
+    {
+        let current_fn = fn_ctx.function;
+        let i_ptr = fn_ctx.alloca("arr_drop_i", &Ty::Int)?;
+        let cond_bb = fn_ctx
+            .context
+            .append_basic_block(current_fn, "arr_drop.cond");
+        let body_bb = fn_ctx
+            .context
+            .append_basic_block(current_fn, "arr_drop.body");
+        let incr_bb = fn_ctx
+            .context
+            .append_basic_block(current_fn, "arr_drop.incr");
+        let done_bb = fn_ctx
+            .context
+            .append_basic_block(current_fn, "arr_drop.done");
+
+        let len = fn_ctx
+            .builder
+            .build_call(len_fn, &[handle.into()], "arr_drop_len")?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        fn_ctx
+            .builder
+            .build_store(i_ptr, fn_ctx.context.i64_type().const_zero())?;
+        fn_ctx.builder.build_unconditional_branch(cond_bb)?;
+
+        fn_ctx.builder.position_at_end(cond_bb);
+        let i = fn_ctx
+            .builder
+            .build_load(fn_ctx.context.i64_type(), i_ptr, "arr_drop_i")?
+            .into_int_value();
+        let cond = fn_ctx.builder.build_int_compare(
+            inkwell::IntPredicate::SLT,
+            i,
+            len,
+            "arr_drop_cond",
+        )?;
+        fn_ctx
+            .builder
+            .build_conditional_branch(cond, body_bb, done_bb)?;
+
+        fn_ctx.builder.position_at_end(body_bb);
+        let elem = fn_ctx
+            .builder
+            .build_call(get_fn, &[handle.into(), i.into()], "arr_drop_elem")?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let is_null = fn_ctx.builder.build_int_compare(
+            inkwell::IntPredicate::EQ,
+            elem,
+            fn_ctx.context.i64_type().const_zero(),
+            "arr_drop_elem_null",
+        )?;
+        let drop_bb = fn_ctx
+            .context
+            .append_basic_block(current_fn, "arr_drop.elem");
+        let next_bb = fn_ctx
+            .context
+            .append_basic_block(current_fn, "arr_drop.next");
+        fn_ctx
+            .builder
+            .build_conditional_branch(is_null, next_bb, drop_bb)?;
+        fn_ctx.builder.position_at_end(drop_bb);
+        let decoded = decode_array_scalar(fn_ctx, elem.into(), elem_ty)?;
+        emit_drop_value(fn_ctx, &TypedValue::new(decoded, elem_ty.clone()))?;
+        fn_ctx.builder.build_unconditional_branch(next_bb)?;
+        fn_ctx.builder.position_at_end(next_bb);
+        fn_ctx.builder.build_unconditional_branch(incr_bb)?;
+
+        fn_ctx.builder.position_at_end(incr_bb);
+        let next = fn_ctx.builder.build_int_add(
+            i,
+            fn_ctx.context.i64_type().const_int(1, false),
+            "arr_drop_next",
+        )?;
+        fn_ctx.builder.build_store(i_ptr, next)?;
+        fn_ctx.builder.build_unconditional_branch(cond_bb)?;
+
+        fn_ctx.builder.position_at_end(done_bb);
     }
     Ok(())
 }
@@ -764,72 +773,46 @@ pub(crate) fn expr_is_fresh<'ctx>(
                     return true;
                 }
                 match object.as_ref() {
-                    Expr::Variable { name } if name.lexeme() == "arrays" => {
-                        // Most `arrays.*` ops return a new array; `pop`
-                        // additionally transfers ownership of the removed
-                        // element to the caller (the container no longer
-                        // reclaims it). This covers option cells and shared
-                        // boxes as well: the popped cell/box reference is
-                        // the array's own copy, and the caller takes it
-                        // over. `join` materializes a fresh joined string.
-                        if prop == "pop" {
-                            matches!(
-                                tv.ntsc_type,
-                                Ty::Array(_) | Ty::String | Ty::Option(_) | Ty::Shared(_)
-                            )
-                        } else if prop == "join" {
-                            matches!(tv.ntsc_type, Ty::String)
-                        } else {
-                            matches!(tv.ntsc_type, Ty::Array(_))
+                    Expr::Variable { name } => {
+                        if fn_ctx.lookup_var(name.lexeme()).is_some() {
+                            return ty_is_owned_handle(&tv.ntsc_type);
+                        }
+                        let mod_name = super::STDLIB_ALIASES.with(|aliases| {
+                            let aliases = aliases.borrow();
+                            aliases
+                                .get(name.lexeme())
+                                .cloned()
+                                .unwrap_or_else(|| name.lexeme().to_string())
+                        });
+                        match mod_name.as_str() {
+                            "arrays" => {
+                                // Getters copy owned elements; pop transfers the
+                                // removed element. Array results and joins are fresh.
+                                if matches!(prop, "at" | "get" | "pop") {
+                                    ty_is_owned_handle(&tv.ntsc_type)
+                                } else if prop == "join" {
+                                    matches!(tv.ntsc_type, Ty::String)
+                                } else {
+                                    matches!(tv.ntsc_type, Ty::Array(_))
+                                }
+                            }
+
+                            // `sort.*` and `random.shuffle` clone their input.
+                            "sort" => matches!(tv.ntsc_type, Ty::Array(_)),
+                            "random" if prop == "shuffle" => matches!(tv.ntsc_type, Ty::Array(_)),
+
+                            // Default: module/namespace calls that return owned
+                            // handles produce fresh values. This is conservative
+                            // against leaks; borrowed-handle module APIs should be
+                            // added as explicit exceptions above.
+                            _ => ty_is_owned_handle(&tv.ntsc_type),
                         }
                     }
 
-                    // `sort.*` and `random.shuffle` clone their input into
-                    // a new array; `random.weighted`/`choice` return a
-                    // borrowed element, so they are deliberately not fresh.
-                    Expr::Variable { name } if name.lexeme() == "sort" => {
-                        matches!(tv.ntsc_type, Ty::Array(_))
-                    }
-                    Expr::Variable { name } if name.lexeme() == "random" && prop == "shuffle" => {
-                        matches!(tv.ntsc_type, Ty::Array(_))
-                    }
-
-                    // Other module calls returning owned handles allocate a
-                    // fresh value; array-returning module calls are covered above.
-                    Expr::Variable { name } => {
-                        matches!(tv.ntsc_type, Ty::String)
-                            || (name.lexeme() == "memory" && matches!(tv.ntsc_type, Ty::Pointer))
-
-                            // A window is a fresh registry entry, and
-                            // `to_array` materializes a fresh array.
-                            || (name.lexeme() == "slices"
-                                && matches!(tv.ntsc_type, Ty::Slice(_) | Ty::Array(_)))
-
-                            // `sys.args()` materializes a fresh string
-                            // array from the process argument vector.
-                            || (name.lexeme() == "sys"
-                                && prop == "args"
-                                && matches!(tv.ntsc_type, Ty::Array(_)))
-
-                            // `strings.split_array` materializes a fresh
-                            // string array from its source string.
-                            || (name.lexeme() == "strings"
-                                && prop == "split_array"
-                                && matches!(tv.ntsc_type, Ty::Array(_)))
-
-                            // `chan.new(cap)` hands over the channel's first
-                            // reference, so its destination adopts it.
-                            || (name.lexeme() == "chan"
-                                && prop == "new"
-                                && matches!(tv.ntsc_type, Ty::Chan(_)))
-                    }
-
-                    // User methods return by move, so any owned-handle
-                    // result is fresh — regardless of the receiver (`this`
-                    // inside a method, an index expression, a field...).
-                    // Leaving these out leaked every owned return of a
-                    // method whose receiver was not a bare variable.
-                    _ => matches!(tv.ntsc_type, Ty::String | Ty::Array(_)),
+                    // User/unknown methods return by move; any owned-handle
+                    // result is treated as fresh to avoid leaks. Borrowed-handle
+                    // method APIs must be modeled explicitly.
+                    _ => ty_is_owned_handle(&tv.ntsc_type),
                 }
             }
             _ => false,
@@ -1055,7 +1038,12 @@ pub(crate) fn emit_drop_borrowed_fresh_args<'ctx>(
             .map(|t| !matches!(t, Ty::View(..)))
             .unwrap_or(false);
         if !takes_ownership && expr_is_fresh(fn_ctx, arg, val) {
-            emit_drop_value(fn_ctx, val)?;
+            if let Some((crate_name, _)) = crate::emit::call::fresh_object_call(arg) {
+                let handle = crate::emit::call::coerce_to_i64(fn_ctx, val.value)?;
+                crate::emit::emit_object_release(fn_ctx, &crate_name, handle)?;
+            } else {
+                emit_drop_value(fn_ctx, val)?;
+            }
         }
     }
     Ok(())

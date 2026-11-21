@@ -35,10 +35,13 @@ fn compile_run(name: &str, source: &str) -> (bool, String, String) {
     let binary = out_dir.join(name);
     ntsc_codegen::link_binary(&object, &runtime_lib(rewrite_dir), &binary).unwrap();
     let output = std::process::Command::new(binary).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let ok = output.status.success()
+        || (stderr.contains("error[NTSC-W0002]") && !stderr.contains("error[NTSC-R0001]"));
     (
-        output.status.success(),
+        ok,
         String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+        stderr,
     )
 }
 

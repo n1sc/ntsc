@@ -7,7 +7,12 @@ use crate::ty::Ty;
 /// A nested scope for tracking variable and function types.
 pub struct SymbolTable {
     /// Stack of scopes. The last element is the innermost scope.
-    scopes: Vec<HashMap<String, Ty>>,
+    scopes: Vec<HashMap<String, Symbol>>,
+}
+
+struct Symbol {
+    ty: Ty,
+    stdlib_module: Option<String>,
 }
 
 impl SymbolTable {
@@ -38,8 +43,30 @@ impl SymbolTable {
         if scope.contains_key(name) {
             return Err(format!("`{name}` is already defined in this scope"));
         }
-        scope.insert(name.to_string(), ty);
+        scope.insert(
+            name.to_string(),
+            Symbol {
+                ty,
+                stdlib_module: None,
+            },
+        );
         Ok(())
+    }
+
+    pub fn define_stdlib_module(&mut self, name: &str, module: &str) -> Result<(), String> {
+        self.define(name, Ty::Object)?;
+        if let Some(symbol) = self.scopes.last_mut().and_then(|scope| scope.get_mut(name)) {
+            symbol.stdlib_module = Some(module.to_string());
+        }
+        Ok(())
+    }
+
+    pub fn lookup_stdlib_module(&self, name: &str) -> Option<&str> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .and_then(|symbol| symbol.stdlib_module.as_deref())
     }
 
     /// Look up a name, searching from innermost scope outward.
@@ -58,8 +85,8 @@ impl SymbolTable {
     /// defined in the current scope resolves at `self.depth()`.
     pub fn lookup_depth(&self, name: &str) -> Option<(usize, &Ty)> {
         for (index, scope) in self.scopes.iter().enumerate().rev() {
-            if let Some(ty) = scope.get(name) {
-                return Some((index, ty));
+            if let Some(symbol) = scope.get(name) {
+                return Some((index, &symbol.ty));
             }
         }
         None

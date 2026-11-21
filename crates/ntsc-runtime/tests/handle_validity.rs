@@ -6,8 +6,10 @@
 //! surface and with no `unsafe` code:
 //!
 //! * A handle is never reused, so a stale handle is permanently unknown.
-//! * Dropping twice, dropping the wrong kind, and dropping an unknown handle are
-//!   no-ops rather than corruption of another live value.
+//! * Dropping a live handle of the wrong kind is a no-op rather than corruption
+//!   of another live value.
+//! * Dropping a non-null string/array handle that is not live is a hard error
+//!   (`NTSC-R0001`), catching double frees and use-after-free drops.
 //! * A handle of the wrong kind is never mistaken for the right one, in either
 //!   direction, for strings, arrays, shared boxes, futures, and the opaque
 //!   resources the stdlib modules own.
@@ -67,26 +69,57 @@ fn a_dropped_handle_is_never_reissued() {
     assert_eq!(ntsc_string_equals(first, first), 0);
 }
 
-#[test]
-fn dropping_the_same_handle_twice_leaves_other_values_alone() {
-    let victim = string_handle("victim");
-    let doomed = string_handle("doomed");
-    ntsc_string_drop(doomed);
-    // The second drop must not fall through to some other entry.
-    ntsc_string_drop(doomed);
-    ntsc_string_drop(doomed);
-    assert!(string_is(victim, "victim"));
-    ntsc_string_drop(victim);
+fn assert_double_drop_aborts(kind: &str) {
+    let exe = std::env::current_exe().expect("current test exe");
+    let output = std::process::Command::new(exe)
+        .arg("--exact")
+        .arg("double_drop_child")
+        .arg("--nocapture")
+        .env("NTSC_DOUBLE_DROP_KIND", kind)
+        .output()
+        .expect("run double drop child");
+    assert!(
+        !output.status.success(),
+        "double drop should abort, got: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("NTSC-R0001"),
+        "expected double-drop diagnostic, got: {stderr}"
+    );
+}
 
-    let arr = ntsc_array_new(8, 4);
-    assert_eq!(ntsc_array_push(arr, 7), arr);
-    let other = ntsc_array_new(8, 4);
-    assert_eq!(ntsc_array_push(other, 9), other);
-    ntsc_array_drop(arr);
-    ntsc_array_drop(arr);
-    assert_eq!(ntsc_array_len(other), 1);
-    assert_eq!(ntsc_array_get(other, 0), 9);
-    ntsc_array_drop(other);
+#[test]
+fn double_drop_child() {
+    let Ok(kind) = std::env::var("NTSC_DOUBLE_DROP_KIND") else {
+        return;
+    };
+    match kind.as_str() {
+        "string" => {
+            let h = string_handle("doomed");
+            ntsc_string_drop(h);
+            ntsc_string_drop(h);
+        }
+        "array" => {
+            let arr = ntsc_array_new(8, 4);
+            assert_eq!(ntsc_array_push(arr, 7), arr);
+            ntsc_array_drop(arr);
+            ntsc_array_drop(arr);
+        }
+        "unknown_string" => {
+            ntsc_string_drop(i64::MAX - 7);
+        }
+        "unknown_array" => {
+            ntsc_array_drop(i64::MAX - 7);
+        }
+        _ => panic!("unknown kind"),
+    }
+}
+
+#[test]
+fn dropping_the_same_handle_twice_is_reported() {
+    assert_double_drop_aborts("string");
+    assert_double_drop_aborts("array");
 }
 
 #[test]
@@ -224,9 +257,10 @@ fn an_unknown_handle_is_refused_by_every_operation() {
     assert_eq!(ntsc_shared_inner(UNKNOWN), 0);
     assert_eq!(ntsc_shared_release(UNKNOWN), 0);
     assert_eq!(ntsc_async_sleep_poll(UNKNOWN), 0);
-    // And none of the drops fault on it.
-    ntsc_string_drop(UNKNOWN);
-    ntsc_array_drop(UNKNOWN);
+    // Dropping unknown non-null string/array handles is a hard error
+    // (NTSC-R0001) so double-free/use-after-free bugs don't go silent.
+    assert_double_drop_aborts("unknown_string");
+    assert_double_drop_aborts("unknown_array");
     ntsc_async_sleep_drop(UNKNOWN);
     // Closing an unknown channel is also a harmless no-op.
     ntsc_runtime::ntask_chan_close(UNKNOWN);

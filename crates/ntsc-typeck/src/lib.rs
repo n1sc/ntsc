@@ -10,6 +10,7 @@ mod ownership;
 mod resolve;
 mod returns;
 mod scope;
+pub mod stdlib;
 mod ty;
 mod warnings;
 

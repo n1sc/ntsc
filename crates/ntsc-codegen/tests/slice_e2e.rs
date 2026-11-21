@@ -200,7 +200,7 @@ fun main() {
 fn a_slice_cannot_cross_a_thread_boundary() {
     let err = compile_error(
         "slice_thread",
-        "use slices\nuse process\nfun main() {\n    var array[int] xs = [1, 2]\n    var slice[int] w = slices.of(xs, 0, 2)\n    var t = process.spawn_thread(fun(int x) { say(x) }, w)\n}\n",
+        "use slices\nuse process\nfun main() {\n    var array[int] xs = [1, 2]\n    var slice[int] w = slices.of(xs, 0, 2)\n    var t = process.spawn_thread(fun(int x) { say(\"\" + x) }, w)\n}\n",
     );
     assert!(
         err.contains("spawn_thread") || err.contains("cannot cross"),
