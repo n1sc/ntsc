@@ -8,6 +8,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $manifest = Join-Path $PSScriptRoot "../../../crates/ntsc-codegen/windows-link-libraries.txt"
+if (-not (Test-Path $manifest -PathType Leaf)) {
+  $manifest = Join-Path $PSScriptRoot "windows-link-libraries.txt"
+}
 $names = @("crt2.o") + @(Get-Content $manifest | ForEach-Object { "lib$_.a" })
 $searchDirectories = @((Join-Path $LibraryDirectory "self-contained"), $LibraryDirectory)
 New-Item -ItemType Directory -Path $Destination -Force | Out-Null

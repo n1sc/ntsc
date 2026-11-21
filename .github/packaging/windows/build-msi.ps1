@@ -91,7 +91,10 @@ if (-not (Test-Path $lld -PathType Leaf)) {
   throw "ld.lld.exe not found in $LlvmBin"
 }
 $binaries = @((Join-Path $SourceDir "ntsc.exe"), $PackageManager, $LanguageServer, $lld)
-$collector = Join-Path $ScriptDir "../../../scripts/windows-dll-dependencies.ps1"
+$collector = Join-Path $ScriptDir "windows-dll-dependencies.ps1"
+if (-not (Test-Path $collector -PathType Leaf)) {
+  $collector = Join-Path $ScriptDir "../../../scripts/windows-dll-dependencies.ps1"
+}
 foreach ($dependency in (& $collector -Binaries $binaries -LlvmBin $LlvmBin)) {
   $deps.Add($dependency.Name, $dependency.FullName)
 }
