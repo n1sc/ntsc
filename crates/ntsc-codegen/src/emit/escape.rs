@@ -375,7 +375,19 @@ fn expression_class(expr: &Expr, classes: &HashMap<String, String>) -> Option<St
 
 fn callee_param_types(callee: &Expr, kind: EscapeKind<'_>) -> Vec<Ty> {
     match callee {
-        Expr::Variable { name } => function_declared_param_types(name.lexeme()),
+        // Call resolution prefers a free function over a same-named class
+        // constructor, so mirror it here. A constructor's arguments match
+        // `init`'s declared parameters (excluding `this`), which lets a `view`
+        // parameter be recognized as a borrow instead of an escape.
+        Expr::Variable { name } => {
+            if is_user_function(name.lexeme()) {
+                function_declared_param_types(name.lexeme())
+            } else if is_class_type(name.lexeme()) {
+                class_method_declared_param_types(name.lexeme(), "init")
+            } else {
+                Vec::new()
+            }
+        }
         Expr::Member { object, property } => {
             if let EscapeKind::FieldDrop(classes) = kind
                 && let Some(class) = expression_class(object, classes)

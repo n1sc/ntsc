@@ -192,6 +192,56 @@ fun main() -> int {
     );
 }
 
+/// Regression: passing a class local to a class constructor whose `init`
+/// takes a `view` parameter is a borrow, not an escape. The local must stay a
+/// field-drop candidate so its owned fields are reclaimed at scope exit. The
+/// constructor's parameter types used to be unresolvable, so the argument was
+/// treated as an escape and the instance's owned fields leaked.
+#[test]
+fn class_local_passed_to_view_constructor_is_reclaimed() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rewrite_dir = workspace.parent().unwrap().parent().unwrap();
+
+    let source = r#"use arrays
+class Frame {
+    var array[int] payload
+
+    fun init() {
+        this.payload = [1, 2, 3]
+    }
+}
+
+class Reader {
+    var bool ok
+
+    fun init(view Frame frame) {
+        this.ok = arrays.length(frame.payload) > 0
+    }
+}
+
+fun main() -> int {
+    var frame = Frame()
+    var reader = Reader(frame)
+    if (reader.ok) {
+        say("ok")
+    }
+    return 0
+}
+"#;
+    let (ok, stdout, stderr) = compile_run(
+        rewrite_dir,
+        "view_ctor_arg_reclaimed",
+        source,
+        inkwell::OptimizationLevel::None,
+    );
+    assert!(ok, "binary must exit 0, stderr was: {stderr:?}");
+    assert_eq!(stdout.trim(), "ok");
+    assert!(
+        !stderr.contains("memory leak detected"),
+        "a view constructor argument is a borrow and must not suppress the field drop, stderr was: {stderr:?}"
+    );
+}
+
 /// Regression: a class local that escapes via `return` on one branch is
 /// excluded from the normal owned-slot/class-drop set, but on the branches
 /// where a *different* value is returned it must still be dropped. Here `sent`
