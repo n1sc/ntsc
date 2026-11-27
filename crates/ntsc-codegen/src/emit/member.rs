@@ -17,6 +17,10 @@ pub(crate) fn store_into_field<'ctx>(
 ) -> Result<(), crate::CodegenError> {
     let field_ty = gep.field_ty.clone();
 
+    if has_class_reference(&field_ty) {
+        store_into_owned_slot(fn_ctx, gep.ptr, &field_ty, value, val)?;
+        return Ok(());
+    }
     if matches!(field_ty, Ty::Shared(_)) {
         let boxed = box_or_retain_shared(fn_ctx, &field_ty, value, val)?;
 
@@ -85,10 +89,6 @@ pub(crate) fn store_into_field<'ctx>(
         // again. A freshly-constructed instance zero-initializes its
         // fields, so the first assignment drops a null handle; the
         // identity guard skips self-assignment (`b.items = b.items`).
-        // Class instances are single-owner like arrays and strings: a plain
-        // read moves them (nulling the source), so a live field holds the
-        // only reference and its owned heap fields must be reclaimed here
-        // rather than orphaned when the field is repointed.
         emit_drop_replaced_value(fn_ctx, gep.ptr, &field_ty, &stored)?;
     }
     fn_ctx.builder.build_store(gep.ptr, stored.value)?;
@@ -103,56 +103,6 @@ pub(crate) fn store_into_field<'ctx>(
 pub(crate) struct GepResult<'ctx> {
     pub(crate) ptr: PointerValue<'ctx>,
     pub(crate) field_ty: Ty,
-}
-
-/// Emit the fallback `exception.cleanup` path that reclaims the partially
-/// constructed fields when a constructor throws mid-initialization.
-pub(crate) fn emit_partial_construction_cleanup<'ctx>(
-    fn_ctx: &mut FunctionContext<'ctx, '_>,
-    class_name: &str,
-    obj_ptr: PointerValue<'ctx>,
-) -> Result<(), crate::CodegenError> {
-    if !fn_ctx.exception_checks {
-        return Ok(());
-    }
-    let handler = fn_ctx.current_exception_handler();
-    let pending_fn = fn_ctx
-        .module
-        .get_function("ntsc_exception_pending")
-        .ok_or_else(|| {
-            crate::CodegenError::LLVMError("ntsc_exception_pending not declared".into())
-        })?;
-    let pending = fn_ctx
-        .builder
-        .build_call(pending_fn, &[], "ctor_exc_pending")?
-        .try_as_basic_value()
-        .unwrap_basic()
-        .into_int_value();
-    let active = fn_ctx.builder.build_int_compare(
-        IntPredicate::NE,
-        pending,
-        fn_ctx.context.i8_type().const_zero(),
-        "ctor_exc_active",
-    )?;
-    let unwind_bb = fn_ctx
-        .context
-        .append_basic_block(fn_ctx.function, "ctor.unwind");
-    let continue_bb = fn_ctx
-        .context
-        .append_basic_block(fn_ctx.function, "ctor.continue");
-    fn_ctx
-        .builder
-        .build_conditional_branch(active, unwind_bb, continue_bb)?;
-
-    fn_ctx.builder.position_at_end(unwind_bb);
-    emit_drop_value(
-        fn_ctx,
-        &TypedValue::new(obj_ptr.into(), Ty::Class(class_name.to_string())),
-    )?;
-    fn_ctx.builder.build_unconditional_branch(handler)?;
-
-    fn_ctx.builder.position_at_end(continue_bb);
-    Ok(())
 }
 
 pub(crate) fn emit_declared_field_initializers<'ctx>(
@@ -203,26 +153,35 @@ pub(crate) fn emit_class_constructor<'ctx>(
 
     let obj_ptr = match slot {
         Some(slot) => slot,
-        None => {
-            let alloc_fn = fn_ctx
-                .module
-                .get_function("malloc")
-                .ok_or_else(|| crate::CodegenError::LLVMError("malloc not declared".into()))?;
-            let alloc_result =
-                fn_ctx
-                    .builder
-                    .build_call(alloc_fn, &[size.into()], "class_alloc")?;
-            let raw = call_result_to_value(fn_ctx, &alloc_result).into_pointer_value();
-            fn_ctx.builder.build_pointer_cast(
-                raw,
-                fn_ctx.context.ptr_type(AddressSpace::default()),
-                "class_ptr",
-            )?
-        }
+        None => allocate_class(fn_ctx, class_name, size)?,
     };
 
-    let zero = fn_ctx.context.i8_type().const_zero();
-    fn_ctx.builder.build_memset(obj_ptr, 1, zero, size)?;
+    if slot.is_some() {
+        fn_ctx
+            .builder
+            .build_memset(obj_ptr, 1, fn_ctx.context.i8_type().const_zero(), size)?;
+    }
+
+    // Any field initializer or init method can unwind before the completed
+    // instance has been handed to its owner. Zeroed fields are safe to drop.
+    let cleanup = if fn_ctx.exception_checks
+        && (fn_ctx
+            .module
+            .get_function(&format!("{class_name}.init"))
+            .is_some()
+            || class_all_field_inits(class_name)
+                .iter()
+                .any(Option::is_some))
+    {
+        let outer = fn_ctx.current_exception_handler();
+        let unwind = fn_ctx
+            .context
+            .append_basic_block(fn_ctx.function, "ctor.unwind");
+        fn_ctx.exception_targets.push(unwind);
+        Some((unwind, outer))
+    } else {
+        None
+    };
 
     let initialized = emit_declared_field_initializers(fn_ctx, struct_ty, class_name, obj_ptr)?;
 
@@ -240,7 +199,7 @@ pub(crate) fn emit_class_constructor<'ctx>(
             .builder
             .build_call(init_fn, &llvm_args, "class_init")?;
         emit_drop_borrowed_fresh_args(fn_ctx, arguments, arg_values, &declared)?;
-        emit_partial_construction_cleanup(fn_ctx, class_name, obj_ptr)?;
+        fn_ctx.emit_pending_exception_check()?;
     } else if !arguments.is_empty() {
         return Err(crate::CodegenError::LLVMError(format!(
             "class `{class_name}` has no `init` method but was constructed with arguments"
@@ -297,6 +256,26 @@ pub(crate) fn emit_class_constructor<'ctx>(
             )?;
             fn_ctx.builder.build_store(field_ptr, default)?;
         }
+    }
+
+    if let Some((unwind, outer)) = cleanup {
+        fn_ctx.exception_targets.pop();
+        let resume = fn_ctx
+            .builder
+            .get_insert_block()
+            .expect("constructor continuation");
+        fn_ctx.builder.position_at_end(unwind);
+        if slot.is_some() {
+            let thunk = get_or_create_class_drop_thunk(fn_ctx.module, fn_ctx.context, class_name)?;
+            fn_ctx.builder.build_call(thunk, &[obj_ptr.into()], "")?;
+        } else {
+            emit_drop_value(
+                fn_ctx,
+                &TypedValue::new(obj_ptr.into(), Ty::Class(class_name.to_owned())),
+            )?;
+        }
+        fn_ctx.builder.build_unconditional_branch(outer)?;
+        fn_ctx.builder.position_at_end(resume);
     }
 
     Ok(TypedValue::new(

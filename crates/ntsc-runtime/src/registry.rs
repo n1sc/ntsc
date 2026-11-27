@@ -40,9 +40,31 @@ pub(crate) const PTR_SIZE: usize = std::mem::size_of::<i64>();
 /// (strings, sockets, futures) across workers, and one global mutex
 /// serializes exactly that traffic.
 const REGISTRY_SHARDS: usize = 64;
-static REGISTRY: LazyLock<Box<[Mutex<IdMap<Handle>>]>> = LazyLock::new(|| {
+
+#[derive(Default)]
+struct RegistryShard {
+    handles: IdMap<Handle>,
+    leak_sites: IdMap<(i64, i64)>,
+}
+
+impl RegistryShard {
+    fn get(&self, id: &i64) -> Option<&Handle> {
+        self.handles.get(id)
+    }
+
+    fn get_mut(&mut self, id: &i64) -> Option<&mut Handle> {
+        self.handles.get_mut(id)
+    }
+
+    fn remove(&mut self, id: &i64) -> Option<Handle> {
+        self.leak_sites.remove(id);
+        self.handles.remove(id)
+    }
+}
+
+static REGISTRY: LazyLock<Box<[Mutex<RegistryShard>]>> = LazyLock::new(|| {
     (0..REGISTRY_SHARDS)
-        .map(|_| Mutex::new(IdMap::default()))
+        .map(|_| Mutex::new(RegistryShard::default()))
         .collect()
 });
 
@@ -50,14 +72,14 @@ static REGISTRY: LazyLock<Box<[Mutex<IdMap<Handle>>]>> = LazyLock::new(|| {
 /// and never holds it while calling back into the registry, so there is no
 /// lock ordering to violate.
 #[inline]
-fn shard_lock(id: i64) -> std::sync::MutexGuard<'static, IdMap<Handle>> {
+fn shard_lock(id: i64) -> std::sync::MutexGuard<'static, RegistryShard> {
     REGISTRY[(id.unsigned_abs() as usize) & (REGISTRY_SHARDS - 1)]
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Lock every shard in index order, for whole-table reads.
-fn all_shards() -> Vec<std::sync::MutexGuard<'static, IdMap<Handle>>> {
+fn all_shards() -> Vec<std::sync::MutexGuard<'static, RegistryShard>> {
     REGISTRY
         .iter()
         .map(|shard| shard.lock().unwrap_or_else(|p| p.into_inner()))
@@ -71,8 +93,6 @@ static LIVE: AtomicI64 = AtomicI64::new(0);
 /// never removed, and are excluded from leak reporting.
 static PERMANENT: AtomicI64 = AtomicI64::new(0);
 static PERMANENT_IDS: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-static LEAK_SITES: LazyLock<Mutex<IdMap<(i64, i64)>>> =
-    LazyLock::new(|| Mutex::new(IdMap::default()));
 
 /// Bumped whenever an entry is removed. A cached capability is only reused
 /// while this is unchanged, so a dropped handle can never be served from a
@@ -350,17 +370,19 @@ pub(crate) fn slice_copy_from(dst: i64, src: i64) -> bool {
     true
 }
 
-/// Whether two windows hold equal element bits, element by element.
+/// Compare the elements of two windows, using value equality for strings.
 pub(crate) fn slice_equal(a: i64, b: i64) -> Option<bool> {
     let (a_array, a_start, a_len) = slice_window(a)?;
     let (b_array, b_start, b_len) = slice_window(b)?;
-    if a_len != b_len {
+    let a_strings = with_array(a_array, |array| array.string_elements)?;
+    let b_strings = with_array(b_array, |array| array.string_elements)?;
+    if a_len != b_len || a_strings != b_strings {
         return Some(false);
     }
     for offset in 0..a_len {
         let left = array_get(a_array, (a_start + offset) as i64)?;
         let right = array_get(b_array, (b_start + offset) as i64)?;
-        if left != right {
+        if left != right && !(a_strings && string_equals(left, right)) {
             return Some(false);
         }
     }
@@ -513,11 +535,11 @@ fn next_id() -> i64 {
 }
 
 fn insert_locked(
-    guard: &mut std::sync::MutexGuard<'_, IdMap<Handle>>,
+    guard: &mut std::sync::MutexGuard<'_, RegistryShard>,
     id: i64,
     handle: Handle,
 ) -> i64 {
-    guard.insert(id, handle);
+    guard.handles.insert(id, handle);
     // Bumped under the lock, like every other counter mutation, so the two
     // can never be observed out of step (see `counters_agree_with_map`).
     LIVE.fetch_add(1, Ordering::Relaxed);
@@ -540,7 +562,7 @@ pub(crate) fn reserve_id() -> i64 {
 /// Register `handle` under an id previously taken from [`reserve_id`].
 pub(crate) fn insert_reserved(id: i64, handle: Handle) {
     let mut guard = shard_lock(id);
-    if guard.insert(id, handle).is_none() {
+    if guard.handles.insert(id, handle).is_none() {
         LIVE.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -550,7 +572,7 @@ pub(crate) fn insert_reserved(id: i64, handle: Handle) {
 pub(crate) fn insert_permanent(handle: Handle) -> i64 {
     let id = next_id();
     let mut guard = shard_lock(id);
-    guard.insert(id, handle);
+    guard.handles.insert(id, handle);
 
     PERMANENT.fetch_add(1, Ordering::Relaxed);
     PERMANENT_IDS
@@ -606,7 +628,7 @@ pub(crate) fn live_count() -> i64 {
 
 /// Whether `id` currently has an entry in the registry.
 pub(crate) fn is_registered(id: i64) -> bool {
-    shard_lock(id).contains_key(&id)
+    shard_lock(id).handles.contains_key(&id)
 }
 
 /// `LIVE + PERMANENT` must always equal the number of entries in the map.
@@ -621,7 +643,7 @@ pub(crate) fn assert_counters_agree_with_map(step: &str) {
     let shards = all_shards();
     let live = LIVE.load(Ordering::Relaxed);
     let permanent = PERMANENT.load(Ordering::Relaxed);
-    let entries = shards.iter().map(|g| g.len() as i64).sum::<i64>();
+    let entries = shards.iter().map(|g| g.handles.len() as i64).sum::<i64>();
     drop(shards);
     assert_eq!(
         live + permanent,
@@ -630,17 +652,12 @@ pub(crate) fn assert_counters_agree_with_map(step: &str) {
     );
 }
 
-/// Return a stable snapshot of every non-permanent live handle and its kind.
-/// The shutdown reporter uses this instead of only printing the aggregate
-/// count, which makes the first debugging pass identify the surviving object.
+/// Attach a source location while the handle is still live.
 pub(crate) fn mark_leak_site(id: i64, line: i64, column: i64) {
-    if id == NULL || !shard_lock(id).contains_key(&id) {
-        return;
+    let mut shard = shard_lock(id);
+    if shard.handles.contains_key(&id) {
+        shard.leak_sites.insert(id, (line, column));
     }
-    LEAK_SITES
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(id, (line, column));
 }
 
 pub(crate) struct LeakEntry {
@@ -655,13 +672,10 @@ pub(crate) fn live_entries() -> Vec<LeakEntry> {
     let permanent = PERMANENT_IDS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let sites = LEAK_SITES
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut entries: Vec<_> = shards
         .iter()
-        .flat_map(|guard| guard.iter())
-        .filter_map(|(&id, handle)| {
+        .flat_map(|shard| shard.handles.iter().map(|entry| (entry, &shard.leak_sites)))
+        .filter_map(|((&id, handle), sites)| {
             if permanent.contains(&id) {
                 return None;
             }
@@ -1119,19 +1133,18 @@ pub(crate) fn array_fill(val: i64, count: i64, elem_size: i64, string_elements: 
     if count > MAX_INITIAL_CAPACITY {
         return NULL;
     }
-    let mut data = ArrayData::new(elem_size as usize, count, string_elements);
-    for _ in 0..count {
-        let elem = if string_elements {
-            match clone_string(val) {
-                Some(handle) => handle,
-                None => NULL,
-            }
-        } else {
-            val
-        };
-        data.push(elem);
-    }
-    put_array(data)
+    let elements = if string_elements {
+        (0..count)
+            .map(|_| clone_string(val).unwrap_or(NULL))
+            .collect()
+    } else {
+        vec![val; count]
+    };
+    put_array(ArrayData {
+        elem_size: elem_size as usize,
+        string_elements,
+        elements,
+    })
 }
 
 /// Build a fresh `i64` array holding `start..end`.
@@ -1846,7 +1859,7 @@ pub(crate) fn with_opaque_io<T: Any + Send, R>(id: i64, f: impl FnOnce(T) -> (T,
     let taken = {
         let mut guard = shard_lock(id);
         match guard.get(&id) {
-            Some(Handle::Opaque(opaque)) if opaque.is::<T>() => guard.remove(&id),
+            Some(Handle::Opaque(opaque)) if opaque.is::<T>() => guard.handles.remove(&id),
             _ => return None,
         }
     };
@@ -1854,13 +1867,15 @@ pub(crate) fn with_opaque_io<T: Any + Send, R>(id: i64, f: impl FnOnce(T) -> (T,
         Some(Handle::Opaque(opaque)) => match opaque.downcast::<T>() {
             Ok(boxed) => f(*boxed),
             Err(opaque) => {
-                shard_lock(id).insert(id, Handle::Opaque(opaque));
+                shard_lock(id).handles.insert(id, Handle::Opaque(opaque));
                 return None;
             }
         },
         _ => return None,
     };
-    shard_lock(id).insert(id, Handle::Opaque(Box::new(t)));
+    shard_lock(id)
+        .handles
+        .insert(id, Handle::Opaque(Box::new(t)));
     Some(r)
 }
 
@@ -2265,6 +2280,35 @@ mod tests {
         assert_eq!(array_len(arr), 1);
     }
     use super::*;
+
+    #[test]
+    fn dropped_handles_release_their_leak_sites() {
+        let id = put_string("marked".into());
+        mark_leak_site(id, 7, 3);
+        assert_eq!(shard_lock(id).leak_sites.get(&id), Some(&(7, 3)));
+        take_string(id);
+        mark_leak_site(id, 9, 1);
+        assert!(!shard_lock(id).leak_sites.contains_key(&id));
+    }
+
+    #[test]
+    fn string_slice_equality_compares_contents() {
+        let array = array_new(8, 0, 1);
+        for value in ["one", "one", "two"] {
+            let text = put_string(value.into());
+            assert!(array_push(array, text));
+            take_string(text);
+        }
+        let a = slice_of(array, 0, 1).unwrap();
+        let b = slice_of(array, 1, 2).unwrap();
+        let c = slice_of(array, 2, 3).unwrap();
+        assert_eq!(slice_equal(a, b), Some(true));
+        assert_eq!(slice_equal(a, c), Some(false));
+        for slice in [a, b, c] {
+            slice_drop(slice);
+        }
+        array_drop(array);
+    }
 
     #[test]
     fn overlapping_slice_copy_preserves_source_values() {

@@ -1,15 +1,9 @@
 //! Minimal runtime + standard library support for NTSC-compiled binaries.
 //!
 //! All functions here use `extern "C"` ABI so they can be called from
-//! LLVM-generated code. Raw pointers cross the boundary through the
-//! cross-adaptor shared-object API (`ntsc_shared_object_*`) and the compiler's
-//! exclusively borrowed local scalar-array buffers. Both have explicit
-//! lifetime contracts; adaptor objects additionally carry creator-side drop
-//! glue. Every owned heap value (string, array, shared box, future,
-//! opaque module value) lives in the handle registry under an `i64` key,
-//! and generated code passes only those keys. `unsafe` appears only in those
-//! two boundary families, where the caller contracts are documented per
-//! function.
+//! LLVM-generated code. Class references point to aligned payloads managed by
+//! the class allocator. Registry handles use integer keys. Adaptor objects
+//! and borrowed scalar-array buffers have their own documented ABI contracts.
 //!
 //! ## Ownership rules
 //!
@@ -35,6 +29,7 @@
 //! clears the pending slot; `ntsc_rethrow` re-arms it (used after a `finally`
 //! that ran with a clean flag).
 
+mod class;
 mod idmap;
 pub mod modules;
 mod ntask;

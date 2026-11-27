@@ -39,6 +39,13 @@ panic = "abort"
 strip = "debuginfo"
 opt-level = "z"
 
+# These crates perform type checking and LLVM IR construction on every build.
+[profile.release.package.ntsc-typeck]
+opt-level = 3
+
+[profile.release.package.ntsc-codegen]
+opt-level = 3
+
 # The staticlib is linked into every generated program, so its hot paths
 # (registry lookups, array access, the per-call exception check) must be
 # optimized for speed; `opt-level = "z"` leaves them as out-of-line calls.

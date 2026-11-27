@@ -26,6 +26,12 @@ pub(crate) fn emit_binary<'ctx>(
     // Operator overloading: when at least one operand is a class type,
     // attempt to dispatch to an operator method on that class.
     if let Some(result) = try_emit_operator_method(fn_ctx, op, &lhs, &rhs)? {
+        for (expr, operand) in [(left, &lhs), (right, &rhs)] {
+            if has_class_reference(&operand.ntsc_type) && expr_is_fresh(fn_ctx, expr, operand) {
+                emit_drop_value(fn_ctx, operand)?;
+            }
+        }
+        fn_ctx.emit_pending_exception_check()?;
         return Ok(result);
     }
 
@@ -709,15 +715,61 @@ impl IntArith {
     }
 }
 
-/// Throw a catchable language exception when `condition` holds, and leave
-/// the builder positioned on the path where it does not. `ntsc_throw` never
-/// returns, so the throw path branches straight to the enclosing handler.
+/// Emit the error path once per diagnostic. Keeping message construction out
+/// of the caller keeps loop bodies small even when each access needs a guard.
+fn guard_failure_function<'ctx>(
+    fn_ctx: &FunctionContext<'ctx, '_>,
+    message: &str,
+) -> Result<FunctionValue<'ctx>, crate::CodegenError> {
+    let ctx = fn_ctx.context;
+    let name = format!("ntsc.guard.{message}");
+    if let Some(function) = fn_ctx.module.get_function(&name) {
+        return Ok(function);
+    }
+    let function = fn_ctx.module.add_function(
+        &name,
+        ctx.void_type().fn_type(&[], false),
+        Some(inkwell::module::Linkage::Internal),
+    );
+    for attribute in ["cold", "noinline"] {
+        let kind = inkwell::attributes::Attribute::get_named_enum_kind_id(attribute);
+        function.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            ctx.create_enum_attribute(kind, 0),
+        );
+    }
+    let entry = ctx.append_basic_block(function, "entry");
+    let builder = ctx.create_builder();
+    builder.position_at_end(entry);
+    let mut helper = FunctionContext::new(
+        function,
+        &builder,
+        &builder,
+        entry,
+        fn_ctx.module,
+        Ty::Void,
+        ctx,
+    );
+    let message = build_string_words_via(&mut helper, message, "ntsc_string_from_words")?;
+    let throw_fn = fn_ctx
+        .module
+        .get_function("ntsc_throw")
+        .ok_or_else(|| crate::CodegenError::LLVMError("ntsc_throw not declared".into()))?;
+    builder.build_call(throw_fn, &[message.into()], "")?;
+    builder.build_return(None)?;
+    Ok(function)
+}
+
+/// Branch to the active handler after setting the pending exception.
 pub(crate) fn emit_guard_throw<'ctx>(
     fn_ctx: &mut FunctionContext<'ctx, '_>,
     condition: inkwell::values::IntValue<'ctx>,
     message: &str,
     label: &str,
 ) -> Result<(), crate::CodegenError> {
+    if condition.get_zero_extended_constant() == Some(0) {
+        return Ok(());
+    }
     let ctx = fn_ctx.context;
     let throw_bb = ctx.append_basic_block(fn_ctx.function, &format!("{label}.throw"));
     let continue_bb = ctx.append_basic_block(fn_ctx.function, &format!("{label}.continue"));
@@ -725,16 +777,10 @@ pub(crate) fn emit_guard_throw<'ctx>(
         .builder
         .build_conditional_branch(condition, throw_bb, continue_bb)?;
 
-    let throw_fn = fn_ctx
-        .module
-        .get_function("ntsc_throw")
-        .ok_or_else(|| crate::CodegenError::LLVMError("ntsc_throw not declared".into()))?;
+    let failure = guard_failure_function(fn_ctx, message)?;
     let handler = fn_ctx.current_exception_handler();
     fn_ctx.builder.position_at_end(throw_bb);
-    let message = build_string_words_permanent(fn_ctx, message)?;
-    fn_ctx
-        .builder
-        .build_call(throw_fn, &[message.into()], "throw_guard")?;
+    fn_ctx.builder.build_call(failure, &[], "")?;
     fn_ctx.builder.build_unconditional_branch(handler)?;
 
     fn_ctx.builder.position_at_end(continue_bb);
@@ -855,33 +901,13 @@ pub(crate) fn emit_checked_divisor_guard<'ctx>(
         "div_neg_one_check",
     )?;
     let overflows = builder.build_and(is_min, is_neg_one, "div_overflow_check")?;
-    let overflow_check_bb = ctx.append_basic_block(fn_ctx.function, "division.overflow_check");
-    let zero_throw_bb = ctx.append_basic_block(fn_ctx.function, "division.zero_throw");
-    let overflow_throw_bb = ctx.append_basic_block(fn_ctx.function, "division.overflow_throw");
-    let continue_bb = ctx.append_basic_block(fn_ctx.function, "division.continue");
-    builder.build_conditional_branch(is_zero, zero_throw_bb, overflow_check_bb)?;
-
-    let throw_fn = fn_ctx
-        .module
-        .get_function("ntsc_throw")
-        .ok_or_else(|| crate::CodegenError::LLVMError("ntsc_throw not declared".into()))?;
-    let handler = fn_ctx.current_exception_handler();
-
-    builder.position_at_end(zero_throw_bb);
-    let message = build_string_words_permanent(fn_ctx, "division by zero")?;
-    builder.build_call(throw_fn, &[message.into()], "throw_zero")?;
-    builder.build_unconditional_branch(handler)?;
-
-    builder.position_at_end(overflow_check_bb);
-    builder.build_conditional_branch(overflows, overflow_throw_bb, continue_bb)?;
-
-    builder.position_at_end(overflow_throw_bb);
-    let message = build_string_words_permanent(fn_ctx, "integer division overflow")?;
-    builder.build_call(throw_fn, &[message.into()], "throw_overflow")?;
-    builder.build_unconditional_branch(handler)?;
-
-    builder.position_at_end(continue_bb);
-    Ok(())
+    emit_guard_throw(fn_ctx, is_zero, "division by zero", "division.zero")?;
+    emit_guard_throw(
+        fn_ctx,
+        overflows,
+        "integer division overflow",
+        "division.overflow",
+    )
 }
 
 /// Widen an `int` operand to `float` for mixed arithmetic.

@@ -49,7 +49,7 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                     // A value returned from a void function is evaluated for
                     // side effects and discarded.
                     let val = emit_expression(fn_ctx, expr)?;
-                    if expr_is_owned(fn_ctx, expr, &val) {
+                    if expr_is_fresh(fn_ctx, expr, &val) {
                         emit_drop_value(fn_ctx, &val)?;
                     }
                     // A discarded fresh object has no owner either.
@@ -105,6 +105,7 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                     } else {
                         let payload = coerce_value(fn_ctx, converted, inner)?;
                         let payload = if !expr_is_fresh(fn_ctx, expr, &payload)
+                            && !has_class_reference(&payload.ntsc_type)
                             && !expr_is_string_literal(expr)
                             && !matches!(expr, Expr::Variable { .. })
                         {
@@ -162,6 +163,7 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                 // tuple or any expression that embeds locals moves each of
                 // them the same way; anything under `copy(...)` keeps its
                 // own reference and is left alone.
+                acquire_class_value(fn_ctx, expr, &converted)?;
                 match expr {
                     Expr::Variable { name } => {
                         fn_ctx.null_var_slot(name.lexeme());
@@ -172,8 +174,6 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                         // `call::compute_user_object_returns`); otherwise the
                         // handle leaks rather than dangling.
                         super::set_rust_object_var(name.lexeme(), None);
-                        let returned = [name.lexeme().to_string()];
-                        super::drop::drop_unreturned_escape_class_locals(fn_ctx, &returned)?;
                     }
                     other => {
                         let mut moved = Vec::new();
@@ -184,7 +184,6 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                             }
                             super::set_rust_object_var(name, None);
                         }
-                        super::drop::drop_unreturned_escape_class_locals(fn_ctx, &moved)?;
                     }
                 }
                 fn_ctx.emit_defers_to(0)?;
@@ -230,7 +229,8 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                 fn_ctx.builder.build_store(ptr, obj.value)?;
                 fn_ctx.define_var(name.lexeme(), ptr, obj.ntsc_type.clone());
 
-                fn_ctx.mark_owned_if_heap(name.lexeme(), &obj.ntsc_type);
+                fn_ctx.stack_class_slots.insert(ptr);
+                fn_ctx.owned_slots.insert(name.lexeme().to_owned());
                 return Ok(());
             }
 
@@ -305,19 +305,6 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                         emit_drop_replaced_value(fn_ctx, ptr, &inferred, &init_val)?;
                     }
 
-                    // A class slot is only reclaimed here when the analysis
-                    // proved this instance is neither aliased nor escaping
-                    // (`class_drops`); otherwise another name may still read
-                    // the instance and its fields are deliberately leaked
-                    // instead of freed twice. The thunk is a no-op on the
-                    // null pointer the slot starts out holding.
-                    if matches!(inferred, Ty::Class(_))
-                        && (fn_ctx.class_drops.contains(name.lexeme())
-                            || (fn_ctx.future_base.is_some()
-                                && expr_is_fresh(fn_ctx, init_expr, &init_val)))
-                    {
-                        emit_drop_slot_value(fn_ctx, ptr, &inferred)?;
-                    }
                     let coerced = coerce_value(fn_ctx, init_val, &inferred)?;
 
                     correct_empty_array_flag(fn_ctx, init_expr, &coerced, &inferred)?;
@@ -363,29 +350,10 @@ pub(crate) fn emit_statement_in_function<'ctx>(
                 let ptr = fn_ctx.alloca(name.lexeme(), &ann_ty)?;
                 (ann_ty, ptr, false)
             };
-            if (owned || fn_ctx.class_drops.contains(name.lexeme())) && fn_ctx.future_base.is_none()
-            {
+            fn_ctx.define_var(name.lexeme(), ptr, ty.clone());
+            if (owned || has_class_reference(&ty)) && fn_ctx.future_base.is_none() {
                 fn_ctx.mark_owned_if_heap(name.lexeme(), &ty);
             }
-            let tuple_owned = if view.is_none() && matches!(ty, Ty::Tuple(_)) {
-                match initializer {
-                    Some(Expr::Variable { name: source }) => fn_ctx
-                        .tuple_class_elements
-                        .remove(source.lexeme())
-                        .unwrap_or_default(),
-                    Some(expr) => owned_class_elements_in_tuple(expr, &ty),
-                    None => HashSet::new(),
-                }
-            } else {
-                HashSet::new()
-            };
-            fn_ctx.tuple_class_elements.remove(name.lexeme());
-            if !tuple_owned.is_empty() {
-                fn_ctx
-                    .tuple_class_elements
-                    .insert(name.lexeme().to_string(), tuple_owned);
-            }
-            fn_ctx.define_var(name.lexeme(), ptr, ty);
             super::scalar_array::bind_scalar_array_buffer(fn_ctx, name.lexeme())?;
         }
         Stmt::Block { statements, .. } => {

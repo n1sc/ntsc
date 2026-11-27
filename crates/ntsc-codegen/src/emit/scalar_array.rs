@@ -1,12 +1,59 @@
 //! Direct, bounds-checked access to nonescaping local scalar-array buffers.
 
 use super::*;
+use inkwell::values::{InstructionValue, MetadataValue};
 
 #[derive(Clone)]
 pub(crate) struct ScalarArrayBuffer<'ctx> {
     data: PointerValue<'ctx>,
     length: inkwell::values::IntValue<'ctx>,
     element: Ty,
+    alias_scopes: Option<ArrayAliasScopes<'ctx>>,
+}
+
+#[derive(Clone, Copy)]
+struct ArrayAliasScopes<'ctx> {
+    own: MetadataValue<'ctx>,
+    others: MetadataValue<'ctx>,
+}
+
+impl<'ctx> ArrayAliasScopes<'ctx> {
+    fn for_binding(fn_ctx: &FunctionContext<'ctx, '_>, name: &str) -> Option<Self> {
+        if fn_ctx.scalar_array_candidates.len() < 2 {
+            return None;
+        }
+        // Only top-level fresh allocations with unique, nonescaping bindings
+        // qualify. Tag direct element accesses only, never general runtime calls.
+        let ctx = fn_ctx.context;
+        let function_name = fn_ctx.function.get_name().to_str().ok()?;
+        let domain_name = format!("ntsc.local.arrays.{function_name}");
+        let domain = ctx.metadata_node(&[ctx.metadata_string(&domain_name).into()]);
+        let scope =
+            |array: &str| ctx.metadata_node(&[ctx.metadata_string(array).into(), domain.into()]);
+        let mut others: Vec<_> = fn_ctx
+            .scalar_array_candidates
+            .keys()
+            .filter(|other| other.as_str() != name)
+            .collect();
+        others.sort_unstable();
+        let others: Vec<_> = others
+            .into_iter()
+            .map(|other| scope(other).into())
+            .collect();
+        Some(Self {
+            own: ctx.metadata_node(&[scope(name).into()]),
+            others: ctx.metadata_node(&others),
+        })
+    }
+
+    fn attach(self, ctx: &Context, instruction: InstructionValue<'ctx>) {
+        instruction
+            .set_metadata(self.own, ctx.get_kind_id("alias.scope"))
+            .expect("alias scopes are metadata nodes");
+        instruction
+            .set_metadata(self.others, ctx.get_kind_id("noalias"))
+            .expect("alias scopes are metadata nodes");
+    }
 }
 
 fn is_variable(expression: &Expr, name: &str) -> bool {
@@ -371,12 +418,14 @@ pub(crate) fn bind_scalar_array_buffer<'ctx>(
             .into_int_value()
         }
     };
+    let alias_scopes = ArrayAliasScopes::for_binding(fn_ctx, name);
     fn_ctx.scalar_array_buffers.insert(
         name.into(),
         ScalarArrayBuffer {
             data,
             length,
             element,
+            alias_scopes,
         },
     );
     Ok(())
@@ -479,25 +528,6 @@ fn checked_element_pointer<'ctx>(
     })
 }
 
-/// Emit an index expression, lowering its integer arithmetic unchecked when
-/// a versioned loop's preheader already proved the range.
-pub(crate) fn emit_index_expression<'ctx>(
-    fn_ctx: &mut FunctionContext<'ctx, '_>,
-    object: &Expr,
-    index: &Expr,
-) -> Result<TypedValue<'ctx>, crate::CodegenError> {
-    let trusted = buffer_for(fn_ctx, object).is_some()
-        && matches!(object, Expr::Variable { name } if index_is_trusted(fn_ctx.trusted_loop.as_ref(), index, name.lexeme()));
-    if !trusted {
-        return emit_expression(fn_ctx, index);
-    }
-    let previous = fn_ctx.int_arith_mode;
-    fn_ctx.int_arith_mode = IntArithMode::Unchecked;
-    let value = emit_expression(fn_ctx, index);
-    fn_ctx.int_arith_mode = previous;
-    value
-}
-
 pub(crate) fn read_scalar_array<'ctx>(
     fn_ctx: &mut FunctionContext<'ctx, '_>,
     object: &Expr,
@@ -517,6 +547,12 @@ pub(crate) fn read_scalar_array<'ctx>(
     let raw = fn_ctx
         .builder
         .build_load(fn_ctx.context.i64_type(), pointer, "scalar_array_load")?;
+    if let Some(scopes) = buffer.alias_scopes {
+        scopes.attach(
+            fn_ctx.context,
+            raw.as_instruction_value().expect("array element load"),
+        );
+    }
     let value = decode_array_scalar(fn_ctx, raw, &buffer.element)?;
     Ok(Some(TypedValue::new(value, buffer.element)))
 }
@@ -539,7 +575,10 @@ pub(crate) fn write_scalar_array<'ctx>(
         index_expression,
     )?;
     let raw = encode_array_scalar(fn_ctx, value)?;
-    fn_ctx.builder.build_store(pointer, raw)?;
+    let store = fn_ctx.builder.build_store(pointer, raw)?;
+    if let Some(scopes) = buffer.alias_scopes {
+        scopes.attach(fn_ctx.context, store);
+    }
     Ok(true)
 }
 
@@ -726,10 +765,8 @@ fn non_negative_literal(expression: &Expr) -> Option<u64> {
     u64::try_from(ntsc_ast::expr::parse_int_literal(text)?).ok()
 }
 
-/// Resolve `index` into `iv` plus loop-invariant addends, keeping the source
-/// order so the preheader evaluates exactly the same additions the loop body
-/// would. `None` means the index does not move one-for-one with the
-/// induction variable, so no range can be proven for it.
+/// Flatten an index for the modular range proof. The checked loop body
+/// still evaluates the original expression with its source grouping.
 fn resolve_index_addends<'a>(
     fn_ctx: &FunctionContext<'_, '_>,
     index: &'a Expr,
@@ -820,7 +857,12 @@ pub(crate) fn emit_versioned_while<'ctx>(
     };
 
     let previous_mode = fn_ctx.int_arith_mode;
-    fn_ctx.int_arith_mode = IntArithMode::Track;
+    // A speculative range calculation cannot throw. Unit-stride indices are
+    // proved modulo 2^64; the bounded-affine proof also needs overflow flags.
+    fn_ctx.int_arith_mode = match &plan {
+        VersionedLoop::Induction { .. } => IntArithMode::Unchecked,
+        VersionedLoop::Bounded { .. } => IntArithMode::Track,
+    };
     fn_ctx.tracked_overflow = None;
 
     let (proven, trusted) = match &plan {
@@ -904,7 +946,25 @@ pub(crate) fn emit_versioned_while<'ctx>(
     fn_ctx.builder.build_unconditional_branch(merge_bb)?;
 
     fn_ctx.builder.position_at_end(slow_bb);
-    emit_while(fn_ctx, condition, body)?;
+    if let Some(backedge) = emit_while(fn_ctx, condition, body)? {
+        // LLVM will optimize the fast version. Avoid spending a second round
+        // of loop transformations on the fallback with per-access checks.
+        let ctx = fn_ctx.context;
+        let option =
+            ctx.metadata_node(&[ctx.metadata_string("llvm.loop.disable_nonforced").into()]);
+        let loop_id = ctx.metadata_node(&[option.into(), option.into()]);
+        use inkwell::values::AsValueRef;
+        use llvm_sys::core::{LLVMReplaceMDNodeOperandWith, LLVMValueAsMetadata};
+        // LLVM loop IDs must reference themselves as their first operand.
+        // Both operands exist and belong to the same live LLVM context.
+        unsafe {
+            let node = loop_id.as_value_ref();
+            LLVMReplaceMDNodeOperandWith(node, 0, LLVMValueAsMetadata(node));
+        }
+        backedge
+            .set_metadata(loop_id, ctx.get_kind_id("llvm.loop"))
+            .expect("loop ID is a metadata node");
+    }
     fn_ctx.builder.build_unconditional_branch(merge_bb)?;
 
     fn_ctx.builder.position_at_end(merge_bb);
@@ -927,60 +987,67 @@ fn emit_induction_proof<'ctx>(
         .build_load(i64_ty, iv_ptr, "versioned_start")?
         .into_int_value();
     let limit = emit_expression(fn_ctx, limit)?.value.into_int_value();
-    let one = i64_ty.const_int(1, false);
-    let last_offset = emit_checked_int_arith(fn_ctx, IntArith::Sub, limit, one)?;
-    let mut ranges = Vec::with_capacity(accesses.len());
-    for access in accesses {
-        let mut first = zero;
-        let mut last = zero;
-        for addend in &access.addends {
-            let (first_addend, last_addend) = match addend {
-                IndexAddend::Induction => (start, last_offset),
-                IndexAddend::Invariant(expression) => {
-                    let value = emit_expression(fn_ctx, expression)?.value.into_int_value();
-                    (value, value)
-                }
-            };
-            first = emit_checked_int_arith(fn_ctx, IntArith::Add, first, first_addend)?;
-            last = emit_checked_int_arith(fn_ctx, IntArith::Add, last, last_addend)?;
-        }
-        ranges.push((first, last, access.length));
-    }
-
-    // An empty loop accesses nothing, so either version is correct.
-    let empty =
-        fn_ctx
-            .builder
-            .build_int_compare(IntPredicate::SGE, start, limit, "versioned_empty")?;
-    let mut range_ok = None;
-    for (first, last, length) in ranges {
-        let first_ok = fn_ctx.builder.build_int_compare(
-            IntPredicate::SGE,
-            first,
-            zero,
-            "versioned_first_ok",
-        )?;
-        let last_ok = fn_ctx.builder.build_int_compare(
-            IntPredicate::ULT,
-            last,
-            length,
-            "versioned_last_ok",
-        )?;
-        let in_range = fn_ctx
-            .builder
-            .build_and(first_ok, last_ok, "versioned_in_range")?;
-        range_ok = Some(match range_ok {
-            Some(previous) => fn_ctx
-                .builder
-                .build_and(previous, in_range, "versioned_range")?,
-            None => in_range,
-        });
-    }
-    let range_ok = range_ok
-        .ok_or_else(|| crate::CodegenError::LLVMError("versioned loop has no accesses".into()))?;
-    Ok(fn_ctx
+    // For a nonempty signed start..limit, the unsigned subtraction gives
+    // the exact trip count, even when the range crosses signed zero.
+    // An offset index walks consecutive positions modulo 2^64. All fit
+    // iff the buffer has room for the trip starting at the first index.
+    let trip = fn_ctx
         .builder
-        .build_or(empty, range_ok, "versioned_in_bounds")?)
+        .build_int_sub(limit, start, "versioned_trip")?;
+    let mut proven = fn_ctx.context.bool_type().const_all_ones();
+    for access in accesses {
+        let in_range = if access.addends.len() == 1 {
+            // The only addend is the induction variable itself.
+            let nonnegative = fn_ctx.builder.build_int_compare(
+                IntPredicate::SGE,
+                start,
+                zero,
+                "versioned_nonnegative",
+            )?;
+            let fits = fn_ctx.builder.build_int_compare(
+                IntPredicate::ULE,
+                limit,
+                access.length,
+                "versioned_limit_fits",
+            )?;
+            fn_ctx
+                .builder
+                .build_and(nonnegative, fits, "versioned_in_range")?
+        } else {
+            let mut first = start;
+            for addend in &access.addends {
+                if let IndexAddend::Invariant(expression) = addend {
+                    let offset = emit_expression(fn_ctx, expression)?.value.into_int_value();
+                    first = fn_ctx
+                        .builder
+                        .build_int_add(first, offset, "versioned_first")?;
+                }
+            }
+            let fits = fn_ctx.builder.build_int_compare(
+                IntPredicate::ULE,
+                trip,
+                access.length,
+                "versioned_trip_fits",
+            )?;
+            let room = fn_ctx
+                .builder
+                .build_int_sub(access.length, trip, "versioned_room")?;
+            let first_fits = fn_ctx.builder.build_int_compare(
+                IntPredicate::ULE,
+                first,
+                room,
+                "versioned_first_fits",
+            )?;
+            fn_ctx
+                .builder
+                .build_and(fits, first_fits, "versioned_in_range")?
+        };
+        proven = fn_ctx
+            .builder
+            .build_and(proven, in_range, "versioned_range")?;
+    }
+    // Both loop versions recheck the original condition on entry.
+    Ok(proven)
 }
 
 /// Emit the preheader proof for `E < bound`: the induction variable starts
@@ -1855,10 +1922,29 @@ mod tests {
         };
         let context = Context::create();
         let module = context.create_module("versioned_loop_ir");
-        declare_runtime_functions(&module, crate::host_triple());
+        declare_runtime_functions(&module, crate::host_triple(), true);
         let function = emit_function(&context, &module, name, params, return_type, body).unwrap();
         module.verify().unwrap();
         function.print_to_string().to_string()
+    }
+
+    #[test]
+    fn only_independent_local_array_accesses_get_alias_scopes() {
+        let ir = emit_ir(
+            r#"fun compute(array[int] input, int n) -> int {
+            var array[int] a = arrays.fill(0, n);
+            var array[int] b = arrays.fill(1, n);
+            a[0] = b[0] + input[0];
+            return a[0];
+        }"#,
+        );
+        let tagged: Vec<_> = ir
+            .lines()
+            .filter(|line| line.contains("!alias.scope"))
+            .collect();
+        assert_eq!(tagged.len(), 3, "{ir}");
+        assert!(tagged.iter().all(|line| line.contains("!noalias") && line.contains("ptr %scalar_array_element")), "{ir}");
+        assert!(ir.contains("call i64 @ntsc_array_get"), "{ir}");
     }
 
     #[test]
@@ -2035,7 +2121,7 @@ mod tests {
         };
         let context = Context::create();
         let module = context.create_module("scalar_array_ir");
-        declare_runtime_functions(&module, crate::host_triple());
+        declare_runtime_functions(&module, crate::host_triple(), true);
         let function = emit_function(&context, &module, name, params, return_type, body).unwrap();
         module.verify().unwrap();
         let ir = function.print_to_string().to_string();
@@ -2072,7 +2158,7 @@ mod tests {
         };
         let context = Context::create();
         let module = context.create_module("versioned_loop_ir");
-        declare_runtime_functions(&module, crate::host_triple());
+        declare_runtime_functions(&module, crate::host_triple(), true);
         let function = emit_function(&context, &module, name, params, return_type, body).unwrap();
         module.verify().unwrap();
         let ir = function.print_to_string().to_string();
@@ -2102,6 +2188,7 @@ mod tests {
             }"#,
         );
         assert!(ir.contains("while.versioned.fast"));
+        assert_eq!(ir.matches("!llvm.loop").count(), 1, "{ir}");
         // The fast body has no guard; the checked fallback and the
         // post-loop read keep one each.
         assert_eq!(ir.matches("scalar_array_out_of_bounds").count(), 4);
@@ -2253,7 +2340,7 @@ mod tests {
             };
             let context = Context::create();
             let module = context.create_module("checked_loop_ir");
-            declare_runtime_functions(&module, crate::host_triple());
+            declare_runtime_functions(&module, crate::host_triple(), true);
             let function =
                 emit_function(&context, &module, name, params, return_type, body).unwrap();
             module.verify().unwrap();

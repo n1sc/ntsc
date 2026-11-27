@@ -841,10 +841,6 @@ pub(crate) struct FunctionContext<'ctx, 'm> {
     variables: HashMap<String, (PointerValue<'ctx>, Ty)>,
     scalar_array_candidates: HashMap<String, Option<u64>>,
     scalar_array_buffers: HashMap<String, scalar_array::ScalarArrayBuffer<'ctx>>,
-    /// Class elements whose ownership was transferred into tuple locals.
-    /// Tuples are LLVM aggregates, so this metadata is needed when a tuple
-    /// is stored and destructured later.
-    tuple_class_elements: HashMap<String, HashSet<usize>>,
     return_type: Ty,
     context: &'ctx Context,
     break_targets: Vec<inkwell::basic_block::BasicBlock<'ctx>>,
@@ -935,15 +931,7 @@ pub(crate) struct FunctionContext<'ctx, 'm> {
     /// Local `var x = ClassName(...)` constructions whose instance never
     /// escapes or is aliased within the function. Their owned fields are
     /// reclaimed by the class drop thunk at scope exit.
-    class_drops: HashSet<String>,
-
-    /// Class constructions whose only escaping use is a `return`. On the
-    /// normal path the returned instance is moved to the caller and must not
-    /// be dropped; on the exception-return path nothing is handed to the
-    /// caller, so these instances are dropped there to avoid leaking the whole
-    /// tree when a function throws after constructing a value it would have
-    /// returned.
-    exception_class_drops: HashSet<String>,
+    stack_class_slots: HashSet<PointerValue<'ctx>>,
 
     /// Names of `var`-declared locals (or owned parameters) whose static
     /// type is a heap array or heap string: the slot is zero-initialized,
@@ -989,7 +977,6 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
             variables: HashMap::new(),
             scalar_array_candidates: HashMap::new(),
             scalar_array_buffers: HashMap::new(),
-            tuple_class_elements: HashMap::new(),
             return_type,
             context,
             break_targets: Vec::new(),
@@ -1015,8 +1002,7 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
             async_resume_blocks: Vec::new(),
             future_field_cache: HashMap::new(),
             stack_allocated: HashSet::new(),
-            class_drops: HashSet::new(),
-            exception_class_drops: HashSet::new(),
+            stack_class_slots: HashSet::new(),
             owned_slots: HashSet::new(),
             shadowed_owned_slots: Vec::new(),
             block_span_to_name: None,
@@ -1429,28 +1415,10 @@ impl<'ctx, 'm> FunctionContext<'ctx, 'm> {
         self.variables.get(name).map(|(ptr, ty)| (*ptr, ty))
     }
 
-    /// Register `name` as an owned slot if its type owns a heap allocation
-    /// (array, string, object, or shared box). View parameters, `this`, and
-    /// scalars are never owned. Class slots are owned only when escape
-    /// analysis proved the instance is not aliased; a borrowed class value
-    /// (an element read, a field read) must never be dropped.
+    /// Register a slot which has acquired ownership. Method receivers borrow.
     fn mark_owned_if_heap(&mut self, name: &str, ty: &Ty) {
-        let heap_owned = matches!(
-            ty,
-            Ty::Array(_)
-                | Ty::String
-                | Ty::Object
-                | Ty::Shared(_)
-                | Ty::Chan(_)
-                | Ty::Option(_)
-                | Ty::Result { .. }
-                | Ty::Pointer
-                | Ty::Slice(_)
-                | Ty::Own(_)
-                | Ty::Dyn(_)
-        ) || (matches!(ty, Ty::Class(class_name) if enum_cell::is_payload_enum(class_name) || self.class_drops.contains(name)));
-        if heap_owned {
-            self.owned_slots.insert(name.to_string());
+        if name != "this" && ty_is_owned_handle(ty) {
+            self.owned_slots.insert(name.to_owned());
         }
     }
 

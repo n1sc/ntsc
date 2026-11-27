@@ -322,6 +322,11 @@ fn link_unix(
         // needed for unwinding; only the debug/global symbol tables go away.
         .arg("-s");
 
+    // Each Rust runtime function has its own ELF section. Keep only the
+    // sections reachable from the executable and its native dependencies.
+    #[cfg(target_os = "linux")]
+    command.arg("-Wl,--gc-sections");
+
     // macOS links pthread and dl into libSystem, so the flags are
     // unnecessary there; on other Unix hosts they name real libraries.
     if !cfg!(target_os = "macos") {

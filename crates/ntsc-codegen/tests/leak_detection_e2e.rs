@@ -67,29 +67,30 @@ fn compile_run(
 }
 
 #[test]
-fn debug_build_warns_on_leaked_allocations() {
+fn aliased_class_releases_owned_fields() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
     let rewrite_dir = workspace.parent().unwrap().parent().unwrap();
 
-    // `var c = b` gives the instance a second name. The class-drop analysis
-    // rejects a candidate that is aliased, because either name could still read
-    // the fields and freeing them once per name would double-free them, so the
-    // fields are deliberately leaked instead. That makes this the positive
-    // control for the detector itself: a debug build must report the abandoned
-    // array.
     let source = r#"use arrays
 class Bag {
     var array[int] items
-
-    fun init() {
-        this.items = [1, 2]
-    }
+    var int count
+    fun init() { this.items = [1, 2]; }
+    fun alias() -> Bag { return this; }
 }
+class Holder { var Bag child; }
 
 fun main() -> int {
     var b = Bag()
     var c = b
-    say("aliased " + arrays.length(c.items))
+    var h = Holder()
+    h.child = c.alias()
+    var xs = [b]
+    arrays.push(xs, c)
+    xs[0] = h.child
+    b = Bag()
+    c.count = 42
+    say("aliased " + xs[1].count + "," + h.child.count + "," + arrays.length(c.items))
     return 0
 }
 "#;
@@ -99,20 +100,40 @@ fun main() -> int {
         source,
         inkwell::OptimizationLevel::None,
     );
-    assert!(
-        !ok,
-        "debug build must fail on leaked allocations, stderr was: {stderr:?}"
+    assert!(ok, "aliased class leaked: {stderr}");
+    assert_eq!(stdout.trim(), "aliased 42,42,2");
+    assert!(!stderr.contains("memory leak detected"));
+}
+
+#[test]
+fn debug_build_reports_an_unreleased_reference_cycle() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let source = r#"class Node {
+    var Node next
+    var array[int] data
+    fun init() { this.data = [1]; }
+}
+fun main() {
+    var node = Node();
+    node.next = node;
+}
+"#;
+    let (ok, _, stderr) = compile_run(
+        workspace,
+        "reference_cycle",
+        source,
+        inkwell::OptimizationLevel::None,
     );
-    assert_eq!(stdout.trim(), "aliased 2");
+    assert!(!ok, "expected the cycle to retain the array");
     assert!(
-        stderr.contains("error[NTSC-W0002]: memory leak detected:"),
-        "debug build must error on leaked allocations, stderr was: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("--> <source>:6:22")
-            && stderr.contains("array handle")
-            && stderr.contains("allocated here"),
-        "leak warning must identify the surviving registry object, stderr was: {stderr:?}"
+        stderr.contains("error[NTSC-W0002]")
+            && stderr.contains("allocated here")
+            && stderr.contains("array handle"),
+        "{stderr}"
     );
 }
 

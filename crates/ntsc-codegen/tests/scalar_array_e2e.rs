@@ -227,6 +227,90 @@ fun main() {
     );
 }
 
+#[test]
+fn unit_stride_proof_respects_wrapping_offsets_and_partial_writes() {
+    let source = r#"use arrays
+fun main() {
+    var array[int] a = arrays.fill(0, 2);
+    var int lo = -9223372036854775807 - 1;
+    var int i = lo;
+    try {
+        while (i < lo + 2) {
+            a[lo + i] = 7;
+            i = i + 1;
+        }
+    } catch (err) {
+        say("first: " + err)
+    }
+    say("initial: " + a[0] + "," + a[1])
+    i = lo;
+    try {
+        while (i < lo + 3) {
+            a[lo + i] = 9;
+            i = i + 1;
+        }
+    } catch (err) {
+        say("second: " + err)
+    }
+    say("final: " + a[0] + "," + a[1])
+    i = -1;
+    try {
+        while (i < 1) {
+            a[i + 0] = 13;
+            i = i + 1;
+        }
+    } catch (err) {
+        say("crossing: " + err)
+    }
+    say("after: " + a[0])
+}
+"#;
+    assert_eq!(
+        run("stride_wrap_debug", source),
+        "first: integer addition overflow\ninitial: 0,0\nsecond: integer addition overflow\nfinal: 0,0\ncrossing: array index out of bounds\nafter: 0"
+    );
+    assert_eq!(
+        run_with_optimization(
+            "stride_wrap_release",
+            source,
+            inkwell::OptimizationLevel::Aggressive
+        ),
+        "initial: 7,7\nsecond: array index out of bounds\nfinal: 9,9\ncrossing: array index out of bounds\nafter: 9"
+    );
+}
+
+#[test]
+fn proving_an_index_in_range_preserves_grouped_arithmetic_errors() {
+    let source = r#"use arrays
+fun main() {
+    var array[int] a = arrays.fill(0, 1);
+    var int hi = 9223372036854775807;
+    var int i = -9223372036854775807 - 1;
+    try {
+        while (i < -9223372036854775807) {
+            a[i + (hi + 1)] = 7;
+            i = i + 1;
+        }
+    } catch (err) {
+        say(err)
+    }
+    say("value: " + a[0])
+}
+"#;
+    assert_eq!(
+        run("grouped_index_debug", source),
+        "integer addition overflow\nvalue: 0"
+    );
+    assert_eq!(
+        run_with_optimization(
+            "grouped_index_release",
+            source,
+            inkwell::OptimizationLevel::Aggressive
+        ),
+        "value: 7"
+    );
+}
+
 /// A base-offset index (`row * n + col`) is proven as a range, not per access.
 #[test]
 fn affine_base_offsets_are_versioned_without_changing_results() {

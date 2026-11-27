@@ -393,7 +393,7 @@ leak. `ntsc_runtime_shutdown(report)` runs after `main` returns, and when
 prints:
 
 ```
-NTSC WARNING: Memory leak detected! N registry object(s) leaked.
+error[NTSC-W0002]: memory leak detected: N owned object(s) not released
 ```
 
 String literals and other compile-time constants are registered as permanent
@@ -402,19 +402,20 @@ Runtime assertions and panics write `NTSC PANIC: message` to stderr and abort.
 
 ## Every heap allocation and its free
 
-Every heap allocation site is statically paired with exactly one owning drop
-path. A leak can only happen when the runtime machinery frees an object it
-borrowed instead of owned (a codegen bug, guarded against by regression
-tests), or when the program design accepts the leak itself (the last rows).
+Each owning location has a corresponding drop operation. Ordinary class
+assignment gives the destination another reference to the same instance.
+Returning a class gives the caller a reference that survives the callee's
+cleanup. A cycle of strong references keeps the participating instances alive
+until the program breaks the cycle.
 
 | Allocation (site) | Freed by |
 | --- | --- |
 | Option cells — codegen `box_option_value`, adaptor `_ntsc_option_cell` for returns | `option_free` on every owned option-slot drop; `0` is the `none` handle and allocates nothing |
 | Result cells — codegen `allocate_result_cell` | `free_result_cell` after payload extraction |
-| `own` boxes (`alloc(value)`) — codegen `emit_box_value` | the `Ty::Own` drop arm (thunk + `free`) |
-| Class instances — codegen `class_alloc`, escape analysis stack-allocates non-escaping ones | class drop thunks for provably non-escaping instances; **escaping or aliased instances are never freed by design** (freed-twice is worse than leaked) |
-| Class field copies — codegen `class_copy` | the standard class drop; recursive copies are rejected statically |
-| `dyn` headers — codegen `dyn_header_alloc` | the vtable slot-0 wrapper frees header + object |
+| `own` boxes (`alloc(value)`) | The owner drops the payload and frees the box. An owning class pointer releases its instance directly. |
+| Heap class instances allocated by `ntsc_class_alloc` | The final `ntsc_class_release` invokes the concrete class destructor and frees the allocation. Stack-allocated instances run the field destructor at scope exit. |
+| Class copies produced by `copy(instance)` | Each new instance has its own reference count and concrete destructor. |
+| `dyn` headers allocated by `dyn_header_alloc` | The drop path releases the wrapped instance through its vtable and frees the header. |
 | `go` futures — codegen `go_future_alloc` | the trampoline at completion; the scheduler cleanup thunk at shutdown for abandoned goroutines |
 | Registry regions (`memory.alloc`, 16 MiB cap) | explicit `memory.drop`, or the owning pointer's scope drop |
 | Bridge option cells for Rust→Neutron callback params | the Neutron callback slot's option drop is the single free (see [rust-autogen](rust-autogen.md)) |

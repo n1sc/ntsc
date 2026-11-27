@@ -1335,6 +1335,7 @@ pub(crate) fn emit_call<'ctx>(
                 .into_iter()
                 .next()
                 .ok_or_else(|| crate::CodegenError::LLVMError("alloc expects 1 argument".into()))?;
+            acquire_class_value(fn_ctx, &arguments[0], &value)?;
             return emit_box_value(fn_ctx, value);
         }
 
@@ -1367,6 +1368,7 @@ pub(crate) fn emit_call<'ctx>(
                 && ty_is_owned_handle(&payload_ty)
             {
                 fn_ctx.null_var_slot(name.lexeme());
+                acquire_class_value(fn_ctx, &arguments[0], &payload)?;
                 moved = true;
             }
             if !moved
@@ -1799,6 +1801,12 @@ pub(crate) fn emit_call<'ctx>(
                 {
                     arg_values[0] = deref_shared(fn_ctx, first)?;
                 }
+                if prop_name == "push"
+                    && arg_values.len() == 2
+                    && has_class_reference(&array_elem_ty(&arg_values[0].ntsc_type))
+                {
+                    acquire_class_value(fn_ctx, &arguments[1], &arg_values[1])?;
+                }
                 let result = emit_rc_array_op(fn_ctx, prop_name, &arg_values)?;
 
                 let param_types = array_op_param_types(prop_name, &arg_values);
@@ -2034,6 +2042,9 @@ pub(crate) fn emit_call<'ctx>(
             let ret_val = call_result_to_value(fn_ctx, &result);
             emit_drop_borrowed_fresh_args(fn_ctx, &arguments, &arg_values, &method_param_tys)?;
 
+            if expr_is_fresh(fn_ctx, object, &obj_val) && has_class_reference(&obj_val.ntsc_type) {
+                emit_drop_value(fn_ctx, &obj_val)?;
+            }
             let ret_ty = class_method_ret_ty(&declaring, prop_name)
                 .filter(|ty| *ty != Ty::Void)
                 .or_else(|| fn_val.get_type().get_return_type().map(llvm_ret_ty_to_ty))

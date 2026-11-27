@@ -99,8 +99,6 @@ pub fn build_adaptors_with_native_links(
         archives.push(archive);
         collect_native_link_args(&out_dir, profile, &mut native_link_args);
     }
-    native_link_args.sort();
-    native_link_args.dedup();
     Ok(AdaptorArtifacts {
         archives,
         native_link_args,
@@ -226,8 +224,6 @@ fn build_adaptor_bundle(
     crate::cache::touch_last_use(&out_dir)?;
     let mut native_link_args = Vec::new();
     collect_native_link_args(&out_dir, profile, &mut native_link_args);
-    native_link_args.sort();
-    native_link_args.dedup();
     Ok(AdaptorArtifacts {
         archives: vec![archive],
         native_link_args,
@@ -316,8 +312,12 @@ fn collect_native_link_args(out_dir: &Path, profile: &str, args: &mut Vec<String
     let Ok(entries) = std::fs::read_dir(build_dir) else {
         return;
     };
-    for entry in entries.flatten() {
-        let output = entry.path().join("output");
+    let mut outputs: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path().join("output"))
+        .collect();
+    outputs.sort();
+    for output in outputs {
         let Ok(text) = std::fs::read_to_string(output) else {
             continue;
         };
@@ -789,17 +789,17 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
         std::fs::write(
             root.join("debug/build/native/output"),
-            "cargo:rustc-link-search=native=/tmp/native\ncargo:rustc-link-lib=static=codec\ncargo:rustc-link-lib=m\n",
+            "cargo:rustc-link-search=native=/tmp/native\ncargo:rustc-link-lib=m\ncargo:rustc-link-lib=static=codec\ncargo:rustc-link-lib=m\n",
         )
         .unwrap();
 
         let mut args = Vec::new();
         collect_native_link_args(&root, "debug", &mut args);
-        args.sort();
         assert_eq!(
             args,
             vec![
                 "-L/tmp/native".to_string(),
+                "-lm".to_string(),
                 "-l:libcodec.a".to_string(),
                 "-lm".to_string()
             ]

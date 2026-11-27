@@ -283,6 +283,7 @@ pub(crate) fn box_enum_value<'ctx>(
 
     for (index, (value, slot_ty)) in values.iter().zip(payload.iter()).enumerate() {
         let coerced = coerce_value(fn_ctx, value.clone(), slot_ty)?;
+        acquire_class_value(fn_ctx, &arguments[index], &coerced)?;
         let stored = if matches!(slot_ty, Ty::String)
             && arguments.get(index).is_some_and(expr_is_string_literal)
         {

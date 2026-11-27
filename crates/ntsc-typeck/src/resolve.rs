@@ -246,13 +246,8 @@ struct ClassInfo {
     /// Declared field types by name.
     fields: HashMap<String, Ty>,
 
-    /// Method names. Their signatures are not modelled here, so a method
-    /// reference stays `any` and its call is unchecked.
-    methods: HashSet<String>,
-
-    /// Operator method names to their declared return types.
-    /// Populated for methods whose name is an operator symbol (+, -, etc.).
-    operator_returns: HashMap<String, Ty>,
+    /// Declared callable types, excluding the implicit receiver.
+    methods: HashMap<String, Ty>,
 }
 
 /// Declared enum variants in declaration order: the variant name and its
@@ -610,8 +605,7 @@ impl TypeChecker {
             let mut info = ClassInfo {
                 parent: parent.as_ref().map(|p| p.lexeme().to_string()),
                 fields: HashMap::new(),
-                methods: HashSet::new(),
-                operator_returns: HashMap::new(),
+                methods: HashMap::new(),
             };
             for member in body {
                 match member {
@@ -638,21 +632,32 @@ impl TypeChecker {
                         info.fields.insert(field.lexeme().to_string(), ty);
                     }
                     Stmt::Function {
-                        name: method,
+                        name,
+                        params,
                         return_type,
                         ..
                     }
                     | Stmt::AsyncFunction {
-                        name: method,
+                        name,
+                        params,
                         return_type,
                         ..
                     } => {
-                        let lexeme = method.lexeme().to_string();
-                        info.methods.insert(lexeme.clone());
-                        if is_operator_name(&lexeme) {
-                            let ret = self.resolve_annotation(return_type.as_ref().map(|r| &r.ty));
-                            info.operator_returns.insert(lexeme, ret);
-                        }
+                        let params = params
+                            .iter()
+                            .map(|param| self.resolve_annotation(param.type_annotation.as_ref()))
+                            .collect();
+                        let result = return_type
+                            .as_ref()
+                            .map(|r| self.resolve_annotation(Some(&r.ty)))
+                            .unwrap_or(Ty::Void);
+                        info.methods.insert(
+                            name.lexeme().into(),
+                            Ty::Function {
+                                params,
+                                return_type: Box::new(result),
+                            },
+                        );
                     }
                     _ => {}
                 }
@@ -676,7 +681,7 @@ impl TypeChecker {
             if info.fields.contains_key(property) {
                 return true;
             }
-            if info.methods.contains(property) {
+            if info.methods.contains_key(property) {
                 return false;
             }
             current = info.parent.as_deref();
@@ -698,17 +703,14 @@ impl TypeChecker {
                 break;
             };
             names.extend(info.fields.keys().cloned());
-            names.extend(info.methods.iter().cloned());
+            names.extend(info.methods.keys().cloned());
             current = info.parent.as_deref();
         }
         names
     }
 
-    /// The declared type of `property` read off an instance of `class_name`,
-    /// walking the `extends` chain. `None` when the class is unknown, when
-    /// the property is a method, or when no declaration names it — those
-    /// keep the old `any` behavior instead of becoming an error.
-    fn class_field_ty(&self, class_name: &str, property: &str) -> Option<Ty> {
+    /// Look up a field or callable signature through the inheritance chain.
+    fn class_member_ty(&self, class_name: &str, property: &str) -> Option<Ty> {
         let mut current = Some(class_name);
 
         let mut seen: HashSet<&str> = HashSet::new();
@@ -723,8 +725,8 @@ impl TypeChecker {
             if let Some(ty) = info.fields.get(property) {
                 return Some(ty.clone());
             }
-            if info.methods.contains(property) {
-                return None;
+            if let Some(signature) = info.methods.get(property) {
+                return Some(signature.clone());
             }
             current = info.parent.as_deref();
         }
@@ -756,7 +758,7 @@ impl TypeChecker {
         })
     }
 
-    fn member_ty(&mut self, object: &Expr, property: &Token) -> Ty {
+    fn member_ty(&mut self, object: &Expr, property: &Token, called: bool) -> Ty {
         let object_ty = self.check_expression(object);
         if let Some(Ty::Class(enum_name)) = &object_ty {
             let enum_name = enum_name.clone();
@@ -787,7 +789,8 @@ impl TypeChecker {
         object_ty
             .as_ref()
             .and_then(base_class_name)
-            .and_then(|class| self.class_field_ty(class, property.lexeme()))
+            .filter(|class| called || self.class_declares_field(class, property.lexeme()))
+            .and_then(|class| self.class_member_ty(class, property.lexeme()))
             .unwrap_or(Ty::Any)
     }
 
@@ -856,22 +859,10 @@ impl TypeChecker {
     /// walking the `extends` chain. Returns `None` when the class does not
     /// define the operator.
     fn lookup_operator_return(&self, class_name: &str, op: &str) -> Option<Ty> {
-        let mut current = Some(class_name);
-        let mut seen: HashSet<&str> = HashSet::new();
-        while let Some(name) = current {
-            if !seen.insert(name) {
-                break;
-            }
-            if let Some(info) = self.classes.get(name) {
-                if let Some(ret) = info.operator_returns.get(op) {
-                    return Some(ret.clone());
-                }
-                current = info.parent.as_deref();
-            } else {
-                break;
-            }
+        match self.class_member_ty(class_name, op)? {
+            Ty::Function { return_type, .. } => Some(*return_type),
+            _ => None,
         }
-        None
     }
 
     /// Check a destructuring match arm: the variant must exist on the
@@ -2697,8 +2688,10 @@ impl TypeChecker {
                 }
                 Some(Ty::Object)
             }
-            Expr::Member { object, property } => Some(self.member_ty(object, property)),
-            Expr::OptionalMember { object, property } => Some(self.member_ty(object, property)),
+            Expr::Member { object, property } => Some(self.member_ty(object, property, false)),
+            Expr::OptionalMember { object, property } => {
+                Some(self.member_ty(object, property, false))
+            }
             Expr::IndexGet { object, index } => {
                 let obj_ty = self.check_expression(object);
                 self.check_index(index);
@@ -2813,7 +2806,8 @@ impl TypeChecker {
                 if let Some(declared) = object_ty
                     .as_ref()
                     .and_then(base_class_name)
-                    .and_then(|class| self.class_field_ty(class, property.lexeme()))
+                    .filter(|class| self.class_declares_field(class, property.lexeme()))
+                    .and_then(|class| self.class_member_ty(class, property.lexeme()))
                     && let Some(vt) = &val_ty
                     && !declared.is_assignable_from(vt)
                 {
@@ -4208,7 +4202,11 @@ impl TypeChecker {
             }
         }
 
-        let callee_ty = self.check_expression(callee);
+        let callee_ty = if let Expr::Member { object, property } = callee {
+            Some(self.member_ty(object, property, true))
+        } else {
+            self.check_expression(callee)
+        };
         match callee_ty {
             Some(Ty::Function {
                 params,
@@ -4508,6 +4506,7 @@ fn array_signature(method: &str, arguments: &[Option<Ty>]) -> Option<(Vec<Ty>, T
         "remove" => (vec![array.clone(), element], array),
         "remove_at" => (vec![array.clone(), Ty::Int], array),
         "slice" => (vec![array.clone(), Ty::Int, Ty::Int], array),
+        "flat" if matches!(element, Ty::Array(_)) => (vec![array], element),
         "reverse" | "sort" | "clone" | "flat" | "shuffle" | "clear" => (vec![array.clone()], array),
         "join" => (vec![array, Ty::String], Ty::String),
         "every" | "some" => (
@@ -4546,14 +4545,6 @@ fn op_lexeme(kind: &TokenKind) -> &'static str {
         TokenKind::Or | TokenKind::OrSym => "||",
         _ => "?",
     }
-}
-
-/// Whether a method name is an operator symbol that may be overloaded.
-fn is_operator_name(name: &str) -> bool {
-    matches!(
-        name,
-        "+" | "-" | "*" | "/" | "%" | "!" | "==" | "!=" | "<" | "<=" | ">" | ">="
-    )
 }
 
 /// Map a binary operator token kind to the operator method name used for
@@ -4942,6 +4933,26 @@ fun main() -> int { unsafe { return abs(-1) } }"#,
     #[test]
     fn function_params_and_return() {
         assert!(check_source("fun add(int a, int b) -> int { return a + b }").is_ok());
+    }
+
+    #[test]
+    fn inherited_method_calls_check_arity_arguments_and_result() {
+        let decl =
+            "class Base { fun add(int n) -> int { return n + 1; } } class Counter extends Base {}";
+        for (call, expected) in [
+            ("c.add()", "expects 1 argument"),
+            ("c.add(true)", "expected `int`, got `bool`"),
+            ("var bool b = c.add(1)", "expected `bool`, got `int`"),
+        ] {
+            let errors = check_source(&format!(
+                "{decl} fun main() {{ var c = Counter(); {call}; }}"
+            ))
+            .unwrap_err();
+            assert!(
+                errors.iter().any(|error| error.message.contains(expected)),
+                "{errors:?}"
+            );
+        }
     }
 
     #[test]

@@ -46,17 +46,18 @@ pub(crate) fn emit_expression<'ctx>(
             let fresh_receiver = matches!(obj_val.ntsc_type, Ty::Class(_) | Ty::Own(_))
                 && expr_is_fresh(fn_ctx, object, &obj_val);
             let obj_val = deref_shared(fn_ctx, obj_val)?;
-            let member = emit_member_access(fn_ctx, &obj_val, property)?;
+            let mut member = emit_member_access(fn_ctx, &obj_val, property)?;
             if fresh_receiver {
-                // Move the selected field out before reclaiming its temporary
-                // owner; cloning a container could still alias its class elements.
-                if ty_is_owned_handle(&member.ntsc_type)
-                    && let Some(gep) = emit_member_gep(fn_ctx, &obj_val, property)?
-                {
-                    fn_ctx.builder.build_store(
-                        gep.ptr,
-                        default_llvm_value(&gep.field_ty, fn_ctx.context),
-                    )?;
+                if has_class_reference(&member.ntsc_type) {
+                    adjust_class_references(fn_ctx, &member, true)?;
+                } else if ty_is_owned_handle(&member.ntsc_type) {
+                    member = if matches!(member.ntsc_type, Ty::Shared(_)) {
+                        let retain = fn_ctx.module.get_function("ntsc_shared_retain").expect("runtime declaration");
+                        fn_ctx.builder.build_call(retain, &[member.value.into()], "")?;
+                        member
+                    } else {
+                        emit_copy_value(fn_ctx, member)?
+                    };
                 }
                 emit_drop_value(fn_ctx, &obj_val)?;
             }
@@ -83,7 +84,7 @@ pub(crate) fn emit_expression<'ctx>(
         Expr::IndexGet { object, index } => {
             let obj_val = emit_expression(fn_ctx, object)?;
             let obj_val = deref_shared(fn_ctx, obj_val)?;
-            let idx_val = super::scalar_array::emit_index_expression(fn_ctx, object, index)?;
+            let idx_val = emit_expression(fn_ctx, index)?;
             if let Some(value) = super::scalar_array::read_scalar_array(
                 fn_ctx,
                 object,
@@ -189,9 +190,10 @@ pub(crate) fn emit_expression<'ctx>(
             value,
         } => {
             let val = emit_expression(fn_ctx, value)?;
+            let pending = hold_class_operand(fn_ctx, value, &val)?;
             let obj_val = emit_expression(fn_ctx, object)?;
             let obj_val = deref_shared(fn_ctx, obj_val)?;
-            let idx_val = super::scalar_array::emit_index_expression(fn_ctx, object, index)?;
+            let idx_val = emit_expression(fn_ctx, index)?;
             if super::scalar_array::write_scalar_array(
                 fn_ctx,
                 object,
@@ -206,7 +208,7 @@ pub(crate) fn emit_expression<'ctx>(
             // their container, but `ntsc_array_set` only reclaims the
             // replaced element when it is a string. Read the old element
             // first so it can be reclaimed after the overwrite.
-            let old_val = if matches!(val.ntsc_type, Ty::Array(_) | Ty::Option(_) | Ty::Shared(_)) {
+            let old_val = if has_class_reference(&val.ntsc_type) || matches!(val.ntsc_type, Ty::Array(_) | Ty::Option(_) | Ty::Shared(_)) {
                 let get_fn = fn_ctx
                     .module
                     .get_function("ntsc_array_get")
@@ -275,6 +277,9 @@ pub(crate) fn emit_expression<'ctx>(
             )?;
 
             fn_ctx.emit_pending_exception_check()?;
+            if let Some(slot) = pending {
+                fn_ctx.builder.build_store(slot, default_llvm_value(&val.ntsc_type, fn_ctx.context))?;
+            }
             // `ntsc_array_set` deep-copies a string element into a fresh
             // handle owned by the array (reclaiming the old one) and
             // replaces scalar elements by value, so the caller's value is
@@ -288,10 +293,17 @@ pub(crate) fn emit_expression<'ctx>(
         Expr::TupleLiteral { elements, .. } => {
             let mut elem_vals = Vec::new();
             let mut elem_tys = Vec::new();
+            let mut pending = Vec::new();
             for elem in elements {
                 let val = emit_expression(fn_ctx, elem)?;
+                if let Some(slot) = hold_class_operand(fn_ctx, elem, &val)? {
+                    pending.push((slot, val.ntsc_type.clone()));
+                }
                 elem_vals.push(val.value);
                 elem_tys.push(val.ntsc_type.clone());
+            }
+            for (slot, ty) in pending {
+                fn_ctx.builder.build_store(slot, default_llvm_value(&ty, fn_ctx.context))?;
             }
             let ty = Ty::Tuple(elem_tys);
             let ll_ty = ty_to_llvm(&ty, fn_ctx.context);
@@ -325,7 +337,12 @@ pub(crate) fn emit_expression<'ctx>(
                         *index as u32,
                         "tuple_idx",
                     )?;
-                    return Ok(TypedValue::new(extracted, element_ty));
+                    let result = TypedValue::new(extracted, element_ty);
+                    adjust_class_references(fn_ctx, &result, true)?;
+                    if expr_is_fresh(fn_ctx, object, &obj_val) {
+                        emit_drop_value(fn_ctx, &obj_val)?;
+                    }
+                    return Ok(result);
                 }
             }
             Err(crate::CodegenError::LLVMError(format!(
@@ -462,11 +479,18 @@ pub(crate) fn emit_expression<'ctx>(
 
             // Emit all elements first so their types select the element
             // size and string flag.
-            let elem_values: Vec<TypedValue<'ctx>> = flat
-                .iter()
-                .map(|e| emit_expression(fn_ctx, e))
-                .collect::<Result<_, _>>()?;
-
+            let mut elem_values = Vec::with_capacity(flat.len());
+            let mut pending = Vec::new();
+            for expr in &flat {
+                let val = emit_expression(fn_ctx, expr)?;
+                if let Some(slot) = hold_class_operand(fn_ctx, expr, &val)? {
+                    pending.push((slot, val.ntsc_type.clone()));
+                }
+                elem_values.push(val);
+            }
+            for (slot, ty) in pending {
+                fn_ctx.builder.build_store(slot, default_llvm_value(&ty, fn_ctx.context))?;
+            }
             let elem_ty = match flat.first() {
                 Some(_) => elem_values[0].ntsc_type.clone(),
                 None => Ty::Any,
@@ -867,7 +891,13 @@ pub(crate) fn emit_expression<'ctx>(
                 .map(|u| emit_expression(fn_ctx, u))
                 .transpose()?;
 
-            if fn_ctx
+            let base_slot = if let (Some(base), Some(value)) = (update, &update_val) {
+                hold_class_operand(fn_ctx, base, value)?
+            } else { None };
+            // The base is held throughout construction. Reads of its fields
+            // are borrows regardless of how the base expression was written.
+            let borrowed_base = Box::new(Expr::Variable { name: class_name.clone() });
+            let result = if fn_ctx
                 .module
                 .get_function(&format!("{class_name_str}.init"))
                 .is_some()
@@ -887,8 +917,7 @@ pub(crate) fn emit_expression<'ctx>(
                         let val = emit_expression(fn_ctx, &prop.value)?;
                         args.push(prop.value.clone());
                         arg_values.push(val);
-                    } else if let (Some(update_expr), Some(update_val)) =
-                        (update.as_ref(), update_val.as_ref())
+                    } else if let Some(update_val) = &update_val
                     {
                         let field_token = ntsc_ast::token::Token::new(
                             ntsc_ast::token::TokenKind::Identifier(field_name.clone()),
@@ -896,13 +925,13 @@ pub(crate) fn emit_expression<'ctx>(
                         );
                         let val = emit_member_access(fn_ctx, update_val, &field_token)?;
                         args.push(Expr::Member {
-                            object: update_expr.clone(),
+                            object: borrowed_base.clone(),
                             property: field_token,
                         });
                         arg_values.push(val);
                     }
                 }
-                emit_class_constructor(fn_ctx, struct_ty, class_name_str, &args, &arg_values, None)
+                emit_class_constructor(fn_ctx, struct_ty, class_name_str, &args, &arg_values, None)?
             } else {
                 // No `init`: allocate a zeroed instance and assign the named
                 // fields directly. Fields missing from the literal are
@@ -910,6 +939,7 @@ pub(crate) fn emit_expression<'ctx>(
                 // handles so both instances stay independent).
                 let obj_val =
                     emit_class_constructor(fn_ctx, struct_ty, class_name_str, &[], &[], None)?;
+                let instance_slot = hold_class_operand(fn_ctx, expr, &obj_val)?;
                 for prop in fields {
                     let val = emit_expression(fn_ctx, &prop.value)?;
                     let field_token = ntsc_ast::token::Token::new(
@@ -920,8 +950,7 @@ pub(crate) fn emit_expression<'ctx>(
                         store_into_field(fn_ctx, &gep, &prop.value, &val)?;
                     }
                 }
-                if let (Some(update_expr), Some(update_val)) =
-                    (update.as_ref(), update_val.as_ref())
+                if let Some(update_val) = &update_val
                 {
                     let declared_fields = class_all_fields(class_name_str);
                     for field_name in &declared_fields {
@@ -936,20 +965,34 @@ pub(crate) fn emit_expression<'ctx>(
                             continue;
                         };
                         let read = emit_member_access(fn_ctx, update_val, &field_token)?;
-                        let copied = copy_owned_value(fn_ctx, &read)?;
+                        let copied = if has_class_reference(&read.ntsc_type) {
+                            read
+                        } else {
+                            copy_owned_value(fn_ctx, &read)?
+                        };
                         store_into_field(
                             fn_ctx,
                             &gep,
                             &Expr::Member {
-                                object: update_expr.clone(),
+                                object: borrowed_base.clone(),
                                 property: field_token,
                             },
                             &copied,
                         )?;
                     }
                 }
-                Ok(obj_val)
+                if let Some(slot) = instance_slot {
+                    fn_ctx.builder.build_store(slot, default_llvm_value(&obj_val.ntsc_type, fn_ctx.context))?;
+                }
+                obj_val
+            };
+            if let Some(value) = update_val && has_class_reference(&value.ntsc_type) {
+                emit_drop_value(fn_ctx, &value)?;
+                if let Some(slot) = base_slot {
+                    fn_ctx.builder.build_store(slot, default_llvm_value(&value.ntsc_type, fn_ctx.context))?;
+                }
             }
+            Ok(result)
         }
         Expr::ChanSend { .. } | Expr::ChanRecv { .. } => {
             Err(crate::CodegenError::LLVMError(
@@ -1340,6 +1383,11 @@ pub(crate) fn emit_copy_value<'ctx>(
                 )?
                 .try_as_basic_value()
                 .unwrap_basic();
+            let pointee = if matches!(inner.as_ref(), Ty::Class(_)) {
+                class_instance_pointer(fn_ctx, pointee)?.into()
+            } else {
+                pointee
+            };
             return emit_copy_value(fn_ctx, TypedValue::new(pointee, (**inner).clone()));
         }
 
@@ -1349,7 +1397,10 @@ pub(crate) fn emit_copy_value<'ctx>(
             return Ok(tv);
         }
         // Tuples are stack-allocated value types — no deep copy needed.
-        Ty::Tuple(_) => return Ok(tv),
+        Ty::Tuple(_) => {
+            adjust_class_references(fn_ctx, &tv, true)?;
+            return Ok(tv);
+        }
         Ty::Class(name) => {
             if super::enum_cell::is_payload_enum(name) {
                 return super::enum_cell::emit_copy_enum_value(fn_ctx, name, &tv);
@@ -1503,26 +1554,7 @@ pub(crate) fn emit_copy_class_fields<'ctx>(
     let size = struct_ty.size_of().ok_or_else(|| {
         crate::CodegenError::LLVMError(format!("struct type `{class_name}` has no size"))
     })?;
-    let alloc_fn = fn_ctx
-        .module
-        .get_function("malloc")
-        .ok_or_else(|| crate::CodegenError::LLVMError("malloc not declared".into()))?;
-    let copy = fn_ctx
-        .builder
-        .build_call(
-            alloc_fn,
-            &[BasicMetadataValueEnum::IntValue(size)],
-            "class_copy",
-        )?
-        .try_as_basic_value()
-        .unwrap_basic()
-        .into_pointer_value();
-
-    // `malloc` hands back uninitialized memory. Zero it first so a field
-    // that is skipped below (one whose name does not resolve) holds a null
-    // pointer rather than garbage the drop path would later follow.
-    let zero = fn_ctx.context.i8_type().const_zero();
-    fn_ctx.builder.build_memset(copy, 1, zero, size)?;
+    let copy = allocate_class(fn_ctx, class_name, size)?;
 
     let source_val = TypedValue::new(source.into(), tv.ntsc_type.clone());
     let field_names = class_all_fields(class_name);

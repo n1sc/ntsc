@@ -2479,7 +2479,9 @@ pub(crate) fn emit_async_return_statement<'ctx>(
     let value = if let Some(expr) = value {
         let value = emit_expression(fn_ctx, expr)?;
         let value = coerce_value(fn_ctx, value, &layout.ret_ty)?;
-        if let Expr::Variable { name } = expr
+        if has_class_reference(&value.ntsc_type) {
+            acquire_class_value(fn_ctx, expr, &value)?;
+        } else if let Expr::Variable { name } = expr
             && ty_is_owned_handle(&value.ntsc_type)
             && let Some((slot, _)) = fn_ctx.variables.get(name.lexeme())
         {

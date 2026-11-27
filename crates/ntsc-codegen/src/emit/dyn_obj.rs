@@ -99,12 +99,10 @@ fn get_or_create_dyn_drop_wrapper<'ctx>(
     let obj = function
         .get_nth_param(0)
         .ok_or_else(|| crate::CodegenError::LLVMError("drop wrapper has no param".into()))?;
-    let thunk = super::drop::get_or_create_class_drop_thunk(module, context, class_name)?;
-    builder.build_call(thunk, &[obj.into()], "dyn_drop_fields")?;
-    let free_fn = module
-        .get_function("free")
-        .ok_or_else(|| crate::CodegenError::LLVMError("free not declared".into()))?;
-    builder.build_call(free_fn, &[obj.into()], "dyn_drop_free")?;
+    let release = module
+        .get_function("ntsc_class_release")
+        .expect("runtime declaration");
+    builder.build_call(release, &[obj.into()], "")?;
     builder.build_return(None)?;
     Ok(function)
 }

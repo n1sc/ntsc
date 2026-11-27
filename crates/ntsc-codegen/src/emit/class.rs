@@ -161,9 +161,6 @@ pub(crate) fn emit_class<'ctx>(
             fn_ctx.stack_allocated = analyze_stack_allocatable(method_body, module);
             fn_ctx.scalar_array_candidates =
                 super::scalar_array::nonescaping_scalar_arrays(method_body, &all_params);
-            fn_ctx.class_drops = analyze_class_drops(method_body, module, &all_params);
-            fn_ctx.exception_class_drops =
-                analyze_return_escape_class_drops(method_body, module, &all_params);
 
             for (i, param) in all_params.iter().enumerate() {
                 let pty = &param_tys[i];
@@ -194,7 +191,7 @@ pub(crate) fn emit_class<'ctx>(
             let current_block = fn_ctx.builder.get_insert_block().unwrap();
             if current_block.get_terminator().is_none() {
                 fn_ctx.emit_defers_to(0)?;
-                drop_unreturned_escape_class_locals(&mut fn_ctx, &[])?;
+
                 emit_drop_all_owned(&mut fn_ctx)?;
                 match &ret_ty {
                     Ty::Void => {
@@ -286,20 +283,22 @@ pub(crate) fn emit_top_level_var<'ctx>(
         context,
     );
 
+    let value = initializer
+        .as_ref()
+        .map(|expr| emit_expression(&mut fn_ctx, expr))
+        .transpose()?;
+    let ty = if type_annotation.is_none() {
+        value.as_ref().map_or(ty, |val| val.ntsc_type.clone())
+    } else {
+        ty
+    };
     let ptr = fn_ctx.alloca(name.lexeme(), &ty)?;
-    if let Some(init_expr) = initializer {
-        let init_val = emit_expression(&mut fn_ctx, init_expr)?;
-
-        let store_ty = if type_annotation.is_some() {
-            ty.clone()
-        } else {
-            init_val.ntsc_type.clone()
-        };
-        if store_into_owned_slot(&mut fn_ctx, ptr, &store_ty, init_expr, &init_val)? {
-            fn_ctx.mark_owned_if_heap(name.lexeme(), &store_ty);
-        }
+    fn_ctx.define_var(name.lexeme(), ptr, ty.clone());
+    if let (Some(expr), Some(value)) = (initializer, value)
+        && store_into_owned_slot(&mut fn_ctx, ptr, &ty, expr, &value)?
+    {
+        fn_ctx.mark_owned_if_heap(name.lexeme(), &ty);
     }
-    fn_ctx.define_var(name.lexeme(), ptr, ty);
 
     emit_exception_return(&mut fn_ctx, &Ty::Void, context)?;
     emit_drop_all_owned(&mut fn_ctx)?;

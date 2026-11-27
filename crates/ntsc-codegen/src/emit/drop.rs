@@ -74,6 +74,109 @@ pub(crate) fn get_or_create_class_drop_thunk<'ctx>(
     Ok(function)
 }
 
+pub(crate) fn allocate_class<'ctx>(
+    fn_ctx: &FunctionContext<'ctx, '_>,
+    name: &str,
+    size: inkwell::values::IntValue<'ctx>,
+) -> Result<PointerValue<'ctx>, crate::CodegenError> {
+    let destructor = get_or_create_class_drop_thunk(fn_ctx.module, fn_ctx.context, name)?;
+    let alloc = fn_ctx
+        .module
+        .get_function("ntsc_class_alloc")
+        .expect("runtime declaration");
+    let call = fn_ctx.builder.build_call(
+        alloc,
+        &[
+            size.into(),
+            destructor.as_global_value().as_pointer_value().into(),
+        ],
+        "class_alloc",
+    )?;
+    Ok(call
+        .try_as_basic_value()
+        .unwrap_basic()
+        .into_pointer_value())
+}
+
+/// Each ordinary class reference in an owning value holds one count. Tuples
+/// carry their class references inline, including through nested tuples.
+pub(crate) fn has_class_reference(ty: &Ty) -> bool {
+    match ty {
+        Ty::Class(name) => is_class_type(name) && !enum_cell::is_payload_enum(name),
+        Ty::Tuple(elements) => elements.iter().any(has_class_reference),
+        _ => false,
+    }
+}
+
+pub(crate) fn adjust_class_references<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    val: &TypedValue<'ctx>,
+    retain: bool,
+) -> Result<(), crate::CodegenError> {
+    if let Ty::Tuple(elements) = &val.ntsc_type {
+        for (i, ty) in elements
+            .iter()
+            .enumerate()
+            .filter(|(_, ty)| has_class_reference(ty))
+        {
+            let v = fn_ctx.builder.build_extract_value(
+                val.value.into_struct_value(),
+                i as u32,
+                "class_element",
+            )?;
+            adjust_class_references(fn_ctx, &TypedValue::new(v, ty.clone()), retain)?;
+        }
+    } else if has_class_reference(&val.ntsc_type) {
+        let symbol = if retain {
+            "ntsc_class_retain"
+        } else {
+            "ntsc_class_release"
+        };
+        let f = fn_ctx
+            .module
+            .get_function(symbol)
+            .expect("runtime declaration");
+        let ptr = class_instance_pointer(fn_ctx, val.value)?;
+        fn_ctx.builder.build_call(f, &[ptr.into()], "")?;
+    }
+    Ok(())
+}
+
+pub(crate) fn acquire_class_value<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    expr: &Expr,
+    val: &TypedValue<'ctx>,
+) -> Result<(), crate::CodegenError> {
+    if has_class_reference(&val.ntsc_type) && !expr_is_fresh(fn_ctx, expr, val) {
+        adjust_class_references(fn_ctx, val, true)?;
+    }
+    Ok(())
+}
+
+/// Keep the acquired reference reachable if evaluation of the remaining
+/// operands unwinds. Clearing the slot transfers that reference to its
+/// destination. A catch inside a loop can revisit this slot before exit.
+pub(crate) fn hold_class_operand<'ctx>(
+    fn_ctx: &mut FunctionContext<'ctx, '_>,
+    expr: &Expr,
+    value: &TypedValue<'ctx>,
+) -> Result<Option<PointerValue<'ctx>>, crate::CodegenError> {
+    if !has_class_reference(&value.ntsc_type) {
+        return Ok(None);
+    }
+    acquire_class_value(fn_ctx, expr, value)?;
+    if !fn_ctx.exception_checks {
+        return Ok(None);
+    }
+    let slot = fn_ctx.alloca("class.operand", &value.ntsc_type)?;
+    emit_drop_slot_value(fn_ctx, slot, &value.ntsc_type)?;
+    fn_ctx.builder.build_store(slot, value.value)?;
+    fn_ctx
+        .shadowed_owned_slots
+        .push((slot, value.ntsc_type.clone()));
+    Ok(Some(slot))
+}
+
 /// A class instance normally travels as a raw pointer, but unwrapping a
 /// `shared Class` box yields the wrapped value's bits as an i64 (a box
 /// stores an i64 handle whatever it wraps). Recover the instance pointer
@@ -97,12 +200,15 @@ pub(crate) fn class_instance_pointer<'ctx>(
 /// value's static type owns a heap allocation: heap arrays (dropped via
 /// `ntsc_array_drop`, recursing into nested array elements first), heap
 /// strings (`ntsc_string_drop`), shared boxes (`ntsc_shared_release`), option
-/// cells, and class instances (per-class thunk, reclaiming owned fields only).
+/// cells, and reference-counted class instances.
 /// Scalars, views, and non-owned elements are no-ops.
 pub(crate) fn emit_drop_value<'ctx>(
     fn_ctx: &mut FunctionContext<'ctx, '_>,
     val: &TypedValue<'ctx>,
 ) -> Result<(), crate::CodegenError> {
+    if has_class_reference(&val.ntsc_type) {
+        return adjust_class_references(fn_ctx, val, false);
+    }
     if matches!(val.ntsc_type, Ty::Slice(_)) {
         if let Some(drop_fn) = fn_ctx.module.get_function("ntsc_slices_drop") {
             fn_ctx.builder.build_call(
@@ -147,6 +253,9 @@ pub(crate) fn emit_drop_value<'ctx>(
     // from) is a safe no-op.
     if let Ty::Own(inner) = &val.ntsc_type {
         let inner = (**inner).clone();
+        if has_class_reference(&inner) && matches!(inner, Ty::Class(_)) {
+            return adjust_class_references(fn_ctx, &TypedValue::new(val.value, inner), false);
+        }
         let ptr = val.value.into_pointer_value();
         let current_fn = fn_ctx.function;
         let body_bb = fn_ctx
@@ -499,21 +608,22 @@ pub(crate) fn emit_drop_replaced_value<'ctx>(
 /// drop can read it; keeping the single definition here keeps the two in
 /// step.
 pub(crate) fn ty_is_owned_handle(ty: &Ty) -> bool {
-    matches!(
-        ty,
-        Ty::Array(_)
-            | Ty::String
-            | Ty::Object
-            | Ty::Shared(_)
-            | Ty::Class(_)
-            | Ty::Chan(_)
-            | Ty::Option(_)
-            | Ty::Result { .. }
-            | Ty::Pointer
-            | Ty::Slice(_)
-            | Ty::Own(_)
-            | Ty::Dyn(_)
-    )
+    has_class_reference(ty)
+        || matches!(
+            ty,
+            Ty::Array(_)
+                | Ty::String
+                | Ty::Object
+                | Ty::Shared(_)
+                | Ty::Class(_)
+                | Ty::Chan(_)
+                | Ty::Option(_)
+                | Ty::Result { .. }
+                | Ty::Pointer
+                | Ty::Slice(_)
+                | Ty::Own(_)
+                | Ty::Dyn(_)
+        )
 }
 
 /// Drop the value currently stored in an owned variable slot, if the slot is
@@ -530,7 +640,14 @@ pub(crate) fn emit_drop_slot_value<'ctx>(
         let loaded = fn_ctx
             .builder
             .build_load(ty_to_llvm(ty, fn_ctx.context), ptr, "old_value")?;
-        emit_drop_value(fn_ctx, &TypedValue::new(loaded, ty.clone()))?;
+        if fn_ctx.stack_class_slots.contains(&ptr)
+            && let Ty::Class(name) = ty
+        {
+            let thunk = get_or_create_class_drop_thunk(fn_ctx.module, fn_ctx.context, name)?;
+            fn_ctx.builder.build_call(thunk, &[loaded.into()], "")?;
+        } else {
+            emit_drop_value(fn_ctx, &TypedValue::new(loaded, ty.clone()))?;
+        }
     }
     Ok(())
 }
@@ -573,54 +690,6 @@ pub(crate) fn emit_drop_all_owned<'ctx>(
     Ok(())
 }
 
-/// Drop the return-escape class locals this return does not hand to the caller.
-///
-/// These instances (see [`super::analyze_return_escape_class_drops`]) are kept
-/// out of `owned_slots`/`class_drops` because they escape through `return` on
-/// some path, so [`emit_drop_all_owned`] never touches them. On a return that
-/// yields a *different* value they do not escape, so their owned fields would
-/// leak. `returned` names the instance(s) this return moves out — already
-/// handled by the caller's move logic — so they are never dropped here and
-/// cannot be freed twice. Each slot is null-initialized and the drop thunk is
-/// null-safe, so a candidate not yet constructed is a no-op.
-pub(crate) fn drop_unreturned_escape_class_locals<'ctx>(
-    fn_ctx: &mut FunctionContext<'ctx, '_>,
-    returned: &[String],
-) -> Result<(), crate::CodegenError> {
-    if fn_ctx.future_base.is_some() {
-        return Ok(());
-    }
-    let mut names: Vec<String> = fn_ctx
-        .exception_class_drops
-        .iter()
-        .filter(|name| !returned.iter().any(|r| r == *name))
-        .cloned()
-        .collect();
-    names.sort();
-    for name in names {
-        if let Some((ptr, ty)) = fn_ctx.variables.get(&name).map(|(p, t)| (*p, t.clone())) {
-            emit_drop_slot_value(fn_ctx, ptr, &ty)?;
-        }
-    }
-    Ok(())
-}
-
-/// array literals and `copy(...)` (which deep-clones), string concatenation,
-/// `arrays.*`/`sort.*`/`random.shuffle` construction ops, calls to
-/// user-defined functions (their return convention hands an owned reference
-/// to the caller) and non-array module calls returning strings, and an owned
-/// element read out of a fresh container (copied before the container is
-/// dropped). Bare variables are *not* fresh: they are slots whose drop
-/// happens at their own exit; member loads and element reads are borrowed.
-/// The local variables whose owned value `expr` moves out of this scope.
-///
-/// A returned value is handed to the caller, so every local it moves must
-/// stop being dropped here or the caller receives an already-released
-/// handle. Only a local in a *value* position moves: a tuple or array
-/// element that is the variable itself. Everything else either borrows
-/// (an element or field read leaves its container owned here), duplicates
-/// (`copy(...)`), or produces a fresh value (a concatenation, a call), and
-/// nulling those slots would leak the original.
 pub(crate) fn moved_locals_in(
     fn_ctx: &FunctionContext<'_, '_>,
     expr: &Expr,
@@ -673,7 +742,16 @@ pub(crate) fn expr_is_fresh<'ctx>(
         return false;
     }
     match expr {
-        Expr::ArrayLiteral { .. } => true,
+        Expr::ArrayLiteral { .. } | Expr::StructLiteral { .. } | Expr::TupleLiteral { .. } => true,
+        Expr::Propagate { .. }
+        | Expr::Await { .. }
+        | Expr::Ternary { .. }
+        | Expr::Binary { .. }
+            if has_class_reference(&tv.ntsc_type) =>
+        {
+            true
+        }
+        Expr::TupleIndex { .. } if has_class_reference(&tv.ntsc_type) => true,
 
         // An object literal is built by `json.parse`-ing a freshly
         // concatenated source string, so the handle it yields has no
@@ -742,6 +820,10 @@ pub(crate) fn expr_is_fresh<'ctx>(
             // (callee defined later in the module) is still a fresh call.
             Expr::Variable { name } => {
                 is_user_function(name.lexeme())
+                    || matches!(
+                        fn_ctx.lookup_var(name.lexeme()),
+                        Some((_, Ty::Function { .. }))
+                    )
                     || is_class_type(name.lexeme())
                     || super::enum_cell::is_variant_name(name.lexeme())
             }
@@ -817,60 +899,6 @@ pub(crate) fn expr_is_fresh<'ctx>(
             }
             _ => false,
         },
-        _ => false,
-    }
-}
-
-/// Class elements whose ownership is transferred by a tuple expression.
-/// Tuples are LLVM aggregates, so the ordinary whole-value freshness check
-/// cannot identify ownership of an individual class field.
-pub(crate) fn owned_class_elements_in_tuple(expr: &Expr, tuple_ty: &Ty) -> HashSet<usize> {
-    let Ty::Tuple(element_tys) = tuple_ty else {
-        return HashSet::new();
-    };
-    match expr {
-        Expr::Grouping { expression, .. } => owned_class_elements_in_tuple(expression, tuple_ty),
-        Expr::TupleLiteral { elements, .. } => elements
-            .iter()
-            .enumerate()
-            .filter_map(|(index, element)| {
-                let class_ty = element_tys.get(index)?;
-                if matches!(class_ty, Ty::Class(_)) && tuple_class_expr_is_owned(element, class_ty)
-                {
-                    Some(index)
-                } else {
-                    None
-                }
-            })
-            .collect(),
-        Expr::Call { callee, .. } => {
-            let Expr::Variable { name } = callee.as_ref() else {
-                return HashSet::new();
-            };
-            let Some(Ty::Tuple(elements)) = function_declared_ret_ty(name.lexeme()) else {
-                return HashSet::new();
-            };
-            elements
-                .iter()
-                .enumerate()
-                .filter_map(|(index, element)| matches!(element, Ty::Class(_)).then_some(index))
-                .collect()
-        }
-        _ => HashSet::new(),
-    }
-}
-
-fn tuple_class_expr_is_owned(expr: &Expr, expected: &Ty) -> bool {
-    match expr {
-        Expr::Grouping { expression, .. } => tuple_class_expr_is_owned(expression, expected),
-        Expr::Variable { .. } => true,
-        Expr::Call { callee, .. } => {
-            let Expr::Variable { name } = callee.as_ref() else {
-                return false;
-            };
-            is_class_type(name.lexeme())
-                || matches!(function_declared_ret_ty(name.lexeme()), Some(ret) if &ret == expected)
-        }
         _ => false,
     }
 }
@@ -1004,6 +1032,14 @@ pub(crate) fn prepare_call_args<'ctx>(
             prepared.push(boxed);
             continue;
         }
+        if takes_ownership
+            && matches!(val.ntsc_type, Ty::Tuple(_))
+            && has_class_reference(&val.ntsc_type)
+        {
+            acquire_class_value(fn_ctx, arg, val)?;
+            prepared.push(val.clone());
+            continue;
+        }
         if !takes_ownership {
             prepared.push(val.clone());
             continue;
@@ -1053,6 +1089,10 @@ pub(crate) fn copy_owned_value<'ctx>(
     fn_ctx: &mut FunctionContext<'ctx, '_>,
     val: &TypedValue<'ctx>,
 ) -> Result<TypedValue<'ctx>, crate::CodegenError> {
+    if has_class_reference(&val.ntsc_type) {
+        adjust_class_references(fn_ctx, val, true)?;
+        return Ok(val.clone());
+    }
     let value = val.value;
     match &val.ntsc_type {
         Ty::Array(_) => emit_copy_value(fn_ctx, val.clone()),
@@ -1177,6 +1217,7 @@ pub(crate) fn box_option_value<'ctx>(
     let inner_llvm = ty_to_llvm(inner, fn_ctx.context);
     let cell = allocate_option_cell(fn_ctx, inner_llvm)?;
 
+    acquire_class_value(fn_ctx, expr, val)?;
     let inner_val = if matches!(*inner, Ty::String) && expr_is_string_literal(expr) {
         clone_string_value(fn_ctx, val)?
     } else {
@@ -1272,6 +1313,12 @@ pub(crate) fn store_into_owned_slot<'ctx>(
     expr: &Expr,
     val: &TypedValue<'ctx>,
 ) -> Result<bool, crate::CodegenError> {
+    if has_class_reference(ty) {
+        acquire_class_value(fn_ctx, expr, val)?;
+        emit_drop_slot_value(fn_ctx, ptr, ty)?;
+        fn_ctx.builder.build_store(ptr, val.value)?;
+        return Ok(true);
+    }
     if matches!(ty, Ty::Shared(_)) {
         let boxed = box_or_retain_shared(fn_ctx, ty, expr, val)?;
         fn_ctx.builder.build_store(ptr, boxed.value)?;

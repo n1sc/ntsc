@@ -21,6 +21,7 @@ pub(crate) fn emit_ternary<'ctx>(
 
     fn_ctx.builder.position_at_end(then_bb);
     let then_val = emit_expression(fn_ctx, then_branch)?;
+    acquire_class_value(fn_ctx, then_branch, &then_val)?;
     let then_ty = then_val.ntsc_type.clone();
 
     // Emitting a branch can itself open new blocks (a string literal builds
@@ -37,6 +38,7 @@ pub(crate) fn emit_ternary<'ctx>(
 
     fn_ctx.builder.position_at_end(else_bb);
     let else_val = emit_expression(fn_ctx, else_branch)?;
+    acquire_class_value(fn_ctx, else_branch, &else_val)?;
     let else_end = fn_ctx
         .builder
         .get_insert_block()
@@ -148,11 +150,12 @@ fn emit_if_false_chain<'ctx>(
 
 // ── Control flow: while ─────────────────────────────────────────────────
 
+/// Returns the backedge when the body can fall through to the next iteration.
 pub(crate) fn emit_while<'ctx>(
     fn_ctx: &mut FunctionContext<'ctx, '_>,
     condition: &Expr,
     body: &Stmt,
-) -> Result<(), crate::CodegenError> {
+) -> Result<Option<inkwell::values::InstructionValue<'ctx>>, crate::CodegenError> {
     let current_fn = fn_ctx.function;
 
     let cond_bb = fn_ctx.context.append_basic_block(current_fn, "while.cond");
@@ -172,7 +175,7 @@ pub(crate) fn emit_while<'ctx>(
 
     fn_ctx.builder.position_at_end(body_bb);
     emit_statement_in_function(fn_ctx, body)?;
-    if fn_ctx
+    let backedge = if fn_ctx
         .builder
         .get_insert_block()
         .unwrap()
@@ -182,12 +185,14 @@ pub(crate) fn emit_while<'ctx>(
         // Release values bound by the loop itself (never names from
         // outside it) before the next iteration overwrites their slots.
         fn_ctx.drop_loop_locals()?;
-        fn_ctx.builder.build_unconditional_branch(cond_bb)?;
-    }
+        Some(fn_ctx.builder.build_unconditional_branch(cond_bb)?)
+    } else {
+        None
+    };
 
     fn_ctx.builder.position_at_end(merge_bb);
     fn_ctx.pop_loop_targets();
-    Ok(())
+    Ok(backedge)
 }
 
 // ── Control flow: do-while ──────────────────────────────────────────────
@@ -463,9 +468,14 @@ pub(crate) fn emit_for_in<'ctx>(
         TypedValue::new(elem_val, elem_ty)
     };
     let var_ptr = fn_ctx.alloca(variable.lexeme(), &elem_tv.ntsc_type)?;
+    if has_class_reference(&elem_tv.ntsc_type) && class_iter.is_none() {
+        adjust_class_references(fn_ctx, &elem_tv, true)?;
+    }
     fn_ctx.builder.build_store(var_ptr, elem_tv.value)?;
     fn_ctx.define_var(variable.lexeme(), var_ptr, elem_tv.ntsc_type.clone());
-    if class_iter.is_some() {
+    if has_class_reference(&elem_tv.ntsc_type) {
+        fn_ctx.owned_slots.insert(variable.lexeme().to_owned());
+    } else if class_iter.is_some() {
         fn_ctx.mark_owned_if_heap(variable.lexeme(), &elem_tv.ntsc_type);
     }
 

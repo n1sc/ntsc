@@ -223,7 +223,16 @@ impl ModuleLoadResult {
 /// Resolve the `use`-file closure of `entry`, parsing every file in
 /// parallel and merging the ASTs into one program.
 pub fn load_program(entry: &Path) -> Result<ModuleLoadResult, ModuleLoadError> {
-    let graph = discover(entry)?;
+    load_program_with_buffers(entry, &HashMap::new())
+}
+
+/// Load the same module closure as a build, using open editor buffers in
+/// preference to files on disk. Buffer keys are absolute, canonical paths.
+pub fn load_program_with_buffers(
+    entry: &Path,
+    buffers: &HashMap<PathBuf, &str>,
+) -> Result<ModuleLoadResult, ModuleLoadError> {
+    let graph = discover_with_buffers(entry, buffers)?;
 
     // Parse all files concurrently; each module is independent once the
     // import graph is known.
@@ -234,7 +243,7 @@ pub fn load_program(entry: &Path) -> Result<ModuleLoadResult, ModuleLoadError> {
             .map(|path| {
                 scope.spawn(move || {
                     let start = Instant::now();
-                    let parsed = parse_file(path);
+                    let parsed = parse_file(path, buffers);
                     (path.clone(), parsed, start.elapsed())
                 })
             })
@@ -254,7 +263,7 @@ pub fn load_program(entry: &Path) -> Result<ModuleLoadResult, ModuleLoadError> {
             .collect::<Result<Vec<_>, _>>()
     })?;
 
-    let (program, origins, bases) = merge(&graph, &mut modules)?;
+    let (program, origins, bases) = merge(&graph, &mut modules, buffers)?;
 
     let mut sources = ntsc_diag::SourceMap::new();
     for module in &modules {
@@ -299,53 +308,49 @@ pub fn load_program(entry: &Path) -> Result<ModuleLoadResult, ModuleLoadError> {
 /// must stay inside it, so no file can reach outside the project through
 /// `../`.
 pub fn discover(entry: &Path) -> Result<ModuleGraph, ModuleLoadError> {
-    let mut files = Vec::new();
-    let mut edges = Vec::new();
-    let mut aliases = HashMap::new();
-    let mut seen = HashSet::new();
-    let mut stack = Vec::new();
+    discover_with_buffers(entry, &HashMap::new())
+}
 
-    let entry_canon = canonicalize(entry)?;
-    let root = entry_canon
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or(entry_canon.clone());
+fn discover_with_buffers(
+    entry: &Path,
+    buffers: &HashMap<PathBuf, &str>,
+) -> Result<ModuleGraph, ModuleLoadError> {
+    let entry = buffer_path(entry, buffers)?;
+    let root = entry.parent().unwrap_or(&entry);
+    let mut graph = ModuleGraph {
+        entry: entry.clone(),
+        files: Vec::new(),
+        edges: Vec::new(),
+        aliases: HashMap::new(),
+    };
     visit(
-        &entry_canon,
-        &root,
-        &mut files,
-        &mut edges,
-        &mut aliases,
-        &mut seen,
-        &mut stack,
+        &entry,
+        root,
+        &mut graph,
+        &mut HashSet::new(),
+        &mut Vec::new(),
+        buffers,
     )?;
-
-    Ok(ModuleGraph {
-        entry: entry_canon,
-        files,
-        edges,
-        aliases,
-    })
+    Ok(graph)
 }
 
 fn visit(
     path: &Path,
     root: &Path,
-    files: &mut Vec<PathBuf>,
-    edges: &mut Vec<(PathBuf, PathBuf)>,
-    aliases: &mut HashMap<PathBuf, String>,
+    graph: &mut ModuleGraph,
     seen: &mut HashSet<PathBuf>,
     stack: &mut Vec<PathBuf>,
+    buffers: &HashMap<PathBuf, &str>,
 ) -> Result<(), ModuleLoadError> {
     if !seen.insert(path.to_path_buf()) {
         return Ok(());
     }
     stack.push(path.to_path_buf());
 
-    for (import, alias) in file_imports(path, root)? {
-        edges.push((path.to_path_buf(), import.clone()));
+    for (import, alias) in file_imports(path, root, buffers)? {
+        graph.edges.push((path.to_path_buf(), import.clone()));
         if let Some(alias) = alias {
-            aliases.insert(import.clone(), alias);
+            graph.aliases.insert(import.clone(), alias);
         }
         if stack.contains(&import) {
             let mut chain: Vec<String> = stack.iter().map(|p| p.display().to_string()).collect();
@@ -355,11 +360,11 @@ fn visit(
                 chain,
             });
         }
-        visit(&import, root, files, edges, aliases, seen, stack)?;
+        visit(&import, root, graph, seen, stack, buffers)?;
     }
 
     stack.pop();
-    files.push(path.to_path_buf());
+    graph.files.push(path.to_path_buf());
     Ok(())
 }
 
@@ -367,6 +372,30 @@ fn canonicalize(path: &Path) -> Result<PathBuf, ModuleLoadError> {
     fs::canonicalize(path).map_err(|e| ModuleLoadError::Io {
         path: path.to_path_buf(),
         source: e,
+    })
+}
+
+fn buffer_path(path: &Path, buffers: &HashMap<PathBuf, &str>) -> Result<PathBuf, ModuleLoadError> {
+    if !buffers.is_empty()
+        && !path.exists()
+        && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+        && let Ok(parent) = fs::canonicalize(parent)
+    {
+        let candidate = parent.join(name);
+        if buffers.contains_key(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    canonicalize(path)
+}
+
+fn source_text(path: &Path, buffers: &HashMap<PathBuf, &str>) -> Result<String, ModuleLoadError> {
+    if let Some(text) = buffers.get(path) {
+        return Ok((*text).to_owned());
+    }
+    fs::read_to_string(path).map_err(|source| ModuleLoadError::Io {
+        path: path.into(),
+        source,
     })
 }
 
@@ -380,11 +409,9 @@ fn canonicalize(path: &Path) -> Result<PathBuf, ModuleLoadError> {
 fn file_imports(
     path: &Path,
     root: &Path,
+    buffers: &HashMap<PathBuf, &str>,
 ) -> Result<Vec<(PathBuf, Option<String>)>, ModuleLoadError> {
-    let source = fs::read_to_string(path).map_err(|e| ModuleLoadError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
+    let source = source_text(path, buffers)?;
     let tokens = ntsc_lexer::tokenize(&source);
     let parent = path.parent().unwrap_or(Path::new("."));
 
@@ -419,7 +446,7 @@ fn file_imports(
             }
         }
         if let Some(import) = import {
-            imports.push((resolve_import(root, parent, &import)?, alias));
+            imports.push((resolve_import(root, parent, &import, buffers)?, alias));
         } else if let Some(package_name) = package
             && let Some(package_path) = vendored_import(root, &package_name)
         {
@@ -437,18 +464,23 @@ fn file_imports(
 /// so `use "json"` reaches `.ntsc/json/lib.nt` without a relative path.
 /// The resolved path must stay inside `root` (or inside a vendor directory):
 /// a file cannot reach outside the project through `../`.
-fn resolve_import(root: &Path, parent: &Path, import: &str) -> Result<PathBuf, ModuleLoadError> {
+fn resolve_import(
+    root: &Path,
+    parent: &Path,
+    import: &str,
+    buffers: &HashMap<PathBuf, &str>,
+) -> Result<PathBuf, ModuleLoadError> {
     let candidate = if import.ends_with(".nt") {
         parent.join(import)
     } else {
         parent.join(format!("{import}.nt"))
     };
-    let candidate = if candidate.is_file() {
+    let candidate = if candidate.is_file() || buffers.contains_key(&candidate) {
         candidate
     } else {
         vendored_import(root, import).unwrap_or(candidate)
     };
-    let canonical = canonicalize(&candidate)?;
+    let canonical = buffer_path(&candidate, buffers)?;
     if !canonical.starts_with(root) && !is_vendored(root, &canonical) {
         return Err(ModuleLoadError::EscapesProjectRoot {
             path: canonical,
@@ -561,11 +593,11 @@ fn vendored_package(root: &Path, file: &Path) -> Option<PathBuf> {
     None
 }
 
-fn parse_file(path: &Path) -> Result<(String, Program), ModuleLoadError> {
-    let source = fs::read_to_string(path).map_err(|e| ModuleLoadError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
+fn parse_file(
+    path: &Path,
+    buffers: &HashMap<PathBuf, &str>,
+) -> Result<(String, Program), ModuleLoadError> {
+    let source = source_text(path, buffers)?;
     let tokens = ntsc_lexer::tokenize(&source);
     let program = ntsc_parser::parse(&tokens).map_err(|errors| ModuleLoadError::Parse {
         path: path.to_path_buf(),
@@ -598,6 +630,7 @@ struct ParsedModule {
 fn merge(
     graph: &ModuleGraph,
     modules: &mut [ParsedModule],
+    buffers: &HashMap<PathBuf, &str>,
 ) -> Result<(Program, Vec<PathBuf>, Vec<usize>), ModuleLoadError> {
     let mut by_path: HashMap<PathBuf, &mut ParsedModule> =
         modules.iter_mut().map(|m| (m.path.clone(), m)).collect();
@@ -664,7 +697,7 @@ fn merge(
         let own = crate::aliases::top_level_names(&module.program.statements);
         let module_private = private.get(path).cloned().unwrap_or_default();
         let imported = module_imports(&module.program.statements);
-        let aliases = module_aliases(&module.program.statements, path, &root);
+        let aliases = module_aliases(&module.program.statements, path, &root, buffers);
         let renames = crate::aliases::renames(
             &own,
             &module_private,
@@ -699,6 +732,7 @@ fn merge(
                 &private,
                 &display_names,
                 base,
+                buffers,
             ));
             // Bare file imports are dropped (their content is already part of
             // the flat program); aliased imports are preserved so the resolver
@@ -759,7 +793,12 @@ fn module_imports(statements: &[Stmt]) -> HashSet<String> {
 
 /// Aliases bound in one module: alias name -> imported module. Covers both
 /// `use "file.nt" as name` and vendored packages imported by bare name.
-fn module_aliases(statements: &[Stmt], importer: &Path, root: &Path) -> HashMap<String, PathBuf> {
+fn module_aliases(
+    statements: &[Stmt],
+    importer: &Path,
+    root: &Path,
+    buffers: &HashMap<PathBuf, &str>,
+) -> HashMap<String, PathBuf> {
     let parent = importer.parent().unwrap_or(Path::new("."));
     let mut aliases = HashMap::new();
     for stmt in statements {
@@ -775,7 +814,7 @@ fn module_aliases(statements: &[Stmt], importer: &Path, root: &Path) -> HashMap<
         };
         if *is_file_path {
             if let Some(alias) = alias
-                && let Ok(target) = resolve_import(root, parent, library.lexeme())
+                && let Ok(target) = resolve_import(root, parent, library.lexeme(), buffers)
             {
                 aliases.insert(alias.lexeme().to_string(), target);
             }
@@ -800,6 +839,7 @@ fn check_selective_import(
     private: &HashMap<PathBuf, HashSet<String>>,
     display_names: &HashMap<PathBuf, String>,
     span_base: usize,
+    buffers: &HashMap<PathBuf, &str>,
 ) -> Vec<Diagnostic> {
     let Stmt::Use {
         is_file_path: true,
@@ -814,7 +854,7 @@ fn check_selective_import(
         return Vec::new();
     }
     let parent = importer.parent().unwrap_or(Path::new("."));
-    let Ok(target) = resolve_import(root, parent, library.lexeme()) else {
+    let Ok(target) = resolve_import(root, parent, library.lexeme(), buffers) else {
         return Vec::new();
     };
     let Some(private_names) = private.get(&target) else {

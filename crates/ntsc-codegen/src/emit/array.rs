@@ -312,6 +312,28 @@ pub(crate) fn emit_rc_array_op<'ctx>(
             array_result_ty,
             &elem_ty,
         ),
+        "flat" if matches!(elem_ty, Ty::Array(_)) => {
+            let inner = array_elem_ty(&elem_ty);
+            let callee = fn_ctx
+                .module
+                .get_function("ntsc_array_flatten")
+                .ok_or_else(|| {
+                    crate::CodegenError::LLVMError("ntsc_array_flatten not declared".into())
+                })?;
+            let elem_size = i64_ty.const_int(array_elem_size(&inner) as u64, false);
+            let strings = ctx.i8_type().const_int(
+                u64::from(matches!(inner, Ty::String | Ty::Object | Ty::Any)),
+                false,
+            );
+            let result = fn_ctx.builder.build_call(
+                callee,
+                &[handle.into(), elem_size.into(), strings.into()],
+                "arr_flat",
+            )?;
+            let value = call_result_to_value(fn_ctx, &result);
+            emit_copy_in_owned_elements(fn_ctx, value.into_int_value(), &inner)?;
+            Ok(TypedValue::new(value, elem_ty))
+        }
         "clone" | "flat" => emit_unary_array_op_with_fixup(
             fn_ctx,
             "ntsc_array_clone",

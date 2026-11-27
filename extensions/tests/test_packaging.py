@@ -59,19 +59,24 @@ class WindowsPackagingTests(unittest.TestCase):
 
     def test_workflow_checks_bundled_tools_without_toolchain_path(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
-        verification = workflow.split("      - name: Verify bundled tools (Windows)\n", 1)[1]
+        verification = workflow.split("      - name: Verify standalone builds and binary sizes (Windows)\n", 1)[1]
         verification = verification.split("      - name: Build Windows tarball\n", 1)[0]
-        self.assertIn('$env:PATH = "$env:SystemRoot\\System32"', verification)
-        self.assertIn('@("ntsc.exe", "ld.lld.exe")', verification)
-        self.assertIn('Join-Path $pwd "dist/win/$name"', verification)
-        self.assertIn("if ($LASTEXITCODE -ne 0)", verification)
+        self.assertIn("test-windows-bundle.ps1 -BundleDirectory dist/win", verification)
+        script = (ROOT / "scripts/test-windows-bundle.ps1").read_text()
+        self.assertIn('$env:Path = "$env:SystemRoot\\System32"', script)
+        self.assertIn('@("ntsc.exe", "ld.lld.exe")', script)
+        self.assertIn('if ($LASTEXITCODE -ne 0)', script)
 
     @staticmethod
     def prepare_fixture(fixture):
         scripts = fixture / "scripts"
         scripts.mkdir()
-        for name in ("build-msi.ps1", "ntsc.wxs"):
+        for name in ("build-msi.ps1", "ntsc.wxs", "stage-mingw.ps1"):
             shutil.copyfile(PACKAGING / "windows" / name, scripts / name)
+        # Scripts invoked by build-msi.ps1 look next to themselves first,
+        # then at the repo copies it falls back to.
+        shutil.copyfile(ROOT / "scripts/windows-dll-dependencies.ps1", scripts / "windows-dll-dependencies.ps1")
+        shutil.copyfile(ROOT / "crates/ntsc-codegen/windows-link-libraries.txt", scripts / "windows-link-libraries.txt")
         shutil.copyfile(ROOT / "LICENSE", fixture / "LICENSE")
         source = fixture / "source"
         llvm = fixture / "llvm"
@@ -80,8 +85,10 @@ class WindowsPackagingTests(unittest.TestCase):
             path.mkdir()
         for name in ("ntsc.exe", "ntsc-pkg.exe", "ntsc-lsp.exe", "libntsc_runtime.a"):
             (source / name).write_bytes(b"fixture")
-        for name in ("LLVM-C.dll", "support-with-hyphen.dll", "ld.lld.exe"):
+        for name in ("LLVM-C.dll", "support-with-hyphen.dll", "ld.lld.exe", "linker-only.dll"):
             (llvm / name).write_bytes(b"fixture")
+        for name in ("crt2.o", "libmingw32.a", "libgcc.a", "libmingwex.a", "libmsvcrt.a"):
+            (mingw / name).write_bytes(b"fixture")
         (mingw / "libkernel32.a").write_bytes(b"fixture")
         for architecture in ("x64", "x86"):
             redist = fixture / "redist" / architecture / "Microsoft.VC145.CRT"
@@ -141,7 +148,6 @@ function wix {
   -GnuRuntimeLib ./source/libntsc_runtime.a `
   -PackageManager ./source/ntsc-pkg.exe -LanguageServer ./source/ntsc-lsp.exe
 ''')
-        (llvm / "linker-only.dll").write_bytes(b"fixture")
 
     @staticmethod
     def run_fixture(fixture, **overrides):
