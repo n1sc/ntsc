@@ -315,42 +315,29 @@ fn discover_with_buffers(
     entry: &Path,
     buffers: &HashMap<PathBuf, &str>,
 ) -> Result<ModuleGraph, ModuleLoadError> {
-    let mut files = Vec::new();
-    let mut edges = Vec::new();
-    let mut aliases = HashMap::new();
-    let mut seen = HashSet::new();
-    let mut stack = Vec::new();
-
-    let entry_canon = buffer_path(entry, buffers)?;
-    let root = entry_canon
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or(entry_canon.clone());
+    let entry = buffer_path(entry, buffers)?;
+    let root = entry.parent().unwrap_or(&entry);
+    let mut graph = ModuleGraph {
+        entry: entry.clone(),
+        files: Vec::new(),
+        edges: Vec::new(),
+        aliases: HashMap::new(),
+    };
     visit(
-        &entry_canon,
-        &root,
-        &mut files,
-        &mut edges,
-        &mut aliases,
-        &mut seen,
-        &mut stack,
+        &entry,
+        root,
+        &mut graph,
+        &mut HashSet::new(),
+        &mut Vec::new(),
         buffers,
     )?;
-
-    Ok(ModuleGraph {
-        entry: entry_canon,
-        files,
-        edges,
-        aliases,
-    })
+    Ok(graph)
 }
 
 fn visit(
     path: &Path,
     root: &Path,
-    files: &mut Vec<PathBuf>,
-    edges: &mut Vec<(PathBuf, PathBuf)>,
-    aliases: &mut HashMap<PathBuf, String>,
+    graph: &mut ModuleGraph,
     seen: &mut HashSet<PathBuf>,
     stack: &mut Vec<PathBuf>,
     buffers: &HashMap<PathBuf, &str>,
@@ -361,9 +348,9 @@ fn visit(
     stack.push(path.to_path_buf());
 
     for (import, alias) in file_imports(path, root, buffers)? {
-        edges.push((path.to_path_buf(), import.clone()));
+        graph.edges.push((path.to_path_buf(), import.clone()));
         if let Some(alias) = alias {
-            aliases.insert(import.clone(), alias);
+            graph.aliases.insert(import.clone(), alias);
         }
         if stack.contains(&import) {
             let mut chain: Vec<String> = stack.iter().map(|p| p.display().to_string()).collect();
@@ -373,11 +360,11 @@ fn visit(
                 chain,
             });
         }
-        visit(&import, root, files, edges, aliases, seen, stack, buffers)?;
+        visit(&import, root, graph, seen, stack, buffers)?;
     }
 
     stack.pop();
-    files.push(path.to_path_buf());
+    graph.files.push(path.to_path_buf());
     Ok(())
 }
 
