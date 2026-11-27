@@ -168,7 +168,7 @@ fun main() {
     say(s.upper(shared_text));
     {
         var Local s = Local();
-        say(s.split());
+        say("" + s.split());
     }
     say(s.split("a-b", "-"));
 }

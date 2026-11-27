@@ -8,7 +8,11 @@
 
 use super::*;
 
-pub(crate) fn declare_runtime_functions(module: &Module<'_>, target_triple: &str) {
+pub(crate) fn declare_runtime_functions(
+    module: &Module<'_>,
+    target_triple: &str,
+    report_leaks: bool,
+) {
     let ctx = module.get_context();
     let void_ty = ctx.void_type();
     let i64_ty = ctx.i64_type();
@@ -36,7 +40,9 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>, target_triple: &str
     // builds only).
     declare!("ntsc_runtime_shutdown", void_ty, i8_ty);
 
-    declare!("ntsc_leak_mark", void_ty, i64_ty, i64_ty, i64_ty);
+    if report_leaks {
+        declare!("ntsc_leak_mark", void_ty, i64_ty, i64_ty, i64_ty);
+    }
 
     declare!("ntsc_say", void_ty, i64_ty);
 
@@ -134,6 +140,7 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>, target_triple: &str
     declare!("ntsc_array_remove_at", i64_ty, i64_ty, i64_ty);
 
     declare!("ntsc_array_clone", i64_ty, i64_ty);
+    declare!("ntsc_array_flatten", i64_ty, i64_ty, i64_ty, i8_ty);
 
     declare!("ntsc_array_deep_clone", i64_ty, i64_ty, i64_ty);
 
@@ -154,6 +161,11 @@ pub(crate) fn declare_runtime_functions(module: &Module<'_>, target_triple: &str
     // ── Shared values ────────────────────────────────────────────────────
     // `release` returns the inner handle when the count hits 0 (the caller
     // owns it), 0 otherwise; `inner` borrows the wrapped value.
+
+    let ptr = ctx.ptr_type(AddressSpace::default());
+    declare!("ntsc_class_alloc", ptr, i64_ty, ptr);
+    declare!("ntsc_class_retain", void_ty, ptr);
+    declare!("ntsc_class_release", void_ty, ptr);
 
     declare!("ntsc_shared_new", i64_ty, i64_ty);
 

@@ -375,6 +375,11 @@ pub(crate) fn deref_shared<'ctx>(
             .builder
             .build_call(inner_fn, &[tv.value.into()], "shared_inner")?;
         let inner_val = call_result_to_value(fn_ctx, &result);
+        let inner_val = if matches!(inner.as_ref(), Ty::Class(_)) {
+            class_instance_pointer(fn_ctx, inner_val)?.into()
+        } else {
+            inner_val
+        };
         Ok(TypedValue::new(inner_val, (**inner).clone()))
     } else {
         Ok(tv)
@@ -406,10 +411,11 @@ pub(crate) fn box_or_retain_shared<'ctx>(
         }
         return Ok(val.clone());
     }
+    acquire_class_value(fn_ctx, expr, val)?;
     let inner_handle = if expr_is_string_literal(expr) && matches!(**inner, Ty::String) {
         clone_string_value(fn_ctx, val)?.into_int_value()
     } else {
-        val.value.into_int_value()
+        super::call::coerce_to_i64(fn_ctx, val.value)?
     };
     let new_fn = fn_ctx
         .module

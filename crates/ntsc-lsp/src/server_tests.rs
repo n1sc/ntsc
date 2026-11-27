@@ -675,3 +675,31 @@ fn inspect_real_project() {
         panic!("no callable Rust API reference found in the built project");
     }
 }
+
+#[test]
+fn imported_calls_check_live_signatures_and_report_local_spans() {
+    let project = Project::new("live_diagnostics");
+    let helper = project.file("helper.nt", "fun helper() -> int { return 7; }");
+    let main = project.file("main.nt", "");
+    let (connection, _) = Connection::memory();
+    let mut server = Server::new(&connection);
+    let main_text = "use \"helper.nt\"\nfun main() { var string answer = helper(); }";
+    let (uri, _) = open(&mut server, &main, main_text);
+    let errors = &server.project_diagnostics[uri.as_str()].types;
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        main_text[errors[0].span.start..errors[0].span.end].contains("answer")
+            || main_text[errors[0].span.start..errors[0].span.end].contains("helper")
+    );
+    let helper_uri = Url::from_file_path(&helper).unwrap();
+    server.documents.insert(
+        helper_uri.to_string(),
+        Document::new(
+            helper_uri,
+            2,
+            "fun helper() -> string { return \"ok\"; }".into(),
+        ),
+    );
+    server.refresh_workspace_files();
+    assert!(server.project_diagnostics[uri.as_str()].types.is_empty());
+}

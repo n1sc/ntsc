@@ -203,6 +203,13 @@ fn server_capabilities() -> ServerCapabilities {
 
 // ── Documents ─────────────────────────────────────────────────────────────
 
+#[derive(Default)]
+struct ProjectDiagnostics {
+    resolve: Vec<ntsc_typeck::ResolveError>,
+    types: Vec<ntsc_typeck::TypeError>,
+    warnings: Vec<ntsc_typeck::Warning>,
+}
+
 struct Document {
     uri: Url,
     version: i32,
@@ -284,6 +291,7 @@ struct Server<'a> {
     /// symbols work across module boundaries.
     workspace_files: HashMap<String, WorkspaceFile>,
     reachable_files: HashMap<String, std::collections::HashSet<String>>,
+    project_diagnostics: HashMap<String, ProjectDiagnostics>,
     metadata: MetadataCache,
     workspace_roots: Vec<PathBuf>,
     snippets_supported: bool,
@@ -317,6 +325,7 @@ impl<'a> Server<'a> {
             documents: HashMap::new(),
             workspace_files: HashMap::new(),
             reachable_files: HashMap::new(),
+            project_diagnostics: HashMap::new(),
             metadata: MetadataCache::default(),
             workspace_roots: Vec::new(),
             snippets_supported: false,
@@ -669,7 +678,7 @@ impl<'a> Server<'a> {
             // Load the import closure before diagnosing: cross-module
             // names must not read as undefined on open.
             self.refresh_workspace_files();
-            if let Some(document) = self.documents.get(uri.as_str()) {
+            for document in self.documents.values() {
                 self.publish_diagnostics(document);
             }
         } else if notification.method == "textDocument/didChange" {
@@ -696,6 +705,9 @@ impl<'a> Server<'a> {
             let key = params.text_document.uri.as_str().to_string();
             let _ = self.documents.remove(&key);
             self.refresh_workspace_files();
+            for document in self.documents.values() {
+                self.publish_diagnostics(document);
+            }
             let clear = PublishDiagnosticsParams {
                 uri: params.text_document.uri,
                 diagnostics: Vec::new(),
@@ -936,6 +948,98 @@ impl<'a> Server<'a> {
             self.reachable_files
                 .insert(document.uri.to_string(), reached);
         }
+        self.refresh_project_diagnostics(entries.values());
+    }
+
+    fn refresh_project_diagnostics<'b>(&mut self, entries: impl Iterator<Item = &'b String>) {
+        self.project_diagnostics.clear();
+        let mut sources = HashMap::new();
+        let mut uris = HashMap::new();
+        let mut standalone = Vec::new();
+        for document in self.documents.values() {
+            let Ok(path) = document.uri.to_file_path() else {
+                continue;
+            };
+            let path = path
+                .canonicalize()
+                .unwrap_or_else(|_| normalize_path(&path));
+            uris.insert(path.clone(), document.uri.as_str());
+            sources.insert(path.clone(), document.text.as_str());
+            if path
+                .parent()
+                .is_some_and(|dir| !file_imports_of(&document.analysis, dir).is_empty())
+            {
+                standalone.push(path);
+            }
+        }
+        let mut roots: Vec<_> = entries
+            .filter_map(|uri| Url::parse(uri).ok()?.to_file_path().ok())
+            .collect();
+        roots.sort();
+        standalone.sort();
+        roots.extend(standalone);
+        for entry in roots {
+            if uris
+                .get(&entry)
+                .is_some_and(|uri| self.project_diagnostics.contains_key(*uri))
+            {
+                continue;
+            }
+            let Ok(loaded) = ntsc_build::modules::load_program_with_buffers(&entry, &sources)
+            else {
+                continue;
+            };
+            if loaded.modules.len() == 1 {
+                continue;
+            }
+            let mut diagnostics: HashMap<_, _> = loaded
+                .graph
+                .files
+                .iter()
+                .filter_map(|path| Some((*uris.get(path)?, ProjectDiagnostics::default())))
+                .collect();
+            let local = |span: &mut ntsc_ast::span::Span| {
+                let (path, base) = loaded.localize(*span)?;
+                span.start -= base;
+                span.end -= base;
+                uris.get(&path).copied()
+            };
+            match ntsc_typeck::resolve_program(&loaded.program) {
+                Err(errors) => {
+                    for mut error in errors {
+                        if let Some(file) = local(&mut error.span)
+                            && let Some(group) = diagnostics.get_mut(file)
+                        {
+                            group.resolve.push(error);
+                        }
+                    }
+                }
+                Ok(()) => {
+                    for mut error in ntsc_typeck::check_program(&loaded.program)
+                        .err()
+                        .unwrap_or_default()
+                    {
+                        if let Some(file) = local(&mut error.span)
+                            && let Some(group) = diagnostics.get_mut(file)
+                        {
+                            group.types.push(error);
+                        }
+                    }
+                    for mut warning in ntsc_typeck::lint_program(&loaded.program) {
+                        if let Some(file) = local(&mut warning.span)
+                            && let Some(group) = diagnostics.get_mut(file)
+                        {
+                            group.warnings.push(warning);
+                        }
+                    }
+                }
+            }
+            for (uri, group) in diagnostics {
+                self.project_diagnostics
+                    .entry(uri.to_owned())
+                    .or_insert(group);
+            }
+        }
     }
 
     fn document_for(&self, uri: &Url) -> Option<&Document> {
@@ -971,12 +1075,10 @@ impl<'a> Server<'a> {
                 None,
             ));
         }
-        // Each file is analyzed alone, so a name imported from another
-        // module reads as undefined. When the import closure actually
-        // defines it, the error is an artifact of single-file analysis —
-        // suppress it rather than crying wolf on every cross-module call.
-        for error in &analysis.resolve_errors {
-            if let Some(name) = undefined_name_of(&error.message)
+        let project = self.project_diagnostics.get(document.uri.as_str());
+        for error in project.map_or(&analysis.resolve_errors, |group| &group.resolve) {
+            if project.is_none()
+                && let Some(name) = undefined_name_of(&error.message)
                 && self.workspace_knows(document, name)
             {
                 continue;
@@ -993,8 +1095,9 @@ impl<'a> Server<'a> {
                 None,
             ));
         }
-        for error in &analysis.type_errors {
-            if let Some(name) = undefined_name_of(&error.message)
+        for error in project.map_or(&analysis.type_errors, |group| &group.types) {
+            if project.is_none()
+                && let Some(name) = undefined_name_of(&error.message)
                 && self.workspace_knows(document, name)
             {
                 continue;
@@ -1011,7 +1114,7 @@ impl<'a> Server<'a> {
                 None,
             ));
         }
-        for warning in &analysis.warnings {
+        for warning in project.map_or(&analysis.warnings, |group| &group.warnings) {
             diagnostics.push(lsp_diagnostic(
                 document.range(warning.span.start, warning.span.end),
                 DiagnosticSeverity::WARNING,
@@ -2013,7 +2116,11 @@ impl<'a> Server<'a> {
         use lsp_types::CodeActionOrCommand;
         let document = self.document_for(&params.text_document.uri)?;
         let mut actions = Vec::new();
-        for error in &document.analysis.resolve_errors {
+        for error in self
+            .project_diagnostics
+            .get(document.uri.as_str())
+            .map_or(&document.analysis.resolve_errors, |group| &group.resolve)
+        {
             let Some(suggestion) = error.suggestion.as_deref() else {
                 continue;
             };

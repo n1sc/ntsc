@@ -69,6 +69,7 @@ fun main() {
     nums = arrays.reverse(nums);
     nums = arrays.shuffle(nums);
     nums = arrays.clear(nums);
+    var array[int] flattened = arrays.flat([[1], [2, 3]]);
     var array[string] texts = arrays.fill("x", 2);
     var string text = arrays.get(texts, 0);
     var string last = arrays.pop(texts);

@@ -134,6 +134,10 @@ pub(crate) fn emit_assign<'ctx>(
                 return Ok(val);
             }
 
+            if has_class_reference(&ty) {
+                store_into_owned_slot(fn_ctx, ptr, &ty, value, &val)?;
+                return Ok(val);
+            }
             // A `chan` slot holds one reference: take the new one before
             // releasing the old, so `ch = ch` cannot destroy the channel it
             // stores back.
@@ -161,22 +165,7 @@ pub(crate) fn emit_assign<'ctx>(
             // the same handle back and the identity guard inside the drop
             // leaves it alone. Loop-carried values are reclaimed on every
             // iteration, not just at exit.
-            //
-            // A return-escaping class local is reassigned before it is moved
-            // out: it never enters `owned_slots` (the final value belongs to
-            // the caller), but its previous value is still ours to reclaim.
-            // The value returned is only ever the final one, so dropping the
-            // replaced value here cannot free what the caller receives.
-            //
-            // A plain class local that scope-exit-drop reclaims (`class_drops`)
-            // must likewise drop the instance it currently holds before a new
-            // one overwrites it; membership in `class_drops` means the value is
-            // neither aliased nor escaping, so reclaiming it here is safe.
-            if fn_ctx.owned_slots.contains(name.lexeme())
-                || (matches!(ty, Ty::Class(_))
-                    && (fn_ctx.exception_class_drops.contains(name.lexeme())
-                        || fn_ctx.class_drops.contains(name.lexeme())))
-            {
+            if fn_ctx.owned_slots.contains(name.lexeme()) {
                 emit_drop_replaced_value(fn_ctx, ptr, &ty, &stored)?;
             }
             fn_ctx.builder.build_store(ptr, stored.value)?;
@@ -288,7 +277,8 @@ pub(crate) fn emit_destructure<'ctx>(
             TypedValue::new(value, Ty::String)
         };
 
-        let owned = matches!(bound.ntsc_type, Ty::Array(_) | Ty::String);
+        let owned = has_class_reference(&bound.ntsc_type)
+            || matches!(bound.ntsc_type, Ty::Array(_) | Ty::String);
         // The read borrows the container's own value, so an owned element
         // is copied before it gets a second owner.
         let bound = if owned && is_array {
@@ -308,7 +298,7 @@ pub(crate) fn emit_destructure<'ctx>(
         fn_ctx.builder.build_store(ptr, bound.value)?;
         fn_ctx.define_var(name.lexeme(), ptr, bound.ntsc_type.clone());
         if owned && fn_ctx.future_base.is_none() {
-            fn_ctx.mark_owned_if_heap(name.lexeme(), &bound.ntsc_type);
+            fn_ctx.owned_slots.insert(name.lexeme().to_owned());
         }
     }
     if expr_is_fresh(fn_ctx, initializer, &source) {
@@ -328,17 +318,7 @@ pub(crate) fn emit_tuple_destructure<'ctx>(
 ) -> Result<(), crate::CodegenError> {
     let source = emit_expression(fn_ctx, initializer)?;
     let source = deref_shared(fn_ctx, source)?;
-    let stored_tuple_ownership = if let Expr::Variable { name } = initializer {
-        fn_ctx
-            .tuple_class_elements
-            .remove(name.lexeme())
-            .unwrap_or_default()
-    } else {
-        HashSet::new()
-    };
     if let Ty::Tuple(element_tys) = &source.ntsc_type {
-        let expression_tuple_ownership =
-            owned_class_elements_in_tuple(initializer, &source.ntsc_type);
         let tuple_ll_ty = ty_to_llvm(&source.ntsc_type, fn_ctx.context);
         for (position, name) in names.iter().enumerate() {
             if position >= element_tys.len() {
@@ -353,18 +333,20 @@ pub(crate) fn emit_tuple_destructure<'ctx>(
                 )?;
                 let bound = TypedValue::new(extracted, element_ty.clone());
                 let ptr = fn_ctx.alloca(name.lexeme(), &bound.ntsc_type)?;
+                if has_class_reference(element_ty) {
+                    adjust_class_references(fn_ctx, &bound, true)?;
+                    emit_drop_slot_value(fn_ctx, ptr, element_ty)?;
+                }
                 fn_ctx.builder.build_store(ptr, bound.value)?;
                 fn_ctx.define_var(name.lexeme(), ptr, bound.ntsc_type.clone());
-                let class_owned = stored_tuple_ownership.contains(&position)
-                    || expression_tuple_ownership.contains(&position);
-                if class_owned {
-                    fn_ctx.class_drops.insert(name.lexeme().to_string());
-                }
                 if ty_is_owned_handle(element_ty) && fn_ctx.future_base.is_none() {
                     fn_ctx.mark_owned_if_heap(name.lexeme(), &bound.ntsc_type);
                 }
             }
         }
+    }
+    if expr_is_fresh(fn_ctx, initializer, &source) {
+        emit_drop_value(fn_ctx, &source)?;
     }
     Ok(())
 }

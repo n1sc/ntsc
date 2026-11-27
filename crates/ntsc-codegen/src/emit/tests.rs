@@ -36,10 +36,20 @@ fn emit_program(
 }
 
 #[test]
+fn leak_marks_follow_the_reporting_mode() {
+    let context = Context::create();
+    for report in [false, true] {
+        let module = context.create_module("leak_marks");
+        declare_runtime_functions(&module, crate::host_triple(), report);
+        assert_eq!(module.get_function("ntsc_leak_mark").is_some(), report);
+    }
+}
+
+#[test]
 fn runtime_callbacks_use_pointer_parameters() {
     let context = Context::create();
     let module = context.create_module("runtime_callback_abi");
-    declare_runtime_functions(&module, crate::host_triple());
+    declare_runtime_functions(&module, crate::host_triple(), true);
 
     let spawn = module
         .get_function("ntsc_process_spawn_thread")
@@ -56,7 +66,7 @@ fn runtime_callbacks_use_pointer_parameters() {
 fn pending_exception_fallback_uses_the_runtime_flag_type() {
     let context = Context::create();
     let module = context.create_module("exception_poll_fallback");
-    declare_runtime_functions(&module, "unknown-unknown-unknown");
+    declare_runtime_functions(&module, "unknown-unknown-unknown", true);
     assert!(module.get_global(EXCEPTION_SLOT).is_none());
 
     let function = module.add_function("run", context.i64_type().fn_type(&[], false), None);
@@ -303,13 +313,13 @@ fn escape_analysis_stack_allocates_local_usage() {
 }
 
 #[test]
-fn escape_analysis_supports_method_calls_and_copies() {
+fn escape_analysis_keeps_aliased_method_receivers_on_heap() {
     let (body, module) = parse_main_with_point(
         "fun main() {\n    var p = Point();\n    p.reset();\n    var q = p;\n    q.x = 1;\n    say(q.x);\n}",
     );
     let safe = stack_allocated(&body, &module);
-    assert!(safe.contains("p"));
-    assert!(safe.contains("q"));
+    assert!(!safe.contains("p"));
+    assert!(!safe.contains("q"));
 }
 
 #[test]
@@ -456,7 +466,7 @@ fun run(int n) -> int {
     };
     let context = Context::create();
     let module = context.create_module("exception_poll_ir");
-    declare_runtime_functions(&module, crate::host_triple());
+    declare_runtime_functions(&module, crate::host_triple(), true);
     let helper_ty = context
         .i64_type()
         .fn_type(&[context.i64_type().into()], false);
@@ -508,7 +518,7 @@ fun run(int n) -> int {
     };
     let context = Context::create();
     let module = context.create_module("no_poll_ir");
-    declare_runtime_functions(&module, crate::host_triple());
+    declare_runtime_functions(&module, crate::host_triple(), true);
     let helper_ty = context
         .i64_type()
         .fn_type(&[context.i64_type().into()], false);

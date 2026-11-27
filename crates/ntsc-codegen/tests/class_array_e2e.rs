@@ -57,6 +57,27 @@ fn compile_and_run(source: &str, test_id: &str) -> String {
 }
 
 #[test]
+fn flat_removes_one_dimension_and_owns_its_elements() {
+    let source = r#"use arrays
+fun main() {
+    var rows = [["one", "two"], ["three"]];
+    var words = arrays.flat(rows);
+    words[0] = "changed";
+    say(arrays.join(words, ","));
+    say(rows[0][0]);
+    var nums = arrays.flat([[[1, 2]], [[3]]]);
+    say("" + nums[0][1]);
+    var single = arrays.flat([4, 5]);
+    say("" + single[1]);
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "flat"),
+        "changed,two,three\none\n2\n5"
+    );
+}
+
+#[test]
 fn class_array_literal_and_field_reads() {
     let source = r#"use arrays
 class Astro {

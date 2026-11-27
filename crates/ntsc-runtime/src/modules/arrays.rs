@@ -164,8 +164,31 @@ pub extern "C" fn ntsc_arrays_some(arr: i64, pred: extern "C" fn(i64) -> i8) -> 
     i8::from(elements.into_iter().any(|elem| pred(elem) != 0))
 }
 
-/// `arrays.flat(arr)` — flatten one level (clone with the flatten flag;
-/// a no-op for one-dimensional arrays).
+/// Flatten an array known by codegen to contain arrays. The innermost
+/// element type determines the result layout even when every row is empty.
+#[unsafe(no_mangle)]
+pub extern "C" fn ntsc_array_flatten(arr: i64, elem_size: i64, strings: i8) -> i64 {
+    let out = registry::array_new(elem_size, 0, strings);
+    let Some(rows) = registry::with_array(arr, |array| array.elements.clone()) else {
+        registry::array_drop(out);
+        return super::throw_str("arrays.flat: expected an array".into());
+    };
+    for row in rows {
+        let Some(values) = registry::with_array(row, |array| array.elements.clone()) else {
+            registry::array_drop(out);
+            return super::throw_str("arrays.flat: expected a nested array".into());
+        };
+        for value in values {
+            if !registry::array_push(out, value) {
+                registry::array_drop(out);
+                return super::throw_str("arrays.flat: invalid array element".into());
+            }
+        }
+    }
+    out
+}
+
+/// Compatibility entry point for previously generated callers.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntsc_arrays_flat(arr: i64) -> i64 {
     registry::array_clone(arr, 1)

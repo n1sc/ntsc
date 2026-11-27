@@ -139,11 +139,11 @@ pub fn run_optimization_passes(
 ) -> Result<(), crate::CodegenError> {
     let _guard = CodegenLockGuard::acquire();
 
-    let passes = "default<O3>";
+    // The emitter declares the entire runtime ABI. Most programs use only
+    // a fraction of it, so discard unused declarations before running O3.
+    let passes = "strip-dead-prototypes,default<O3>";
     let options = inkwell::passes::PassBuilderOptions::create();
-    options.set_verify_each(true);
-    // Loop unrolling makes the array kernels slower: it duplicates the
-    // already-large versioned bodies and defeats the vectorizer's cost model.
+    // Unrolling duplicates versioned loops and can slow down array kernels.
     options.set_loop_unrolling(false);
     options.set_loop_vectorization(true);
     options.set_loop_slp_vectorization(true);
@@ -151,7 +151,11 @@ pub fn run_optimization_passes(
         .run_passes(passes, target_machine, options)
         .map_err(|e| {
             crate::CodegenError::LLVMError(format!("optimization pass pipeline failed: {e}"))
-        })
+        })?;
+    // Verify once at the end of O3. The emitter already verified the input.
+    module.verify().map_err(|error| {
+        crate::CodegenError::LLVMError(format!("optimized module verification failed: {error}"))
+    })
 }
 
 #[cfg(test)]

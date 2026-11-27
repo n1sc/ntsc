@@ -381,7 +381,7 @@ pub fn emit_module(
     // Declare runtime functions.
     let triple = target_machine.get_triple();
     let target_triple = triple.as_str().to_string_lossy();
-    declare_runtime_functions(&module, &target_triple);
+    declare_runtime_functions(&module, &target_triple, report_leaks);
 
     // Declare every top-level function up front so call sites resolve
     // regardless of definition order (required once `use` imports merge
@@ -704,7 +704,6 @@ pub(crate) fn emit_test_function<'ctx>(
         context,
     );
     fn_ctx.stack_allocated = analyze_stack_allocatable(body, module);
-    fn_ctx.class_drops = analyze_class_drops(body, module, &[]);
 
     for stmt in body {
         emit_statement_in_function(&mut fn_ctx, stmt)?;
