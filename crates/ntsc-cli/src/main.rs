@@ -653,14 +653,7 @@ fn print_version() {
     println!("Host   {}", ntsc_codegen::host_triple());
     println!("Build ID   {}", env!("NTSC_BUILD_ID"));
     println!("Build date {}", env!("NTSC_BUILD_DATE"));
-    println!(
-        "Build  {}",
-        if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        }
-    );
+    println!("Build  {}", env!("NTSC_BUILD_PROFILE"));
     if let Some(commit) = git_commit() {
         println!("Commit {commit}");
     }

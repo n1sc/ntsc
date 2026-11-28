@@ -3,12 +3,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".into());
-    let suffix = match (profile.as_str(), env::var_os("NTSC_PACKAGED_BUILD")) {
-        ("debug", _) => "d",
-        ("release", Some(_)) => "r",
-        ("release", None) => "t",
-        _ => "t",
+    let suffix = match profile.as_str() {
+        "release" if env::var("NTSC_PACKAGED_BUILD").as_deref() == Ok("1") => 'r',
+        "release" => 't',
+        _ => 'd',
     };
+    println!("cargo:rustc-env=NTSC_BUILD_PROFILE={profile}");
     let build_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();

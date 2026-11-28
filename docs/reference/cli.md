@@ -34,6 +34,9 @@ Flags may appear before or after the command.
 | `ntsc help [command]` | Print the command reference, or details for one command. |
 | `ntsc --help` / `-h` | Print usage to stdout. |
 
+The final character of the build ID in `ntsc --version` identifies how the compiler was built.
+Debug builds end in `d`, release builds from source end in `t`, and binaries packaged by the release workflow end in `r`.
+
 `ntsc init` creates exactly two files (and never overwrites an existing
 project):
 
