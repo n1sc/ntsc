@@ -560,7 +560,7 @@ fn run_cargo_build(adaptor_dir: &Path, out_dir: &Path, release: bool) -> CargoRe
         Ok((output.status.success(), stderr_log))
     };
 
-    println!("  Compiling adaptor {name}...");
+    eprintln!("   Compiling adaptor {name}");
 
     // Try online first so a newer patch release can still be picked up;
     // fall back to offline when the registry is unreachable (sandboxed

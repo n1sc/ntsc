@@ -1,3 +1,4 @@
+mod build_log;
 mod docgen;
 mod docs;
 mod ui;
@@ -831,16 +832,19 @@ fn cmd_init(project_name: Option<&str>) -> Result<(), CliError> {
 ///
 /// In test mode the user `main` is replaced by the test harness.
 fn cmd_build(release: bool, test_mode: bool, json: bool) -> Result<PathBuf, CliError> {
+    let build_start = Instant::now();
     let (cwd, config) = load_project()?;
     let mode = BuildMode::new(release);
+    let mut log = build_log::BuildLog::new(json);
     let entry_path = cwd.join(&config.entry);
 
     // Resolve and parse the module closure (in parallel).
+    log.status("Loading", display_rel(&cwd, &entry_path));
     let load_start = Instant::now();
     let loaded = ntsc_build::modules::load_program(&entry_path).map_err(load_error)?;
     ntsc_build::modules::check_vendored_compilers(&loaded.graph, NTSC_VERSION)
         .map_err(load_error)?;
-    let load_time = load_start.elapsed();
+    log.record("load", load_start.elapsed());
 
     // Experimental Rust-crate imports are opt-in: without the toggle the
     // build stops before resolution, adaptor generation, or codegen run.
@@ -879,47 +883,19 @@ fn cmd_build(release: bool, test_mode: bool, json: bool) -> Result<PathBuf, CliE
     let out_dir = cwd.join("build").join(mode.dir_name());
     fs::create_dir_all(&out_dir)?;
 
-    if !json {
-        let colour = colour_on(std::io::stdout().is_terminal());
-        let count = loaded.modules.len();
-        let noun = if count == 1 { "module" } else { "modules" };
-        println!("  {} {count} {noun}:", paint("Compiling", CYAN, colour));
-        for module in &loaded.modules {
-            println!(
-                "    {} ({:.1}ms)",
-                display_rel(&cwd, &module.path),
-                module.parse_duration.as_secs_f64() * 1000.0
-            );
-        }
-    }
-
     // Rust-crate dependencies: resolve, fetch, and emit every adaptor
     // *before* codegen so the export manifests exist — codegen reads them
     // to type Rust-call returns and enable method syntax on object
     // handles. The archives are built after codegen (only linking needs
     // them), through the same cached call.
     if !manifest.rust_deps.is_empty() {
+        log.status("Resolving", "Rust dependencies");
+        let prepare_start = Instant::now();
         let cache = ntsc_cargo::cache::CacheRoot::from_env();
         let resolution = ntsc_cargo::resolve::resolve_cached(&cache, &cwd, &manifest)
             .map_err(|e| CliError::Plain(e.to_string()))?;
-        let colour = colour_on(std::io::stdout().is_terminal());
-        let total = resolution.deps.len();
-        if !json && total > 0 {
-            let noun = if total == 1 { "adaptor" } else { "adaptors" };
-            println!("  {} {total} {noun}:", paint("Generating", CYAN, colour));
-        }
-        for (index, dep) in resolution.deps.iter().enumerate() {
-            // Announce the crate before the slow fetch + public-API scan, so
-            // a large dependency (serenity et al.) never looks like a hang.
-            if !json {
-                println!(
-                    "    [{:>width$}/{total}] {} v{}",
-                    index + 1,
-                    paint(&dep.name, CYAN, colour),
-                    dep.version,
-                    width = total.to_string().len(),
-                );
-            }
+        for dep in &resolution.deps {
+            log.status("Preparing", format_args!("{} v{}", dep.name, dep.version));
             ntsc_cargo::resolve::materialize_dep(
                 &cache,
                 &cwd,
@@ -929,15 +905,27 @@ fn cmd_build(release: bool, test_mode: bool, json: bool) -> Result<PathBuf, CliE
             )
             .map_err(|e| CliError::Plain(e.to_string()))?;
         }
+        log.record("prepare", prepare_start.elapsed());
     }
+
+    let count = loaded.modules.len();
+    let noun = if count == 1 { "module" } else { "modules" };
+    log.status(
+        "Compiling",
+        format_args!("{} ({count} {noun}, {})", config.output, config.target),
+    );
 
     // The runtime archive and the generated object only meet at link time.
     // Keep codegen on this thread because it consumes thread-local type tables.
     let needed_features = detect_runtime_features(&loaded.program);
     ntsc_codegen::emit::set_rust_export_types(&cwd);
-    let (obj_path, codegen_time, runtime_lib) = std::thread::scope(|scope| {
-        let runtime = scope
-            .spawn(|| find_runtime_lib(&cwd, &needed_features, release).map_err(CliError::from));
+    let (obj_path, codegen_time, (runtime_lib, runtime_time)) = std::thread::scope(|scope| {
+        let runtime = scope.spawn(|| {
+            let start = Instant::now();
+            let lib =
+                find_runtime_lib(&cwd, &needed_features, release, &log).map_err(CliError::from)?;
+            Ok::<_, CliError>((lib, start.elapsed()))
+        });
         let codegen_start = Instant::now();
         let object = ntsc_codegen::compile_program(
             &loaded.program,
@@ -955,10 +943,20 @@ fn cmd_build(release: bool, test_mode: bool, json: bool) -> Result<PathBuf, CliE
         Ok::<_, CliError>((object, elapsed, runtime??))
     })?;
 
+    log.record("codegen", codegen_time);
+    log.record("runtime", runtime_time);
+
     // Rust-crate dependencies: make sure every [rust-deps] crate is
     // resolved, fetched, and its adaptor built, then link the compiled
     // adaptor archives beside the runtime.
+    if !manifest.rust_deps.is_empty() {
+        log.status("Assembling", "Rust adaptor archives");
+    }
+    let archive_start = Instant::now();
     let adaptor_artifacts = rust_dep_archives(&cwd, release)?;
+    if !manifest.rust_deps.is_empty() {
+        log.record("archives", archive_start.elapsed());
+    }
     let mut native_link_args = adaptor_artifacts.native_link_args.clone();
     native_link_args.extend(config.ffi_search_paths.iter().map(|search_path| {
         let path = Path::new(search_path);
@@ -987,6 +985,7 @@ fn cmd_build(release: bool, test_mode: bool, json: bool) -> Result<PathBuf, CliE
         }
     }));
     let output_path = out_dir.join(ntsc_codegen::with_executable_extension(&config.output));
+    log.status("Linking", display_rel(&cwd, &output_path));
     let link_start = Instant::now();
     ntsc_codegen::link_binary_with_extras(
         &obj_path,
@@ -995,23 +994,12 @@ fn cmd_build(release: bool, test_mode: bool, json: bool) -> Result<PathBuf, CliE
         &native_link_args,
         &output_path,
     )?;
-    let link_time = link_start.elapsed();
-
-    if !json {
-        let colour = colour_on(std::io::stdout().is_terminal());
-        println!(
-            "  {} load {:.1}ms, codegen {:.1}ms, link {:.1}ms",
-            paint("Timing", CYAN, colour),
-            load_time.as_secs_f64() * 1000.0,
-            codegen_time.as_secs_f64() * 1000.0,
-            link_time.as_secs_f64() * 1000.0
-        );
-        println!(
-            "  {} {mode:?} build at {}",
-            paint("Finished", GREEN, colour),
-            output_path.display()
-        );
-    }
+    log.record("link", link_start.elapsed());
+    log.finish(
+        mode,
+        build_start.elapsed(),
+        fs::metadata(&output_path).ok().map(|m| m.len()),
+    );
 
     if json {
         println!(
@@ -1186,14 +1174,7 @@ fn cmd_test(release: bool, json: bool) -> Result<PathBuf, CliError> {
 fn cmd_run(release: bool, json: bool) -> Result<PathBuf, CliError> {
     let output_path = cmd_build(release, false, json)?;
 
-    if !json {
-        let colour = colour_on(std::io::stdout().is_terminal());
-        println!(
-            "  {} {}...",
-            paint("Running", CYAN, colour),
-            output_path.display()
-        );
-    }
+    build_log::BuildLog::new(json).status("Running", output_path.display());
     let status = std::process::Command::new(&output_path)
         .status()
         .map_err(|e| CliError::Plain(format!("failed to run `{}`: {e}", output_path.display())))?;
@@ -1326,14 +1307,15 @@ fn cmd_watch(release: bool, json: bool) -> Result<(), CliError> {
     };
 
     let mut last_signature = project_signature(&cwd, &config)?;
-    println!("Watching for changes (Ctrl-C to stop)...");
+    let log = build_log::BuildLog::new(json);
+    log.status("Watching", "for changes (Ctrl-C to stop)");
     rebuild();
 
     loop {
         std::thread::sleep(Duration::from_millis(400));
         match project_signature(&cwd, &config) {
             Ok(signature) if signature != last_signature => {
-                println!("  Change detected, rebuilding...");
+                log.status("Rebuilding", "after a source change");
                 last_signature = signature;
                 rebuild();
             }
@@ -1509,6 +1491,7 @@ fn find_runtime_lib(
     project_dir: &Path,
     needed_features: &[String],
     release: bool,
+    log: &build_log::BuildLog,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let lib_name = ntsc_codegen::runtime_lib_name();
 
@@ -1616,14 +1599,8 @@ fn find_runtime_lib(
     args.push("--target-dir".to_string());
     args.push(target_dir.display().to_string());
 
-    println!(
-        "  Building runtime ({})...",
-        if feature_key.is_empty() {
-            "core".to_string()
-        } else {
-            key.clone()
-        }
-    );
+    log.status("Building", format_args!("runtime ({key})"));
+    args.push("--quiet".to_string());
     let status = std::process::Command::new("cargo")
         .args(&args)
         .current_dir(&rewrite_dir)
