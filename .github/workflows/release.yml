@@ -295,6 +295,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
+        env:
+          NTSC_PACKAGED_BUILD: "1"
         run: cargo build -p ntsc-cli --release
 
       # ntsc-cli links ntsc-lsp as a library for `ntsc lsp`, but cargo only
@@ -322,6 +324,11 @@ jobs:
           $ErrorActionPreference = "Stop"
           $exe = if ($IsWindows) { "ntsc.exe" } else { "ntsc" }
           $cli = Join-Path $pwd "target/release/$exe"
+          $banner = & $cli --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not ($banner -cmatch '^Build ID\s+\S+r$')) {
+            throw "Expected release CI build ID ending in r. Got: $banner"
+          }
           Push-Location "crates/ntsc-pkg"
           try {
             & $cli build --release
