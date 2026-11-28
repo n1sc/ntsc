@@ -53,16 +53,21 @@ name/
 
 ## Build output
 
-A successful build prints, for each module, its parse time:
+Build status lines go to stderr by default. A release build might print:
 
-```
-  Compiling 1 module:
-    src/main.nt (0.1ms)
-  Timing load 0.2ms, codegen 3.4ms, link 1.1ms
-  Finished Debug build at /path/to/build/debug/hello
+```text
+     Loading src/main.nt
+   Compiling ntsc-pkg (11 modules, x86_64-unknown-linux-gnu)
+    Building runtime (crypto,http)
+     Linking build/release/ntsc-pkg
+      Timing load 11 ms, codegen 5.05 s, runtime 64 ms, link 45 ms
+    Finished `release` profile [optimized] in 5.17 s (3.2 MiB binary)
 ```
 
-`ntsc run` additionally prints `Running /path/to/build/debug/hello...`.
+Code generation and runtime preparation can overlap. The total on the
+`Finished` line is elapsed wall-clock time. Projects with Rust dependencies
+also report adaptor preparation. With `ntsc run`, a `Running` line names the
+executable and the program can write its own output to stdout.
 
 ## Help and the interactive screen
 

@@ -194,8 +194,8 @@ merged program, and compiles it as one unit. Declaration order does not
 matter: `lib.nt` can call a function defined later in the same file, and
 `main.nt` can use classes defined in an imported file.
 
-Modules are loaded in parallel during the build, and the build output prints
-the parse duration of each one.
+The compiler loads modules in parallel. The build log reports the module count
+and the elapsed time for the load phase.
 
 ## Dependency graph
 

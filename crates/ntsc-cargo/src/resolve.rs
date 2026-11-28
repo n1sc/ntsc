@@ -116,7 +116,7 @@ pub fn resolve_and_fetch(
 
     crate::manifest::write_lock(project_dir, &resolution.deps)?;
     for dep in &resolution.deps {
-        println!("Installed {} {}", dep.name, dep.version);
+        eprintln!("   Installed {} v{}", dep.name, dep.version);
     }
     Ok(resolution.deps)
 }
